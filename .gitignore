@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+.venv/
+venv/
+*.arrow
+*.bin
+*.safetensors
+*.gguf
+wandb/
+output/
+checkpoints/
+*.log
+.DS_Store
