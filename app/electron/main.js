@@ -39,7 +39,11 @@ function initAutoUpdate() {
 }
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+// Prefer a private, machine-specific override (config.local.json) that is gitignored and never
+// bundled into the installer, so a distributed build never carries anyone's personal paths.
+// Falls back to the committed template config.json.
+const _LOCAL_CONFIG = path.join(__dirname, 'config.local.json');
+const CONFIG_PATH = fs.existsSync(_LOCAL_CONFIG) ? _LOCAL_CONFIG : path.join(__dirname, 'config.json');
 
 function loadConfig() {
   const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));

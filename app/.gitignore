@@ -47,3 +47,6 @@ dist/
 # Oxpecker dev_server runtime state (sessions, findings, RAG offsets)
 agent/web/dev_data/
 agent/knowledge_rag/index/*.offsets.npy
+
+# Private machine-specific runtime config (paths to llama/model/RAG) — never commit or ship
+electron/config.local.json

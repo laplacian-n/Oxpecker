@@ -25,6 +25,7 @@
     "directories": { "buildResources": "build", "output": "dist" },
     "files": [
       "electron/**/*",
+      "!electron/config.local.json",
       "build/icon.png",
       "agent/web/dev_server.py",
       "agent/web/static/**/*"

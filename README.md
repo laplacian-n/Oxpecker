@@ -19,6 +19,20 @@ The [`app/`](app/) directory contains the **runnable, self-hosted desktop versio
 
 Safety is enforced the same way as the research design intends — an allowlisted engagement scope that the agent hard-refuses to step outside of, a destructive-command block, and sandboxed/isolated execution — so the app only ever acts against targets the operator has explicitly authorized.
 
+> **Configuration:** `app/electron/config.json` is a **template** with placeholder paths. Copy it to `app/electron/config.local.json` (gitignored, never shipped) and point it at your own `llama-server`, model, and RAG index.
+
+---
+
+## ⚠️ Responsible Use
+
+Oxpecker is **dual-use, research/educational software**. Use it **only against systems you own or are explicitly authorized to test** — self-hosted labs (OWASP Juice Shop, DVWA), CTF / boot2root VMs (VulnHub, HTB), and local containers on `localhost` / private networks. **Never** point it at production systems, third-party services, or any host you are not authorized to test; unauthorized access is illegal in most jurisdictions.
+
+- The agent **hard-enforces an allowlisted scope** and refuses out-of-scope targets; the default engagement ships empty / localhost-only.
+- The **fine-tuned model and RAG knowledge base are gated** — released by request only via Hugging Face (institutional/identity verification), not bundled in this repository.
+- See **[SECURITY.md](SECURITY.md)** for the full responsible-use policy and how to report a vulnerability in Oxpecker itself.
+
+This software is provided for research and education **as-is, without warranty**. You are solely responsible for ensuring your use is lawful and authorized.
+
 ---
 
 ## Preliminary Results
