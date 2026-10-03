@@ -1,0 +1,44 @@
+name: tests
+
+# Dormant until this repo has a GitHub remote to push to (none as of writing — see
+# doc/handoff.md's "Toward real-world use" section). Ready to go the moment it does; nothing
+# else needs to change. Real safety net until then is the local deploy/pre-commit hook
+# (installed via `cp deploy/pre-commit .git/hooks/pre-commit`), which runs the same fast subset.
+#
+# Known gap, disclosed rather than papered over: this project's `.venv` is layered on the
+# system Python (`.venv/bin/python3` symlinks to `/usr/bin/python3`, not an isolated
+# interpreter), so `pip freeze` here would dump the whole Ubuntu Python install, not just this
+# project's actual dependencies — there's no clean, accurate requirements.txt to install from
+# yet. The `doc/requirements-*.txt` files below are the best real signal that exists (pinned
+# versions from when each phase's dependencies were added), concatenated; expect this step to
+# need real attention (a proper consolidated, minimal requirements.txt) before this workflow is
+# fully trustworthy, not just uncommented.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  fast-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies (best-effort — see the note above)
+        run: |
+          pip install --upgrade pip
+          cat doc/requirements-*.txt 2>/dev/null | grep -v '^#' | grep -v '^\s*$' | sort -u > /tmp/requirements.txt
+          pip install -r /tmp/requirements.txt
+      - name: Run the fast test subset (no live model / Playwright — matches deploy/pre-commit)
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
+          failed=0
+          for f in $(find agent -name "test_*.py" ! -path "*/web/*"); do
+            mod="$(echo "$f" | sed 's#/#.#g; s#\.py$##')"
+            echo "::group::$mod"
+            python3 -m "$mod" || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"

@@ -1,0 +1,21 @@
+# Prompt registry manifest — M4.7 skeleton. Compile order matters: safety/authority layers
+# come first and are never overridden by later layers (enforced by the compiler concatenating
+# in this fixed order, not by asking the model nicely — see 02-review-of-hackerai-proposals.md
+# §4.4's correction that "safety.md first" alone doesn't prevent override, only the broker
+# actually enforcing policy externally does; this ordering is a clarity/audit convention, not
+# the security boundary).
+version: 1
+layers:
+  - core_identity.md
+  - authorization.md
+  - data_provenance.md
+  - action_protocol.md
+  - reporting.md
+  - engagement.md.j2
+# Phase-specific prompts (agent/prompts/phases/) and tool cards (agent/prompts/tools/) are not
+# listed here — they're conditional layers compiler.py appends only when a `phase`/
+# `active_tools` argument is passed to compile_prompt(), not part of every compile. All 6
+# pipeline phases (agent.engagement.store.PHASES) have a file; tool cards exist for the 5
+# tools live in the model-callable surface today (run_command, read_file, write_file,
+# http_recon, port_discovery) and are optional per-tool — a tool without a card just
+# contributes nothing, it isn't an error.

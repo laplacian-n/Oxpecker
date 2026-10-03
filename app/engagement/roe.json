@@ -1,0 +1,9 @@
+{
+  "engagement_id": "lab-default",
+  "description": "Default local lab engagement — solo operator's own machine, no third party involved. Intentionally-vulnerable practice targets only (OWASP Juice Shop, DVWA, Metasploitable), run in Docker bound to loopback.",
+  "authorized_by": "self (solo operator, personal lab environment)",
+  "authorized_at": "2026-08-31T00:00:00Z",
+  "valid_from": "2026-08-31T00:00:00Z",
+  "valid_until": "2027-08-31T00:00:00Z",
+  "allowed_action_classes": ["passive_recon", "active_scan_light", "knowledge_search", "knowledge_fetch"]
+}

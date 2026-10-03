@@ -1,0 +1,8 @@
+# Immutable hard-deny list (APTS-SE-009) — checked FIRST, before scope.txt. Deny always wins,
+# even if an entry here would otherwise also match the allowlist. Not meant to be edited
+# per-engagement; this is a permanent safety net independent of what's in scope.txt.
+#
+# Cloud metadata endpoints — classic SSRF pivot target, never a legitimate scan target even
+# inside an authorized engagement.
+169.254.169.254/32
+fd00:ec2::254/128

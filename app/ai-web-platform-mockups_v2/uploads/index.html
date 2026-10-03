@@ -1,0 +1,3185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>localAI agent</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2325c39a'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='18' font-weight='700' text-anchor='middle' fill='%23102a22'%3EL%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Palette adapted from the owner's own Claude-Design mockup (ai-web-platform-mockups/) —
+     visual language ported, but every interactive element here is wired to a real backend
+     capability. No Projects/Billing/multi-account/"Environment: Cloud" — those had no backend
+     behind them in the mockup and would just be buttons that do nothing here. */
+  :root {
+    --bg: oklch(16% 0.008 264); --bg-side: oklch(13.5% 0.008 264); --bg-card: oklch(20% 0.008 264);
+    --bg-hover: oklch(23% 0.009 264); --bg-pill: oklch(26% 0.009 264); --border: oklch(30% 0.009 264);
+    --border-strong: oklch(36% 0.01 264); --text: oklch(95% 0.004 90); --text-dim: oklch(82% 0.005 90);
+    --text-muted: oklch(64% 0.008 264); --text-faint: oklch(53% 0.008 264); --accent: oklch(72% 0.15 165);
+    --accent-ink: oklch(16% 0.008 264); --warn-bg: oklch(24% 0.035 60); --warn-border: oklch(38% 0.07 60);
+    --warn-text: oklch(82% 0.1 65); --mono: 'JetBrains Mono', ui-monospace, monospace;
+    --accent-dim: oklch(72% 0.15 165 / 0.16); --critical: oklch(68% 0.19 25); --critical-dim: oklch(68% 0.19 25 / 0.16);
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.32);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.10); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.2); background-clip: content-box; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes scaleIn { from { opacity: 0; transform: scale(.96) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+  #app { display: flex; height: 100vh; width: 100%; position: relative; overflow: hidden; }
+
+  /* --- sidebar --- */
+  #sidebar { width: 276px; flex: none; display: flex; flex-direction: column; background: var(--bg-side); border-right: 1px solid var(--border); padding: 14px 10px 10px; }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 14px; }
+  .brand .mark { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); display: flex; align-items: center; justify-content: center; font: 700 14px var(--mono); color: var(--accent-ink); }
+  .brand .name { font: 600 14px var(--mono); letter-spacing: .02em; }
+  .brand .name span { color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 9px; cursor: pointer; font: 500 13.5px Inter; color: var(--text-dim); }
+  .row:hover { background: var(--bg-hover); color: var(--text); }
+  #newSessionBtn { background: var(--accent-dim); color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+  #newSessionBtn:hover { background: var(--accent-dim); filter: brightness(1.35); }
+  #approvalsBtn { position: relative; margin-bottom: 8px; }
+  #approvalsBtn .badge { background: var(--accent); color: var(--accent-ink); font: 700 10.5px Inter; border-radius: 9px; padding: 1px 6px; margin-left: auto; }
+  #sessionSearch {
+    width: 100%; margin: 4px 0 6px; background: var(--bg-pill); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 10px; font: 400 12.5px Inter; color: var(--text); outline: none;
+  }
+  #sessionSearch:focus { border-color: var(--border-strong); }
+  #sessionList { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; padding-bottom: 8px; }
+  .sess-group-label { font: 600 10px Inter; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); padding: 12px 10px 5px; }
+  .session-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 10px; border-radius: 9px;
+    cursor: pointer; color: var(--text-dim); min-width: 0;
+  }
+  .session-item:hover { background: var(--bg-hover); }
+  .session-item.active { background: var(--bg-hover); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+  .session-item .si-main { flex: 1; min-width: 0; }
+  .session-item .si-title { font: 500 13px Inter; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-item .si-sub { font: 400 11px Inter; color: var(--text-faint); margin-top: 1px; display: flex; gap: 6px; align-items: center; }
+  .session-item .si-live { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+  .session-item .si-del {
+    flex: none; width: 22px; height: 22px; border: none; background: transparent; color: var(--text-faint);
+    border-radius: 6px; cursor: pointer; display: none; align-items: center; justify-content: center;
+  }
+  .session-item:hover .si-del { display: flex; }
+  .session-item .si-del:hover { background: var(--critical-dim); color: var(--critical); }
+  #sessionListEmpty { padding: 20px 10px; font: 400 12.5px Inter; color: var(--text-faint); text-align: center; }
+
+  /* --- main --- */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+
+  #home { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 24px; }
+  #home h1 { font: 600 30px Inter; margin-bottom: 8px; color: oklch(97% 0.004 90); text-align: center; letter-spacing: -0.01em; }
+  #home .home-sub { font: 400 14px Inter; color: var(--text-muted); margin-bottom: 26px; text-align: center; }
+
+  .composer { width: 100%; max-width: 720px; background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 16px; padding: 15px 17px; position: relative; transition: border-color .12s; }
+  .composer:focus-within { border-color: oklch(72% 0.15 165 / 0.5); }
+  .composer textarea { width: 100%; background: transparent; border: none; outline: none; color: var(--text); font: 400 15px/1.5 Inter; resize: none; min-height: 48px; font-family: inherit; }
+  .composer textarea::placeholder { color: var(--text-faint); }
+  .composer-controls { display: flex; align-items: center; gap: 7px; margin-top: 8px; flex-wrap: wrap; }
+  .pill { display: flex; align-items: center; gap: 5px; background: var(--bg-pill); border: 1px solid transparent; border-radius: 8px; padding: 6px 10px; font: 500 12px Inter; cursor: pointer; white-space: nowrap; user-select: none; position: relative; color: var(--text-dim); }
+  .pill:hover { background: var(--bg-hover); border-color: var(--border); }
+  .pill svg { color: var(--text-muted); }
+  .pill-menu { position: absolute; bottom: calc(100% + 6px); left: 0; min-width: 230px; background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; z-index: 50; animation: scaleIn .12s ease-out; }
+  .pill-menu-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 9px; border-radius: 7px; cursor: pointer; font: 500 13px Inter; }
+  .pill-menu-item:hover { background: var(--bg-hover); }
+  .pill-menu-item .check { color: var(--accent); }
+  .send-btn { width: 32px; height: 32px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; cursor: pointer; border: none; flex: none; transition: filter .1s; }
+  .send-btn:hover { filter: brightness(1.1); }
+  .send-btn:disabled { opacity: .35; cursor: default; }
+  .spacer { flex: 1; }
+  .danger-toggle { display: flex; align-items: center; gap: 5px; font: 500 12px Inter; color: var(--text-muted); cursor: pointer; }
+  .danger-toggle.on { color: var(--warn-text); }
+
+  /* --- chat --- */
+  #chatHeader { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; background: var(--bg-side); flex: none; }
+  #chatHeader .hd-main { min-width: 0; flex: 1; }
+  #chatHeader .title { font: 600 14px Inter; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #chatHeader .meta { font: 400 11.5px Inter; color: var(--text-muted); margin-top: 3px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #chatHeader .meta .chip { background: var(--bg-pill); border-radius: 5px; padding: 1px 7px; color: var(--text-dim); }
+  #chatHeader .actions { display: flex; align-items: center; gap: 4px; flex: none; }
+  #chatHeader .actions button {
+    background: none; border: 1px solid transparent; color: var(--text-muted); font: 500 12.5px Inter;
+    cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 6px 9px; border-radius: 7px;
+  }
+  #chatHeader .actions button:hover { color: var(--text); background: var(--bg-hover); }
+  #chatHeader .actions #stopAutonomousBtn { color: var(--warn-text); }
+
+  #chatBody { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+  .resize-handle {
+    flex: none; width: 6px; cursor: col-resize; background: transparent; position: relative; z-index: 5;
+  }
+  .resize-handle::after {
+    content: ""; position: absolute; inset: 0 2px; background: var(--border); transition: background .12s;
+  }
+  .resize-handle:hover::after, .resize-handle.dragging::after { background: var(--accent); }
+  body.resizing { cursor: col-resize; user-select: none; }
+  body.resizing iframe { pointer-events: none; }
+  #transcriptCol { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
+  #transcript { flex: 1; overflow-y: auto; padding: 24px 0 8px; min-height: 0; scroll-behavior: smooth; }
+  #transcriptInner { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 0 28px; }
+  #transcriptInner > * { animation: slideUp .16s ease-out; }
+
+  .bubble-user {
+    align-self: flex-end; max-width: 84%; background: var(--accent-dim); color: var(--text);
+    border: 1px solid oklch(72% 0.15 165 / 0.25); border-radius: 14px 14px 4px 14px; padding: 10px 15px;
+    font: 400 14px/1.55 Inter; white-space: pre-wrap; word-break: break-word;
+  }
+  .assistant-msg { display: flex; gap: 12px; align-self: stretch; }
+  .assistant-msg.streaming .text-block > :last-child::after {
+    content: "▍"; color: var(--accent); margin-left: 1px; animation: blink 1s step-start infinite;
+  }
+  @media (prefers-reduced-motion: reduce) { .assistant-msg.streaming .text-block > :last-child::after { animation: none; } }
+  .assistant-msg .av {
+    flex: none; width: 26px; height: 26px; border-radius: 7px; background: var(--bg-pill); color: var(--accent);
+    display: flex; align-items: center; justify-content: center; font: 700 11px var(--mono); margin-top: 1px;
+  }
+  .text-block { flex: 1; min-width: 0; font: 400 14.5px/1.68 Inter; color: var(--text-dim); overflow-wrap: anywhere; }
+  .system-block { align-self: center; display: flex; align-items: center; gap: 7px; font: 400 12px Inter; color: var(--text-faint); }
+
+  /* markdown prose inside assistant messages */
+  .md > *:first-child { margin-top: 0; } .md > *:last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 10px; } .md h1, .md h2, .md h3 { margin: 16px 0 8px; font-weight: 600; line-height: 1.3; color: var(--text); }
+  .md h1 { font-size: 1.35em; } .md h2 { font-size: 1.18em; } .md h3 { font-size: 1.05em; }
+  .md ul, .md ol { margin: 0 0 10px; padding-left: 22px; } .md li { margin: 3px 0; }
+  .md code { font: 400 .88em var(--mono); background: var(--bg-pill); padding: 1px 5px; border-radius: 4px; }
+  .md pre { background: oklch(12% 0.008 264); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; overflow: auto; margin: 0 0 12px; max-width: 100%; max-height: 420px; }
+  .md pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.65; color: var(--text-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .md blockquote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--border-strong); color: var(--text-muted); }
+  .md a { color: var(--accent); text-decoration: none; } .md a:hover { text-decoration: underline; }
+  .md hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .md strong { color: var(--text); font-weight: 600; }
+  .md table { border-collapse: collapse; margin: 0 0 12px; font-size: 13px; }
+  .md th, .md td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
+
+  /* collapsed driver/context injection */
+  .context-block {
+    align-self: stretch; border: 1px dashed var(--border-strong); border-radius: 9px; overflow: hidden;
+  }
+  .context-block .cb-head {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
+    font: 500 12px Inter; color: var(--text-muted); user-select: none;
+  }
+  .context-block .cb-head:hover { color: var(--text-dim); background: var(--bg-hover); }
+  .context-block .cb-body {
+    padding: 10px 14px; border-top: 1px solid var(--border); font: 400 12.5px/1.55 var(--mono);
+    color: var(--text-muted); white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow-y: auto;
+  }
+  .context-block.collapsed .cb-body { display: none; }
+  /* live model "thinking" trace — same collapsible shell, italicized to read as the model's own
+     voice rather than injected context */
+  .reasoning-block .cb-body { font: 400 12.5px/1.6 Inter; font-style: italic; }
+
+  /* tool activity */
+  .tool-chip {
+    display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 11px; font: 500 12.5px Inter; color: var(--text-dim); cursor: pointer; align-self: flex-start;
+    max-width: 100%; background: var(--bg-card);
+  }
+  .tool-chip:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  .tool-chip svg { color: var(--text-muted); }
+  .tool-chip.flagged { border-color: var(--warn-border); color: var(--warn-text); }
+  .tool-chip.flagged svg { color: var(--warn-text); }
+  .tool-chip .verdict { font: 600 10px Inter; text-transform: uppercase; background: var(--warn-border); color: var(--warn-text); border-radius: 4px; padding: 1px 5px; margin-left: 4px; }
+  .tool-result { align-self: flex-start; margin-top: -12px; font: 400 11.5px/1.5 var(--mono); color: var(--text-faint); padding-left: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool-group { align-self: flex-start; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-card); overflow: hidden; max-width: 100%; }
+  .tool-group .tg-head {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px; cursor: pointer; user-select: none;
+    font: 500 12.5px Inter; color: var(--text-dim);
+  }
+  .tool-group .tg-head:hover { background: var(--bg-hover); }
+  .tool-group .tg-head .tg-count { color: var(--text-faint); font-family: var(--mono); font-size: 11px; }
+  .tool-group .tg-body { border-top: 1px solid var(--border); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .tool-group.collapsed .tg-body { display: none; }
+
+  .warning-block { align-self: stretch; background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 10px; padding: 13px 15px; }
+  .warning-block .head { display: flex; align-items: center; gap: 8px; font: 600 13px Inter; color: var(--warn-text); margin-bottom: 4px; }
+  .warning-block .body { font: 400 13px/1.55 Inter; color: oklch(82% 0.02 65); }
+
+  /* working indicator */
+  .typing { align-self: stretch; display: flex; gap: 12px; }
+  .typing .av { flex: none; width: 26px; height: 26px; border-radius: 7px; background: var(--bg-pill); color: var(--accent); display: flex; align-items: center; justify-content: center; font: 700 11px var(--mono); }
+  .typing .dots { display: flex; align-items: center; gap: 4px; padding-top: 8px; }
+  .typing .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: blink 1.4s infinite both; }
+  .typing .dots i:nth-child(2) { animation-delay: .2s; } .typing .dots i:nth-child(3) { animation-delay: .4s; }
+  @media (prefers-reduced-motion: reduce) { .typing .dots i { animation: none; opacity: .6; } }
+
+  #jumpLatest {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 96px; z-index: 15;
+    background: var(--bg-card); border: 1px solid var(--border-strong); color: var(--text-dim);
+    border-radius: 999px; padding: 6px 14px; font: 500 12px Inter; cursor: pointer; box-shadow: var(--shadow);
+    display: flex; align-items: center; gap: 6px; animation: slideUp .15s ease-out;
+  }
+  #jumpLatest:hover { color: var(--text); }
+
+  #composerDock { padding: 8px 24px 20px; flex: none; }
+  #composerDock .composer { max-width: 780px; margin: 0 auto; padding: 12px 16px; box-shadow: var(--shadow); }
+  #composerDock .composer textarea { max-height: 200px; overflow-y: auto; }
+
+  /* --- computer (tool output) panel --- */
+  #computerPanel { width: var(--computer-w, 440px); flex: none; border-left: 1px solid var(--border); background: var(--bg-side); display: flex; flex-direction: column; animation: fadeIn .12s ease-out; min-width: 280px; }
+  #computerPanel .head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  #computerPanel .head .title { font: 600 13.5px Inter; }
+  #computerPanel .head svg { cursor: pointer; opacity: .6; }
+  #computerPanel .subtitle { padding: 10px 18px; font: 400 11.5px Inter; color: var(--text-muted); }
+  #computerPanel .subtitle span { color: var(--accent); }
+  #computerPanel .query-line { margin: 0 18px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font: 400 12.5px var(--mono); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #computerPanel pre { flex: 1; overflow: auto; margin: 0 18px 16px; background: oklch(12% 0.008 264); border: 1px solid var(--border); border-radius: 9px; padding: 13px 15px; font: 400 12.5px/1.7 var(--mono); color: var(--text-dim); white-space: pre-wrap; word-break: break-word; }
+
+  /* --- approvals drawer --- */
+  #approvalsDrawer { position: fixed; top: 0; right: 0; bottom: 0; width: 360px; background: var(--bg-side); border-left: 1px solid var(--border); z-index: 60; display: flex; flex-direction: column; animation: fadeIn .12s ease-out; }
+  #approvalsDrawer.hidden { display: none; }
+  #approvalsDrawer .head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  #approvalsDrawer .head .title { font: 600 14px Inter; }
+  #approvalsDrawer .list { flex: 1; overflow-y: auto; padding: 12px; }
+  .approval-card { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font: 400 12.5px Inter; }
+  .approval-card .who { font: 600 12px Inter; color: var(--warn-text); margin-bottom: 4px; }
+  .approval-card .reason { font: 400 12px var(--mono); color: oklch(80% 0.02 65); white-space: pre-wrap; word-break: break-word; margin-bottom: 8px; }
+  .approval-card .btns { display: flex; gap: 8px; }
+  .approval-card .btns button { flex: 1; padding: 6px; font: 500 12px Inter; border: none; border-radius: 6px; cursor: pointer; }
+  .approval-card .approve { background: var(--accent); color: var(--accent-ink); }
+  .approval-card .decline { background: var(--bg-pill); color: var(--text); }
+  #approvalsEmpty { padding: 24px 12px; color: var(--text-muted); font: 400 13px Inter; text-align: center; }
+  #scrim { position: fixed; inset: 0; z-index: 44; }
+  .hidden { display: none !important; }
+
+  /* --- engagement modal --- */
+  #modalScrim { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; }
+  #engagementModal { width: 420px; max-width: calc(100vw - 32px); max-height: 80vh; overflow-y: auto; background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 14px; padding: 18px; animation: scaleIn .12s ease-out; }
+  #engagementModal .modal-title { font: 600 15px Inter; margin-bottom: 12px; }
+  .eng-item { padding: 9px 10px; border-radius: 8px; cursor: pointer; font: 500 13px Inter; }
+  .eng-item:hover { background: var(--bg-hover); }
+  .eng-item .id { color: var(--text); }
+  .eng-item .desc { font: 400 11.5px Inter; color: var(--text-muted); margin-top: 2px; }
+  .eng-new-row { padding: 9px 10px; border-radius: 8px; cursor: pointer; font: 500 13px Inter; color: var(--accent); border-top: 1px solid var(--border); margin-top: 6px; padding-top: 12px; }
+  .field-label { font: 600 11.5px Inter; color: var(--text-muted); margin: 10px 0 4px; }
+  .field-input { width: 100%; background: var(--bg-pill); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font: 400 13px Inter; color: var(--text); outline: none; }
+  .field-input:focus { border-color: var(--accent); }
+  .modal-btns { display: flex; gap: 8px; margin-top: 16px; }
+  .modal-btns button { flex: 1; padding: 8px; font: 500 13px Inter; border: none; border-radius: 7px; cursor: pointer; }
+  .modal-btns .primary { background: var(--accent); color: var(--accent-ink); }
+  .modal-btns .secondary { background: var(--bg-pill); color: var(--text); }
+  .modal-error { color: var(--warn-text); font: 400 12px Inter; margin-top: 8px; }
+
+  /* --- autonomous / consult events in the transcript --- */
+  .phase-group { align-self: stretch; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg-card); }
+  .phase-block { display: flex; align-items: center; gap: 8px; font: 600 12.5px Inter; color: var(--accent); padding: 10px 14px; cursor: pointer; user-select: none; }
+  .phase-group .phase-block:hover { background: var(--bg-hover); }
+  .phase-group.done .phase-block { color: var(--text-dim); }
+  .phase-group .pg-body { border-top: 1px solid var(--border); padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; }
+  .phase-group.collapsed .pg-body { display: none; }
+  .autonomous-block { font: 400 12px/1.5 Inter; color: var(--text-muted); }
+  .autonomous-block .ab-ok { color: var(--accent); } .autonomous-block .ab-no { color: var(--critical); }
+
+  /* Live plan/todo panel — pinned above the transcript during an autonomous run, a birds-eye
+     view of the current phase's tasks (pending/running/done) that doesn't require scrolling
+     back through the log to answer "what's left". */
+  #todoPanel {
+    flex: none; align-self: stretch; max-width: 780px; width: 100%; margin: 14px auto 0;
+    border: 1px solid var(--border-strong); border-radius: 11px; background: var(--bg-card); overflow: hidden;
+  }
+  #todoPanel.collapsed .todo-list { display: none; }
+  #todoPanel .todo-head {
+    display: flex; align-items: center; gap: 8px; padding: 9px 14px; cursor: pointer; user-select: none;
+    font: 600 12.5px Inter; color: var(--text-dim);
+  }
+  #todoPanel .todo-head:hover { background: var(--bg-hover); }
+  #todoPanel .todo-chevron { margin-left: auto; transition: transform .12s; }
+  #todoPanel.collapsed .todo-chevron { transform: rotate(-90deg); }
+  #todoPanel .todo-list { border-top: 1px solid var(--border); padding: 6px 8px; max-height: 220px; overflow-y: auto; }
+  .todo-item { display: flex; align-items: center; gap: 9px; padding: 6px 10px; border-radius: 7px; font: 400 12.5px Inter; }
+  .todo-item .ti-icon { flex: none; width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; }
+  .todo-item .ti-label { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text-dim); }
+  .todo-item .ti-entity { color: var(--text-faint); font: 400 11px var(--mono); margin-left: 6px; }
+  .todo-item.pending .ti-icon { color: var(--text-faint); }
+  .todo-item.pending .ti-label { color: var(--text-faint); }
+  .todo-item.running { background: var(--accent-dim); }
+  .todo-item.running .ti-icon { color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  .todo-item.done .ti-icon { color: var(--accent); }
+  .todo-item.done .ti-label { color: var(--text-faint); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+  .todo-item.blocked .ti-icon, .todo-item.failed .ti-icon { color: var(--critical); }
+  .todo-item.blocked .ti-label, .todo-item.failed .ti-label { color: var(--critical); }
+  .blocked-block { align-self: stretch; background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 10px; padding: 12px 14px; font: 400 13px Inter; color: var(--warn-text); }
+  .consult-card { align-self: stretch; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px; box-shadow: 0 0 0 3px var(--accent-dim); }
+  .consult-card .question { font: 500 13.5px Inter; margin-bottom: 10px; }
+  .consult-card textarea { width: 100%; background: var(--bg-pill); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font: 400 12.5px Inter; color: var(--text); outline: none; resize: vertical; min-height: 40px; margin-bottom: 8px; }
+  .consult-card .btns { display: flex; gap: 8px; }
+  .consult-card .btns button { flex: 1; padding: 7px; font: 500 12.5px Inter; border: none; border-radius: 6px; cursor: pointer; }
+  .consult-card .continue { background: var(--accent); color: var(--accent-ink); }
+  .consult-card .stop { background: var(--bg-pill); color: var(--text); }
+  .consult-card.answered { opacity: .6; pointer-events: none; }
+
+  svg.icon { flex: none; }
+
+  /* --- chat-anchor highlight (Hypothesis Tree "Go to …" buttons) --- */
+  @keyframes anchorFlash { 0%, 70% { background: var(--accent-dim); } 100% { background: transparent; } }
+  .anchor-highlight { animation: anchorFlash 2s ease-out; border-radius: 8px; box-shadow: 0 0 0 2px var(--accent-dim); }
+  #backToGraphPill {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 30;
+    background: var(--accent); color: var(--accent-ink); border: none; border-radius: 999px;
+    padding: 7px 14px; font: 600 12px Inter; cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.4);
+    animation: fadeIn .12s ease-out;
+  }
+
+  /* --- Hypothesis Tree panel --- */
+  #graphView {
+    position: absolute; inset: 0; z-index: 40; background: var(--bg);
+    display: flex; flex-direction: column; animation: fadeIn .12s ease-out;
+  }
+  #graphView .g-header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    border-bottom: 1px solid var(--border); background: var(--bg-side); flex: none;
+  }
+  #graphView .g-title { font: 600 14.5px Inter; white-space: nowrap; }
+  #graphView .g-meta { display: flex; gap: 14px; font: 400 12px Inter; color: var(--text-muted); flex-wrap: wrap; }
+  #graphView .g-meta b { color: var(--text-dim); font-weight: 600; font-family: var(--mono); }
+  #graphView .g-controls { display: flex; gap: 8px; margin-left: auto; align-items: center; position: relative; }
+  #graphView .g-btn {
+    background: var(--bg-pill); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 7px; padding: 6px 11px; font: 500 12.5px Inter; cursor: pointer; white-space: nowrap;
+  }
+  #graphView select.g-btn { padding: 6px 8px; }
+  #graphView .g-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  #graphView .g-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+  #graphStatsPanel {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 25; width: 280px;
+    background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 10px;
+    padding: 12px 14px; box-shadow: 0 12px 32px rgba(0,0,0,.5); font: 400 12px Inter; color: var(--text-dim);
+  }
+  #graphStatsPanel h4 { margin: 0 0 4px; font: 600 10px Inter; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); }
+  #graphStatsPanel .st-group { margin-bottom: 10px; }
+  #graphStatsPanel .st-group:last-child { margin-bottom: 0; }
+  #graphStatsPanel .st-row { display: flex; justify-content: space-between; padding: 2px 0; }
+  #graphStatsPanel .st-row span:last-child { color: var(--text); font-family: var(--mono); }
+  #graphView .g-active-path {
+    padding: 8px 20px; font: 400 12.5px Inter; color: var(--text-muted); flex: none;
+    border-bottom: 1px solid var(--border); background: var(--bg-side); display: flex; gap: 8px; align-items: baseline;
+  }
+  #graphView .g-active-path b { color: var(--accent); font-weight: 600; font-family: var(--mono); }
+  #graphView .g-scale-banner {
+    padding: 7px 20px; font: 400 12px Inter; color: var(--warn-text); flex: none;
+    background: var(--warn-bg); border-bottom: 1px solid var(--warn-border); display: flex; gap: 10px; align-items: center;
+  }
+  .g-tabs { display: flex; gap: 4px; }
+  .g-tab {
+    background: none; border: none; border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    font: 600 13px Inter; color: var(--text-muted);
+  }
+  .g-tab:hover { color: var(--text-dim); background: var(--bg-hover); }
+  .g-tab.active { color: var(--text); background: var(--bg-pill); }
+
+  /* --- Notebook view --- */
+  #notebookView { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #notebookFilters {
+    display: flex; gap: 10px; align-items: center; padding: 10px 20px; flex-wrap: wrap; flex: none;
+    border-bottom: 1px solid var(--border); background: var(--bg-side);
+  }
+  #notebookFilters input {
+    background: var(--bg-pill); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 7px; padding: 6px 10px; font: 500 12px Inter; outline: none;
+  }
+  #notebookFilters input:focus { border-color: var(--border-strong); }
+  #notebookCats { display: flex; gap: 5px; flex-wrap: wrap; }
+  .nb-cat {
+    font: 600 10.5px Inter; padding: 4px 9px; border-radius: 999px; cursor: pointer;
+    background: var(--bg-pill); color: var(--text-muted); border: 1px solid transparent; white-space: nowrap;
+  }
+  .nb-cat:hover { color: var(--text-dim); }
+  .nb-cat.active { background: var(--accent-dim); color: var(--accent); }
+  .nb-cat .nb-count { opacity: .6; margin-left: 4px; font-family: var(--mono); }
+  #notebookList { flex: 1; overflow-y: auto; padding: 14px 20px 40px; max-width: 900px; width: 100%; margin: 0 auto; }
+  .nb-section-label { font: 600 10px Inter; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); margin: 14px 0 8px; }
+  .nb-section-label:first-child { margin-top: 0; }
+  .nb-note {
+    display: flex; gap: 12px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg-card); margin-bottom: 8px;
+  }
+  .nb-note.resolved { opacity: .5; }
+  .nb-note .nb-tag {
+    flex: none; font: 700 9px Inter; text-transform: uppercase; letter-spacing: .03em; padding: 3px 7px;
+    border-radius: 5px; background: var(--bg-pill); color: var(--text-muted); align-self: flex-start; height: fit-content;
+  }
+  .nb-note .nb-tag.dead-end { background: var(--critical-dim); color: var(--critical); }
+  .nb-note .nb-tag.todo { background: var(--warn-bg); color: var(--warn-text); }
+  .nb-note .nb-tag.technique { background: var(--accent-dim); color: var(--accent); }
+  .nb-note .nb-body { flex: 1; min-width: 0; }
+  .nb-note .nb-text { font: 400 13px/1.5 Inter; color: var(--text-dim); overflow-wrap: anywhere; }
+  .nb-note .nb-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; font: 400 11px Inter; color: var(--text-faint); }
+  .nb-note .nb-ord { font-family: var(--mono); }
+  .nb-note .nb-meta .nb-chip { background: var(--bg-pill); border-radius: 4px; padding: 1px 6px; color: var(--text-muted); }
+  .nb-note .nb-actions { display: flex; gap: 6px; flex: none; align-items: flex-start; }
+  .nb-note .nb-btn {
+    background: var(--bg-pill); border: 1px solid var(--border); color: var(--text-dim); border-radius: 6px;
+    padding: 4px 9px; font: 500 11px Inter; cursor: pointer; white-space: nowrap;
+  }
+  .nb-note .nb-btn:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  #notebookEmpty { padding: 40px 20px; text-align: center; color: var(--text-faint); font: 400 13px Inter; }
+  /* Findings tab — reuses .nb-note/.nb-tag/.nb-body/.nb-meta/.nb-chip/.nb-actions/.nb-btn as-is */
+  #findingsList { flex: 1; overflow-y: auto; padding: 14px 20px 40px; max-width: 900px; width: 100%; margin: 0 auto; }
+  #findingsEmpty { padding: 40px 20px; text-align: center; color: var(--text-faint); font: 400 13px Inter; }
+  #findingsBanner {
+    padding: 8px 20px; font: 500 12px Inter; color: var(--warn-text); background: var(--warn-bg);
+    border-bottom: 1px solid var(--warn-border); text-align: center;
+  }
+  #findingsBanner.all-reviewed { color: var(--accent); background: var(--accent-dim); border-bottom-color: transparent; }
+  #findingsBanner.hidden { display: none; }
+  .nb-note .nb-tag.sev-critical, .nb-note .nb-tag.sev-high { background: var(--critical-dim); color: var(--critical); }
+  .nb-note .nb-tag.sev-medium { background: var(--warn-bg); color: var(--warn-text); }
+  .nb-note .nb-tag.sev-low, .nb-note .nb-tag.sev-info { background: var(--bg-pill); color: var(--text-muted); }
+  .nb-note .nb-btn.reviewed { border-color: var(--accent); color: var(--accent); cursor: default; }
+  #graphView .g-scale-banner button {
+    background: var(--bg-pill); border: 1px solid var(--warn-border); color: var(--warn-text);
+    border-radius: 6px; padding: 3px 9px; font: 500 11px Inter; cursor: pointer;
+  }
+  #graphView .g-body { flex: 1; display: flex; min-height: 0; }
+
+  #graphCanvasWrap {
+    flex: 1; position: relative; overflow: auto; min-width: 0;
+    background: radial-gradient(circle at 1px 1px, oklch(28% 0.006 260 / 0.5) 1px, transparent 0) 0 0/22px 22px, var(--bg);
+  }
+  #graphCanvas { position: relative; }
+  #graphCanvas svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .g-gen-label {
+    position: absolute; top: 12px; font: 600 10px var(--mono); color: var(--text-faint);
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .g-empty { margin: auto; color: var(--text-faint); font: 400 13px Inter; text-align: center; padding: 40px; }
+
+  .g-node { position: absolute; width: 108px; display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+  .g-node .circle {
+    width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font: 600 15px var(--mono); position: relative; background: var(--bg-card); border: 2px solid var(--border-strong);
+    color: var(--text-dim); transition: border-color .15s, box-shadow .15s, background .15s;
+  }
+  .g-node:hover .circle { border-color: var(--text-muted); }
+  .g-node.selected .circle { box-shadow: 0 0 0 3px var(--accent-dim); border-color: var(--accent); }
+  .g-node[data-status="completed"] .circle { background: var(--bg-hover); }
+  .g-node[data-status="completed"][data-verdict="confirmed"] .circle,
+  .g-node[data-status="completed"][data-verdict="supported"] .circle { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+  .g-node[data-status="completed"][data-verdict="refuted"] .circle { background: var(--critical-dim); border-color: var(--critical); color: var(--critical); }
+  .g-node[data-status="parked"] .circle { opacity: .45; border-style: dashed; }
+  .g-node[data-status="abandoned"] .circle { opacity: .35; }
+  .g-node[data-status="abandoned"] .circle::after {
+    content: ""; position: absolute; inset: 0; margin: auto; width: 66%; height: 2px; background: var(--text-faint); transform: rotate(-18deg);
+  }
+  .g-node[data-status="running"] .circle { border-color: var(--accent); border-style: dashed; animation: gpulse 1.8s ease-in-out infinite; }
+  .g-node[data-status="awaiting_approval"] .circle { border-color: var(--warn-text); border-width: 3px; }
+  @media (prefers-reduced-motion: reduce) { .g-node[data-status="running"] .circle { animation: none; } }
+  @keyframes gpulse { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-dim); } 50% { box-shadow: 0 0 0 6px transparent; } }
+  .g-node .verdict-glyph {
+    position: absolute; bottom: -3px; right: -3px; min-width: 16px; height: 16px; padding: 0 2px; border-radius: 8px;
+    background: var(--bg); display: flex; align-items: center; justify-content: center; font: 700 9px Inter;
+  }
+  .g-node[data-verdict="confirmed"] .verdict-glyph, .g-node[data-verdict="supported"] .verdict-glyph { color: var(--accent); }
+  .g-node[data-verdict="refuted"] .verdict-glyph { color: var(--critical); }
+  .g-node[data-verdict="inconclusive"] .verdict-glyph { color: var(--warn-text); }
+  .g-node .attempt-badge {
+    position: absolute; top: -4px; right: -8px; background: var(--bg-pill); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0 5px; font: 600 9px var(--mono); color: var(--text-muted);
+  }
+  .g-node .phase-tag { font: 600 8.5px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); }
+  .g-node .n-title {
+    font: 500 11px Inter; color: var(--text-dim); text-align: center; line-height: 1.25; max-width: 104px;
+    overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .g-node .n-metrics { font: 500 9px var(--mono); color: var(--text-faint); }
+  .g-node[data-status="running"] .n-metrics { color: var(--accent); }
+
+  .edge-path { fill: none; stroke: var(--border-strong); stroke-width: 1.5; }
+  .edge-path.active { stroke: var(--accent); stroke-width: 2.5; }
+  .edge-path.cross { stroke-dasharray: 4 3; stroke-width: 1.3; opacity: 0; transition: opacity .15s; stroke: var(--text-faint); }
+  .edge-path.cross.visible { opacity: .8; }
+  .edge-path.cross.supports, .edge-path.cross.synthesized_from { stroke: var(--accent); }
+  .edge-path.cross.contradicts { stroke: var(--critical); }
+  .edge-path.cross.supersedes { stroke: var(--warn-text); }
+
+  /* --- Hypothesis Tree filter bar (§9) --- */
+  #graphFilters {
+    display: flex; gap: 8px; align-items: center; padding: 8px 20px; flex-wrap: wrap; flex: none;
+    border-bottom: 1px solid var(--border); background: var(--bg-side);
+  }
+  #graphFilters select, #graphFilters input[type="text"] {
+    background: var(--bg-pill); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 7px; padding: 5px 9px; font: 500 12px Inter; outline: none;
+  }
+  #graphFilters input[type="text"]:focus, #graphFilters select:focus { border-color: var(--accent); }
+  #graphFilters label.chk { display: flex; align-items: center; gap: 5px; font: 500 12px Inter; color: var(--text-muted); cursor: pointer; }
+  #graphFilters .clear { margin-left: auto; font: 500 12px Inter; color: var(--text-muted); cursor: pointer; background: none; border: none; }
+  #graphFilters .clear:hover { color: var(--text-dim); }
+
+  .g-collapse-toggle {
+    font: 600 9px var(--mono); color: var(--text-muted); background: var(--bg-pill);
+    border: 1px solid var(--border); border-radius: 8px; padding: 1px 6px; cursor: pointer; user-select: none;
+  }
+  .g-collapse-toggle:hover { color: var(--text-dim); border-color: var(--border-strong); }
+  #graphDrawer .ai-estimate { font: 400 11px Inter; color: var(--text-faint); margin-bottom: 10px; }
+  #graphDrawer .ai-estimate b { color: var(--text-muted); font-weight: 600; }
+
+  #graphLegend {
+    position: absolute; left: 16px; bottom: 16px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 13px; display: flex; gap: 14px; font: 400 10.5px Inter; color: var(--text-muted);
+    flex-wrap: wrap; max-width: 560px;
+  }
+  #graphLegend span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  #graphLegend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1.5px solid var(--text-faint); }
+  #graphLegend i.confirmed { background: var(--accent-dim); border-color: var(--accent); }
+  #graphLegend i.refuted { background: var(--critical-dim); border-color: var(--critical); }
+  #graphLegend i.parked { opacity: .45; border-style: dashed; }
+  #graphLegend i.running { border-color: var(--accent); border-style: dashed; }
+
+  #graphRightCol {
+    width: var(--graph-drawer-w, 380px); flex: none; border-left: 1px solid var(--border); background: var(--bg-side);
+    display: flex; flex-direction: column; min-height: 0; min-width: 300px;
+  }
+  #graphDrawer { flex: 1; display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
+  #graphDrawer .d-empty { margin: auto; color: var(--text-faint); font: 400 13px Inter; text-align: center; padding: 40px; }
+
+  /* --- "Next up" decision panel (§9) --- */
+  #graphQueue { flex: none; border-top: 1px solid var(--border-strong); background: var(--bg-card); display: flex; flex-direction: column; max-height: 44%; }
+  #graphQueue.collapsed .gq-list { display: none; }
+  #graphQueue.collapsed { max-height: none; }
+  .gq-head {
+    display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; cursor: pointer;
+    font: 600 10.5px Inter; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); flex: none;
+  }
+  .gq-head:hover { color: var(--text-dim); }
+  .gq-list { overflow-y: auto; padding: 0 10px 10px; }
+  .gq-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 8px; border-radius: 7px; cursor: pointer;
+    font: 400 12px Inter; color: var(--text-dim);
+  }
+  .gq-item:hover { background: var(--bg-hover); }
+  .gq-item.selected { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent); }
+  .gq-tier { font: 700 9px Inter; text-transform: uppercase; letter-spacing: .03em; padding: 2px 6px; border-radius: 4px; flex: none; }
+  .gq-tier.now { background: var(--accent-dim); color: var(--accent); }
+  .gq-tier.next { background: var(--warn-bg); color: var(--warn-text); }
+  .gq-tier.later { background: var(--bg-pill); color: var(--text-muted); }
+  .gq-ord { font: 600 11px var(--mono); color: var(--text-faint); flex: none; }
+  .gq-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gq-empty { padding: 12px 16px; font: 400 12px Inter; color: var(--text-faint); }
+
+  /* --- stale-hypothesis flag (§7.5) --- */
+  .g-node .stale-flag {
+    position: absolute; top: -6px; left: -6px; width: 15px; height: 15px; border-radius: 50%;
+    background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text);
+    display: flex; align-items: center; justify-content: center; font: 700 8px Inter;
+  }
+  #graphDrawer .d-stale {
+    display: flex; gap: 7px; align-items: flex-start; margin-top: 8px; padding: 8px 10px;
+    background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 7px;
+    font: 400 11.5px/1.45 Inter; color: var(--warn-text);
+  }
+
+  /* --- priority explain as a bullet list (§5.4) --- */
+  #graphDrawer .explain-box ul { margin: 0; padding-left: 16px; }
+  #graphDrawer .explain-box li { display: list-item; margin: 2px 0; }
+  #graphDrawer .explain-box li span { color: var(--text-dim); }
+
+  /* --- steering + compare (§7.2 / §7.4) --- */
+  #graphDrawer .steer-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+  #graphDrawer .steer-btn {
+    background: var(--bg-pill); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 6px; padding: 6px 10px; font: 500 11.5px Inter; cursor: pointer;
+  }
+  #graphDrawer .steer-btn:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  #graphDrawer .steer-btn:disabled { opacity: .4; cursor: default; }
+  .g-node.compare-pick .circle { box-shadow: 0 0 0 3px var(--warn-border); }
+  #graphCompareBar {
+    position: absolute; left: 50%; transform: translateX(-50%); top: 10px; z-index: 20;
+    background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 999px;
+    padding: 6px 8px 6px 14px; display: flex; align-items: center; gap: 10px;
+    font: 500 12px Inter; color: var(--text-dim); box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  #graphCompareBar button {
+    background: var(--accent); color: var(--accent-ink); border: none; border-radius: 999px;
+    padding: 5px 12px; font: 600 11.5px Inter; cursor: pointer;
+  }
+  #graphCompareBar button.ghost { background: var(--bg-pill); color: var(--text-dim); }
+  #graphDrawer .cmp-wrap { overflow-x: auto; }
+  #graphDrawer table.cmp { border-collapse: collapse; font: 400 11.5px Inter; min-width: 100%; }
+  #graphDrawer table.cmp td { min-width: 130px; }
+  #graphDrawer table.cmp th { text-align: left; color: var(--text-faint); font-weight: 600; padding: 6px 6px; vertical-align: top; width: 90px; position: sticky; left: 0; background: var(--bg-side); }
+  #graphDrawer table.cmp td { padding: 6px 6px; color: var(--text-dim); vertical-align: top; border-left: 1px solid var(--border); }
+  #graphDrawer table.cmp tr { border-bottom: 1px solid var(--border); }
+  #graphDrawer .d-section { padding: 15px 20px; border-bottom: 1px solid var(--border); }
+  #graphDrawer .d-head { display: flex; align-items: baseline; gap: 8px; }
+  #graphDrawer .d-ord { font: 700 15px var(--mono); color: var(--accent); }
+  #graphDrawer .d-title { font: 600 14px Inter; }
+  #graphDrawer .d-tags { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  #graphDrawer .tag {
+    font: 600 9.5px Inter; text-transform: uppercase; letter-spacing: .03em; padding: 3px 8px;
+    border-radius: 5px; background: var(--bg-pill); color: var(--text-muted); border: 1px solid var(--border);
+  }
+  #graphDrawer .tag.verdict.confirmed, #graphDrawer .tag.verdict.supported { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
+  #graphDrawer .tag.verdict.refuted { background: var(--critical-dim); color: var(--critical); border-color: transparent; }
+  #graphDrawer .tag.status.running { color: var(--accent); border-color: var(--accent); }
+  #graphDrawer .d-label { font: 600 10px Inter; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); margin-bottom: 6px; }
+  #graphDrawer .d-claim { font: 400 13px/1.55 Inter; color: var(--text-dim); overflow-wrap: anywhere; }
+  #graphDrawer .d-rationale { font: 400 12.5px/1.55 Inter; color: var(--text-muted); overflow-wrap: anywhere; }
+  #graphDrawer .attempt-result, #graphDrawer .op-note, #graphDrawer .d-title { overflow-wrap: anywhere; }
+  #graphDrawer .d-link { font: 500 12px Inter; color: var(--accent); cursor: pointer; margin-top: 6px; display: inline-block; }
+  #graphDrawer .metric-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  #graphDrawer .metric-row:last-child { margin-bottom: 0; }
+  #graphDrawer .metric-name { font: 500 12px Inter; color: var(--text-muted); width: 74px; flex: none; }
+  #graphDrawer .metric-val { font: 600 12.5px Inter; color: var(--text-dim); }
+  #graphDrawer .bar-track { flex: 1; height: 5px; border-radius: 3px; background: var(--bg-pill); overflow: hidden; }
+  #graphDrawer .bar-fill { height: 100%; border-radius: 3px; background: var(--accent); }
+  #graphDrawer .conf-band { display: flex; gap: 3px; }
+  #graphDrawer .conf-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bg-pill); border: 1px solid var(--border-strong); }
+  #graphDrawer .conf-dot.on { background: var(--accent); border-color: var(--accent); }
+  #graphDrawer .priority-tier { font: 700 10.5px Inter; text-transform: uppercase; letter-spacing: .04em; padding: 2px 9px; border-radius: 5px; }
+  #graphDrawer .priority-tier.now { background: var(--accent-dim); color: var(--accent); }
+  #graphDrawer .priority-tier.next { background: var(--warn-bg); color: var(--warn-text); }
+  #graphDrawer .priority-tier.later, #graphDrawer .priority-tier.parked { background: var(--bg-pill); color: var(--text-muted); }
+  #graphDrawer .explain-toggle { font: 500 11px Inter; color: var(--text-muted); cursor: pointer; margin-left: auto; }
+  #graphDrawer .explain-toggle:hover { color: var(--text-dim); }
+  #graphDrawer .explain-box {
+    margin-top: 8px; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; font: 400 11px/1.6 var(--mono); color: var(--text-muted);
+  }
+  #graphDrawer .explain-box div { display: flex; justify-content: space-between; }
+  #graphDrawer .token-count { font: 600 13px var(--mono); color: var(--text-dim); }
+  #graphDrawer .token-sub { font: 400 11px Inter; color: var(--text-faint); margin-top: 2px; }
+  #graphDrawer .attempt { padding: 9px 11px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+  #graphDrawer .attempt:last-child { margin-bottom: 0; }
+  #graphDrawer .attempt-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  #graphDrawer .attempt-no { font: 600 11px var(--mono); color: var(--text-faint); }
+  #graphDrawer .attempt-status { font: 600 9.5px Inter; text-transform: uppercase; padding: 1px 7px; border-radius: 4px; background: var(--bg-pill); color: var(--text-muted); }
+  #graphDrawer .attempt-status.completed { background: var(--accent-dim); color: var(--accent); }
+  #graphDrawer .attempt-method { font: 500 11.5px Inter; color: var(--text-dim); margin-bottom: 3px; }
+  #graphDrawer .attempt-result { font: 400 11px/1.5 var(--mono); color: var(--text-muted); }
+  #graphDrawer .attempt-obs { display: flex; align-items: center; gap: 5px; margin-top: 5px; font: 500 10.5px Inter; color: var(--text-muted); }
+  #graphDrawer .obs-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); }
+  #graphDrawer .obs-dot.supports { background: var(--accent); }
+  #graphDrawer .obs-dot.refutes { background: var(--critical); }
+  #graphDrawer .anchors { display: flex; gap: 8px; flex-wrap: wrap; }
+  #graphDrawer .anchor-btn {
+    background: var(--bg-pill); border: 1px solid var(--border); color: var(--text-dim); border-radius: 6px;
+    padding: 5px 10px; font: 500 11.5px Inter; cursor: pointer;
+  }
+  #graphDrawer .anchor-btn:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  #graphDrawer .anchor-btn:disabled { opacity: .4; cursor: default; }
+  #graphDrawer .derived-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font: 400 12px Inter; }
+  #graphDrawer .derived-item:last-child { border-bottom: none; }
+  #graphDrawer .di-reason { color: var(--text-faint); font-size: 10.5px; }
+  #graphDrawer .di-focus { font: 500 11px Inter; color: var(--accent); cursor: pointer; flex: none; margin-left: 10px; }
+  #graphDrawer .op-note {
+    font: 400 12px/1.5 Inter; color: var(--text-dim); padding: 8px 10px; margin-bottom: 6px;
+    background: var(--bg-card); border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px;
+  }
+  #graphDrawer .op-note:last-child { margin-bottom: 0; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="mark">L</div>
+      <div class="name">local<span>AI</span> agent</div>
+    </div>
+    <div class="row" id="newSessionBtn">
+      <svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+      New session
+    </div>
+    <div class="row" id="approvalsBtn">
+      <svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      Approvals
+      <span class="badge hidden" id="approvalBadge">0</span>
+    </div>
+    <input id="sessionSearch" type="text" placeholder="Search sessions…" autocomplete="off">
+    <div id="sessionList"></div>
+  </aside>
+
+  <main>
+    <div id="home">
+      <h1>Ready when you are.</h1>
+      <div class="home-sub">Describe a target and scope, or switch to Autonomous to let the pipeline run itself.</div>
+      <div class="composer">
+        <textarea id="homeInput" placeholder="Describe the target, scope, or task…"></textarea>
+        <div class="composer-controls">
+          <div class="pill" id="securityPill">
+            <svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/></svg>
+            <span id="securityPillLabel">Security tools: off</span>
+            <svg class="icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+            <div class="pill-menu hidden" id="securityMenu"></div>
+          </div>
+          <div class="pill" id="isolationPill">
+            <svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            <span id="isolationPillLabel">Isolation: bubblewrap</span>
+            <svg class="icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+            <div class="pill-menu hidden" id="isolationMenu"></div>
+          </div>
+          <div class="pill" id="engagementPill" title="Engagement — determines which RoE/scope applies">
+            <svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12h6M9 16h6M9 8h6M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
+            <span id="engagementPillLabel">lab-default</span>
+          </div>
+          <div class="pill" id="modePill" title="How much this session drives itself">
+            <svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            <span id="modePillLabel">Assistant</span>
+            <svg class="icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+            <div class="pill-menu hidden" id="modeMenu"></div>
+          </div>
+          <div class="spacer"></div>
+          <button class="send-btn" id="homeSendBtn" title="Start">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-ink)" stroke-width="2.6"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="chatView" class="hidden" style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div id="chatHeader">
+        <div class="hd-main">
+          <div class="title" id="chatTitle">session</div>
+          <div class="meta" id="chatMeta"></div>
+        </div>
+        <div class="actions">
+          <button id="stopAutonomousBtn" class="hidden" title="Stop the autonomous run">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+            Stop
+          </button>
+          <button id="graphBtn" title="Hypothesis Tree — what the agent is investigating, why, and what it found">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="6" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.2 7.2l9.6 3.6M7.2 16.8l9.6-3.6"/></svg>
+            Hypothesis Tree
+          </button>
+          <button id="steerBtn" title="Redirect a running task without stopping it">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg>
+            Steer
+          </button>
+          <button id="copyIdBtn" title="Copy session ID">
+            <svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="chatBody">
+        <div id="transcriptCol">
+          <div id="todoPanel" class="hidden">
+            <div class="todo-head" id="todoHead">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+              <span id="todoTitle">To-dos</span>
+              <svg class="todo-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+            </div>
+            <div class="todo-list" id="todoList"></div>
+          </div>
+          <div id="transcript"><div id="transcriptInner"></div></div>
+          <button id="jumpLatest" class="hidden">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>
+            <span>Jump to latest</span>
+          </button>
+          <div id="composerDock">
+            <div class="composer">
+              <textarea id="chatInput" placeholder="Continue this task…  (Enter to send, Shift+Enter for a new line)" style="min-height:22px"></textarea>
+              <div class="composer-controls">
+                <div class="spacer"></div>
+                <button class="send-btn" id="chatSendBtn" title="Send">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-ink)" stroke-width="2.6"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="resize-handle hidden" id="computerResize" title="Drag to resize"></div>
+        <div id="computerPanel" class="hidden"></div>
+      </div>
+    </div>
+
+    <div id="graphView" class="hidden">
+      <div class="g-header">
+        <div class="g-tabs">
+          <button class="g-tab active" id="tabTree">Hypothesis Tree</button>
+          <button class="g-tab" id="tabNotes">Notebook</button>
+          <button class="g-tab" id="tabFindings">Findings</button>
+        </div>
+        <div class="g-meta" id="graphMeta"></div>
+        <div class="g-controls">
+          <select class="g-btn" id="graphViewSelect" title="Layout">
+            <option value="causal">View: Causal</option>
+            <option value="timeline">View: Timeline</option>
+            <option value="focus">View: Focus</option>
+          </select>
+          <button class="g-btn" id="graphFocusBtn">Focus active path</button>
+          <button class="g-btn" id="graphStatsBtn">Stats</button>
+          <button class="g-btn" id="graphRefreshBtn">Refresh</button>
+          <button class="g-btn" id="graphCloseBtn">Close</button>
+          <div id="graphStatsPanel" class="hidden"></div>
+        </div>
+      </div>
+      <div id="graphFilters">
+        <input type="text" id="graphSearch" placeholder="Search H-#, title, claim, surface…" style="width:210px">
+        <select id="graphPhaseFilter">
+          <option value="">All phases</option>
+          <option>INTAKE</option><option>RECON</option><option>ANALYSIS</option>
+          <option>VALIDATION</option><option>REPORT</option><option>CLOSEOUT</option>
+        </select>
+        <select id="graphStatusFilter">
+          <option value="">Any status / verdict</option>
+          <optgroup label="Lifecycle">
+            <option value="open">open</option><option value="queued">queued</option>
+            <option value="running">running</option><option value="blocked">blocked</option>
+            <option value="awaiting_approval">awaiting approval</option>
+            <option value="completed">completed</option><option value="parked">parked</option>
+            <option value="abandoned">abandoned</option>
+          </optgroup>
+          <optgroup label="Verdict">
+            <option value="v:supported">supported</option><option value="v:refuted">refuted</option>
+            <option value="v:confirmed">confirmed</option><option value="v:inconclusive">inconclusive</option>
+          </optgroup>
+        </select>
+        <select id="graphConfFilter">
+          <option value="">Any confidence</option>
+          <option>low</option><option>medium</option><option>high</option>
+        </select>
+        <label class="chk"><input type="checkbox" id="graphActiveOnly"> Active path only</label>
+        <button class="clear" id="graphClearFilters">Clear filters</button>
+      </div>
+      <div class="g-active-path hidden" id="graphActivePath"></div>
+      <div class="g-scale-banner hidden" id="graphScaleBanner"></div>
+
+      <div id="notebookView" class="hidden">
+        <div id="notebookFilters">
+          <input type="text" id="notebookSearch" placeholder="Search notes…" style="width:220px">
+          <div id="notebookCats"></div>
+          <button class="nb-cat" id="notebookKbToggle" style="margin-left:auto">★ Techniques (global)</button>
+        </div>
+        <div id="notebookList"></div>
+      </div>
+
+      <div id="findingsView" class="hidden">
+        <div id="findingsBanner"></div>
+        <div id="findingsList"></div>
+      </div>
+
+      <div class="g-body">
+        <div id="graphCanvasWrap">
+          <div id="graphCompareBar" class="hidden"></div>
+          <div id="graphCanvas"><svg class="edges"></svg></div>
+          <div id="graphLegend">
+            <span><i></i>open</span>
+            <span><i class="running"></i>running</span>
+            <span><i class="parked"></i>parked</span>
+            <span><i class="confirmed"></i>confirmed / supported</span>
+            <span><i class="refuted"></i>refuted</span>
+            <span style="opacity:.6">⊗ abandoned</span>
+            <span>┈ cross-link (on select)</span>
+          </div>
+        </div>
+        <div class="resize-handle" id="graphResize" title="Drag to resize"></div>
+        <div id="graphRightCol">
+          <div id="graphDrawer"><div class="d-empty">Select a hypothesis to see its claim, evidence, and chat anchors.</div></div>
+          <div id="graphQueue">
+            <div class="gq-head" id="graphQueueHead">
+              <span>Next up — open hypotheses by priority</span>
+              <span class="gq-caret" id="graphQueueCaret">▾</span>
+            </div>
+            <div class="gq-list" id="graphQueueList"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="approvalsDrawer" class="hidden">
+  <div class="head">
+    <div class="title">Pending approvals</div>
+    <svg id="closeApprovalsBtn" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;opacity:.7"><path d="M6 6l12 12M18 6L6 18"/></svg>
+  </div>
+  <div class="list" id="approvalsList"></div>
+</div>
+
+<div id="modalScrim" class="hidden">
+  <div id="engagementModal"></div>
+</div>
+
+<script>
+const SECURITY_OPTIONS = [
+  { value: false, label: 'Off', desc: 'Only run_command/read_file/write_file' },
+  { value: true, label: 'On', desc: 'http_recon, port_discovery, knowledge_search/fetch, osint_record, browser_fetch — each still gated by the RoE' },
+];
+const ISOLATION_OPTIONS = [
+  { value: 'bubblewrap', label: 'bubblewrap', desc: 'Kernel-namespaced sandbox + seccomp filter (default)' },
+  { value: 'direct', label: 'direct', desc: 'No sandbox beyond the binary blocklist — asks to confirm when used' },
+];
+const MODE_OPTIONS = [
+  { value: 'assistant', label: 'Assistant', desc: 'You drive every turn by chatting — today\'s default.' },
+  { value: 'autonomous', label: 'Autonomous', desc: 'Runs the whole pipeline unattended until done or a genuine blocker (kill switch, expired scope, stuck task).' },
+  { value: 'consult', label: 'Consult', desc: 'Same as Autonomous, but checks in with you after each phase before continuing.' },
+];
+
+const PREFS = (() => {
+  try { return JSON.parse(localStorage.getItem('localai.prefs') || '{}'); } catch (e) { return {}; }
+})();
+function savePrefs() {
+  try {
+    localStorage.setItem('localai.prefs', JSON.stringify({
+      security: state.security, isolation: state.isolation, engagementId: state.engagementId, mode: state.mode,
+    }));
+  } catch (e) { /* private mode etc. */ }
+}
+
+let state = {
+  currentSession: null,
+  eventSource: null,
+  security: PREFS.security ?? false,
+  isolation: PREFS.isolation ?? 'bubblewrap',
+  engagementId: PREFS.engagementId ?? 'lab-default',
+  mode: PREFS.mode ?? 'assistant',
+  taskStartedAt: null,
+  autonomousActive: false,
+  stickToBottom: true,
+  sessions: [],
+  sessionFilter: '',
+};
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+/* ---------- API key (only matters if the server was started with WEB_UI_API_KEY_FILE) ---------- */
+function getApiKey() {
+  try { return localStorage.getItem('webUiApiKey') || ''; } catch (e) { return ''; }
+}
+function setApiKey(key) {
+  try { localStorage.setItem('webUiApiKey', key); } catch (e) { /* private-window etc — key just won't persist */ }
+}
+function withAuthHeader(opts) {
+  const key = getApiKey();
+  if (!key) return opts || {};
+  return { ...(opts || {}), headers: { ...((opts || {}).headers || {}), Authorization: `Bearer ${key}` } };
+}
+
+async function api(path, opts) {
+  let resp = await fetch(path, withAuthHeader(opts));
+  if (resp.status === 401) {
+    // No key stored yet, or a stale one — ask once and retry. A server with no key file
+    // configured never sends 401, so this prompt never appears for the common unauthenticated
+    // local-machine setup.
+    const entered = prompt('This server requires an API key (set via WEB_UI_API_KEY_FILE):');
+    if (!entered) throw new Error('401: API key required');
+    setApiKey(entered);
+    resp = await fetch(path, withAuthHeader(opts));
+  }
+  if (!resp.ok) throw new Error(`${resp.status}: ${await resp.text()}`);
+  return resp.status === 204 ? null : resp.json();
+}
+
+/* ---------- pill menus ---------- */
+function renderPillMenu(container, options, current, onSelect) {
+  container.innerHTML = '';
+  for (const opt of options) {
+    const item = el('div', 'pill-menu-item');
+    const label = el('div');
+    label.innerHTML = `<div style="font-weight:500">${opt.label}</div><div style="font-size:11px;color:var(--text-muted);margin-top:2px;max-width:220px">${opt.desc}</div>`;
+    item.appendChild(label);
+    if (opt.value === current) {
+      const check = el('span', 'check', '✓');
+      item.appendChild(check);
+    }
+    item.onclick = (e) => { e.stopPropagation(); onSelect(opt.value); };
+    container.appendChild(item);
+  }
+}
+
+function setupPill(pillId, menuId, options, getCurrent, setCurrent, labelFn) {
+  const pill = document.getElementById(pillId);
+  const menu = document.getElementById(menuId);
+  pill.onclick = (e) => {
+    e.stopPropagation();
+    const isHidden = menu.classList.contains('hidden');
+    document.querySelectorAll('.pill-menu').forEach(m => m.classList.add('hidden'));
+    if (isHidden) {
+      renderPillMenu(menu, options, getCurrent(), (v) => {
+        setCurrent(v);
+        labelFn();
+        menu.classList.add('hidden');
+      });
+      menu.classList.remove('hidden');
+    }
+  };
+}
+document.addEventListener('click', () => document.querySelectorAll('.pill-menu').forEach(m => m.classList.add('hidden')));
+
+setupPill('securityPill', 'securityMenu', SECURITY_OPTIONS, () => state.security, (v) => { state.security = v; savePrefs(); }, () => {
+  document.getElementById('securityPillLabel').textContent = `Security tools: ${state.security ? 'on' : 'off'}`;
+});
+setupPill('isolationPill', 'isolationMenu', ISOLATION_OPTIONS, () => state.isolation, (v) => { state.isolation = v; savePrefs(); }, () => {
+  document.getElementById('isolationPillLabel').textContent = `Isolation: ${state.isolation}`;
+});
+setupPill('modePill', 'modeMenu', MODE_OPTIONS, () => state.mode, (v) => { state.mode = v; savePrefs(); }, () => {
+  const opt = MODE_OPTIONS.find(o => o.value === state.mode);
+  document.getElementById('modePillLabel').textContent = opt.label;
+  updateModeVisibility();
+});
+function updateModeVisibility() {
+  const autonomousModes = state.mode !== 'assistant';
+  document.getElementById('securityPill').classList.toggle('hidden', autonomousModes);
+  document.getElementById('isolationPill').classList.toggle('hidden', autonomousModes);
+  document.getElementById('homeInput').placeholder = autonomousModes
+    ? 'Optional note for the pipeline (the engagement\'s own scope defines the target)…'
+    : 'Describe the target, scope, or task…';
+}
+document.getElementById('engagementPill').onclick = (e) => {
+  e.stopPropagation();
+  openEngagementModal();
+};
+
+/* ---------- engagement modal ---------- */
+async function openEngagementModal() {
+  const modal = document.getElementById('engagementModal');
+  document.getElementById('modalScrim').classList.remove('hidden');
+  modal.innerHTML = `<div class="modal-title">Choose an engagement</div><div id="engList">Loading…</div>`;
+  document.getElementById('modalScrim').onclick = (e) => { if (e.target.id === 'modalScrim') closeEngagementModal(); };
+
+  let engagements = [];
+  try {
+    engagements = await api('/api/engagements');
+  } catch (e) { /* fall through with an empty list */ }
+
+  const list = document.getElementById('engList');
+  list.innerHTML = '';
+  const legacy = el('div', 'eng-item');
+  legacy.innerHTML = `<div class="id">lab-default</div><div class="desc">Local lab RoE (loopback targets only). Autonomous mode seeds its assets from scope automatically.</div>`;
+  legacy.onclick = () => selectEngagement('lab-default');
+  list.appendChild(legacy);
+  for (const eng of engagements) {
+    const item = el('div', 'eng-item');
+    item.innerHTML = `<div class="id">${eng.engagement_id}</div><div class="desc">${eng.description || eng.allowed_action_classes.join(', ')}</div>`;
+    item.onclick = () => selectEngagement(eng.engagement_id);
+    list.appendChild(item);
+  }
+  const newRow = el('div', 'eng-new-row', '+ New engagement');
+  newRow.onclick = renderNewEngagementForm;
+  list.appendChild(newRow);
+}
+function selectEngagement(id) {
+  state.engagementId = id;
+  document.getElementById('engagementPillLabel').textContent = id;
+  savePrefs();
+  closeEngagementModal();
+}
+function closeEngagementModal() {
+  document.getElementById('modalScrim').classList.add('hidden');
+}
+function renderNewEngagementForm() {
+  const modal = document.getElementById('engagementModal');
+  modal.innerHTML = `
+    <div class="modal-title">New engagement</div>
+    <div class="field-label">Engagement ID</div>
+    <input class="field-input" id="engIdInput" placeholder="e.g. juiceshop-2026-09">
+    <div class="field-label">Description</div>
+    <input class="field-input" id="engDescInput" placeholder="optional">
+    <div class="field-label">In-scope targets (comma-separated host/CIDR)</div>
+    <input class="field-input" id="engTargetsInput" placeholder="127.0.0.1">
+    <div class="field-label">Allowed action classes (comma-separated)</div>
+    <input class="field-input" id="engClassesInput" value="passive_recon, active_scan_light">
+    <div class="field-label">Authorized by</div>
+    <input class="field-input" id="engAuthInput" placeholder="your name">
+    <div class="field-label">Valid for (hours)</div>
+    <input class="field-input" id="engHoursInput" value="24" type="number" min="1">
+    <div id="engError" class="modal-error hidden"></div>
+    <div class="modal-btns">
+      <button class="secondary" id="engCancelBtn">Cancel</button>
+      <button class="primary" id="engCreateBtn">Create</button>
+    </div>
+  `;
+  document.getElementById('engCancelBtn').onclick = openEngagementModal;
+  document.getElementById('engCreateBtn').onclick = submitNewEngagement;
+}
+async function submitNewEngagement() {
+  const errBox = document.getElementById('engError');
+  errBox.classList.add('hidden');
+  const body = {
+    engagement_id: document.getElementById('engIdInput').value.trim(),
+    description: document.getElementById('engDescInput').value.trim(),
+    allow_targets: document.getElementById('engTargetsInput').value.split(',').map(s => s.trim()).filter(Boolean),
+    allowed_action_classes: document.getElementById('engClassesInput').value.split(',').map(s => s.trim()).filter(Boolean),
+    authorized_by: document.getElementById('engAuthInput').value.trim(),
+    valid_hours: parseFloat(document.getElementById('engHoursInput').value) || 24,
+  };
+  try {
+    await api('/api/engagements', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    selectEngagement(body.engagement_id);
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.classList.remove('hidden');
+  }
+}
+
+/* ---------- sessions ---------- */
+function relTime(ts) {
+  const s = Math.max(0, (Date.now() / 1000) - ts);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 604800) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(ts * 1000).toLocaleDateString();
+}
+function dayBucket(ts) {
+  const now = new Date(); const d = new Date(ts * 1000);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+  if (ts >= startOfToday) return 'Today';
+  if (ts >= startOfToday - 86400) return 'Yesterday';
+  if (ts >= startOfToday - 6 * 86400) return 'Earlier this week';
+  return 'Older';
+}
+
+async function refreshSessionList() {
+  try {
+    state.sessions = await api('/api/sessions');
+  } catch (e) { return; }
+  renderSessionList();
+}
+
+function renderSessionList() {
+  const list = document.getElementById('sessionList');
+  list.innerHTML = '';
+  const q = state.sessionFilter.trim().toLowerCase();
+  const rows = state.sessions
+    .filter(s => !q || (s.title || '').toLowerCase().includes(q) || s.session_id.includes(q))
+    .sort((a, b) => b.last_modified - a.last_modified);
+  if (rows.length === 0) {
+    const e = el('div', '', q ? 'No sessions match.' : 'No sessions yet.');
+    e.id = 'sessionListEmpty';
+    list.appendChild(e);
+    return;
+  }
+  let bucket = null;
+  for (const s of rows) {
+    const b = dayBucket(s.last_modified);
+    if (b !== bucket) { bucket = b; list.appendChild(el('div', 'sess-group-label', b)); }
+    const item = el('div', 'session-item' + (s.session_id === state.currentSession ? ' active' : ''));
+    item.title = s.session_id;
+    const main = el('div', 'si-main');
+    const title = el('div', 'si-title');
+    title.textContent = s.title || 'Untitled session';
+    const sub = el('div', 'si-sub');
+    if (s.known_live) sub.appendChild(el('span', 'si-live'));
+    sub.appendChild(el('span', '', relTime(s.last_modified) + (s.message_count ? ` · ${s.message_count} msg` : '')));
+    main.appendChild(title); main.appendChild(sub);
+    item.appendChild(main);
+    const del = el('button', 'si-del', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>');
+    del.title = 'Delete this session';
+    del.onclick = (e) => { e.stopPropagation(); deleteSession(s.session_id); };
+    item.appendChild(del);
+    item.onclick = () => openSession(s.session_id);
+    list.appendChild(item);
+  }
+}
+
+async function deleteSession(id) {
+  if (!confirm('Delete this session transcript? This cannot be undone.')) return;
+  try {
+    await api(`/api/sessions/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    alert(`Could not delete: ${e.message}`);
+    return;
+  }
+  state.sessions = state.sessions.filter(s => s.session_id !== id);
+  if (state.currentSession === id) document.getElementById('newSessionBtn').click();
+  else renderSessionList();
+}
+
+document.getElementById('sessionSearch').addEventListener('input', (e) => {
+  state.sessionFilter = e.target.value;
+  renderSessionList();
+});
+
+document.getElementById('newSessionBtn').onclick = () => {
+  state.currentSession = null;
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  document.getElementById('chatView').classList.add('hidden');
+  document.getElementById('home').classList.remove('hidden');
+  document.getElementById('graphView').classList.add('hidden');
+  document.getElementById('homeInput').value = '';
+  document.getElementById('homeInput').focus();
+  renderSessionList();
+};
+
+async function createAndSend(content) {
+  const created = await api('/api/sessions', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      use_security_tools: state.security,
+      isolation_tier: state.isolation,
+      engagement_id: state.engagementId,
+    }),
+  });
+  await openSession(created.session_id, /*fresh=*/true);
+  await sendToCurrentSession(content);
+}
+
+async function createAndStartAutonomous() {
+  const created = await api('/api/sessions', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ engagement_id: state.engagementId }),
+  });
+  await openSession(created.session_id, /*fresh=*/true);
+  try {
+    await api(`/api/sessions/${created.session_id}/autonomous/start`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ engagement_id: state.engagementId, profile: 'web_api', mode: state.mode }),
+    });
+    setAutonomousActive(true);
+    renderSystemLine(`[${state.mode}] started against engagement "${state.engagementId}"`);
+  } catch (e) {
+    renderSystemLine(`[error] ${e.message}`);
+  }
+}
+
+function setAutonomousActive(active) {
+  state.autonomousActive = active;
+  document.getElementById('stopAutonomousBtn').classList.toggle('hidden', !active);
+  if (active) { setHeaderStatus(`${state.mode} run in progress…`); showTyping(); startTodoPoll(); }
+  else { hideTyping(); stopTodoPoll(); }
+}
+
+/* ---------- live plan/todo panel (autonomous mode) ---------- */
+const todoState = { poll: null, collapsed: false };
+
+function startTodoPoll() {
+  if (todoState.poll) return;
+  loadTodoStatus();
+  todoState.poll = setInterval(loadTodoStatus, 3000);
+}
+function stopTodoPoll() {
+  clearInterval(todoState.poll);
+  todoState.poll = null;
+  document.getElementById('todoPanel').classList.add('hidden');
+}
+async function loadTodoStatus() {
+  if (!state.currentSession) return;
+  let data;
+  try { data = await api(`/api/sessions/${state.currentSession}/autonomous/status`); }
+  catch (e) { return; }
+  if (!data.active || !data.tasks || data.tasks.length === 0) {
+    document.getElementById('todoPanel').classList.add('hidden');
+    return;
+  }
+  renderTodoPanel(data);
+}
+
+const TODO_ICONS = {
+  pending: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+  running: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+  done: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5"/></svg>',
+  blocked: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+  failed: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+};
+
+function renderTodoPanel(data) {
+  const panel = document.getElementById('todoPanel');
+  panel.classList.remove('hidden');
+  panel.classList.toggle('collapsed', todoState.collapsed);
+  const doneCount = data.tasks.filter(t => t.status === 'done').length;
+  document.getElementById('todoTitle').textContent =
+    `To-dos (${doneCount}/${data.tasks.length}) — ${data.current_phase}`;
+  const list = document.getElementById('todoList');
+  list.innerHTML = '';
+  for (const t of data.tasks) {
+    const row = el('div', `todo-item ${t.status}`);
+    const icon = el('div', 'ti-icon', TODO_ICONS[t.status] || TODO_ICONS.pending);
+    row.appendChild(icon);
+    row.appendChild(el('span', 'ti-label', t.task_type.replace(/_/g, ' ')));
+    if (t.entity_id) row.appendChild(el('span', 'ti-entity', t.entity_id.slice(0, 8)));
+    list.appendChild(row);
+  }
+}
+
+document.getElementById('todoHead').onclick = () => {
+  todoState.collapsed = !todoState.collapsed;
+  document.getElementById('todoPanel').classList.toggle('collapsed', todoState.collapsed);
+};
+
+document.getElementById('stopAutonomousBtn').onclick = async () => {
+  if (!state.currentSession) return;
+  await api(`/api/sessions/${state.currentSession}/autonomous/stop`, { method: 'POST' });
+  renderSystemLine('[stop requested]');
+};
+
+async function openSession(sessionId, fresh) {
+  state.currentSession = sessionId;
+  state.stickToBottom = true;
+  lastToolGroup = null;
+  currentPhaseGroup = null;
+  streamBubble = null;
+  reasoningBubble = null;
+  stopTodoPoll();  // avoid a stray poll tick landing between switching sessions and the
+                    // autonomous/status check below re-arming it for the new one, if needed
+  document.getElementById('home').classList.add('hidden');
+  document.getElementById('chatView').classList.remove('hidden');
+  document.getElementById('transcriptInner').innerHTML = '';
+  document.getElementById('jumpLatest').classList.add('hidden');
+  const known = state.sessions.find(s => s.session_id === sessionId);
+  document.getElementById('chatTitle').textContent =
+    (known && known.title) || (known && known.message_count ? 'Untitled session' : 'New session');
+  document.getElementById('chatMeta').innerHTML =
+    `<span class="chip">${escapeHtml(state.engagementId)}</span>` +
+    `<span class="chip">${MODE_OPTIONS.find(o => o.value === state.mode).label}</span>` +
+    `<span>${sessionId.slice(0, 8)}</span>`;
+  closeComputerPanel();
+  refreshSessionList();
+
+  if (!fresh) {
+    try {
+      const detail = await api(`/api/sessions/${sessionId}`);
+      for (const m of detail.messages) renderMessage(m);
+      requestAnimationFrame(() => { const t = document.getElementById('transcript'); t.scrollTop = t.scrollHeight; });
+    } catch (e) { /* nothing on disk yet */ }
+  }
+
+  if (state.eventSource) state.eventSource.close();
+  // EventSource can't set an Authorization header — the key (if any) goes as a query param,
+  // which the server's require_api_key middleware accepts specifically for this route.
+  const keyQs = getApiKey() ? `?key=${encodeURIComponent(getApiKey())}` : '';
+  state.eventSource = new EventSource(`/api/sessions/${sessionId}/events${keyQs}`);
+  state.eventSource.onmessage = (ev) => {
+    const data = JSON.parse(ev.data);
+    if (data.type === 'reasoning_delta') {
+      appendReasoningDelta(data.text);
+    } else if (data.type === 'assistant_delta') {
+      appendStreamDelta(data.text);   // collapses any open reasoning trace itself
+    } else if (data.type === 'message') {
+      if (data.record.role === 'assistant') {
+        if (finalizeStream(data.record)) return;   // the streamed bubble already showed it
+      } else {
+        finalizeStream(null);   // also collapses a reasoning trace even with nothing to finalize
+      }
+      renderMessage(data.record);
+      const finalAssistant = data.record.role === 'assistant' && (data.record.content || '').trim();
+      if (!finalAssistant && (state.taskStartedAt || state.autonomousActive)) showTyping();
+    } else if (data.type === 'task_done') {
+      finalizeStream(null); hideTyping();
+      onTaskFinished(data.status);
+    } else if (data.type === 'task_error') {
+      finalizeStream(null); hideTyping();
+      renderSystemLine(`error — ${data.error}`);
+      onTaskFinished('error');
+    } else if (data.type === 'autonomous_event') {
+      renderAutonomousEvent(data);
+    } else if (data.type === 'autonomous_done') {
+      hideTyping();
+      renderAutonomousDone(data);
+    }
+  };
+
+  api(`/api/sessions/${sessionId}/autonomous/status`).then(s => setAutonomousActive(s.active)).catch(() => {});
+}
+
+function onTaskFinished(status) {
+  if (state.taskStartedAt) {
+    const secs = Math.round((Date.now() - state.taskStartedAt) / 1000);
+    setHeaderStatus(`Worked for ${secs}s · ${status}`);
+    state.taskStartedAt = null;
+  }
+  setSending(false);
+}
+
+document.getElementById('copyIdBtn').onclick = () => {
+  if (state.currentSession) navigator.clipboard.writeText(state.currentSession);
+};
+
+document.getElementById('steerBtn').onclick = async () => {
+  if (!state.currentSession) return;
+  const message = prompt('Steer message (delivered before the model\'s next turn):');
+  if (!message) return;
+  await api(`/api/sessions/${state.currentSession}/steer`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message}),
+  });
+  renderSystemLine(`[steer sent] ${message}`);
+};
+
+/* ---------- sending ---------- */
+function setSending(sending) {
+  document.getElementById('chatSendBtn').disabled = sending;
+  document.getElementById('homeSendBtn').disabled = sending;
+}
+
+async function sendToCurrentSession(content) {
+  setSending(true);
+  state.stickToBottom = true;
+  state.taskStartedAt = Date.now();
+  setHeaderStatus('Working…');
+  showTyping();
+  try {
+    await api(`/api/sessions/${state.currentSession}/messages`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({content}),
+    });
+  } catch (e) {
+    hideTyping();
+    renderSystemLine(`error — ${e.message}`);
+    setSending(false);
+  }
+}
+
+function setHeaderStatus(text) {
+  const meta = document.getElementById('chatMeta');
+  let st = meta.querySelector('.hd-status');
+  if (!st) { st = el('span', 'hd-status chip'); meta.prepend(st); }
+  st.textContent = text;
+}
+
+function showTyping() {
+  if (document.getElementById('typingRow') || streamBubble) return;
+  const row = el('div', 'typing');
+  row.id = 'typingRow';
+  row.innerHTML = '<div class="av">AI</div><div class="dots"><i></i><i></i><i></i></div>';
+  document.getElementById('transcriptInner').appendChild(row);
+  maybeScroll();
+}
+function hideTyping() {
+  const r = document.getElementById('typingRow');
+  if (r) r.remove();
+}
+
+/* --- live thinking trace (llama-server's separate reasoning_content stream) ---
+   Reuses the .context-block/.cb-head/.cb-body collapsible pattern contextBlock() below uses for
+   driver context injections — same visual language for "extra, foldable, not the reply itself".
+   Renders live while the model thinks, then auto-collapses (still one click to reopen) as soon
+   as the actual reply starts, a message lands, or the turn ends with no reply at all. */
+let reasoningBubble = null;  // { cb, body, label, chars, raw }
+function appendReasoningDelta(text) {
+  hideTyping();
+  if (!reasoningBubble) {
+    const cb = el('div', 'context-block reasoning-block');
+    const head = el('div', 'cb-head');
+    head.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>' +
+      '<span>Thinking…</span><span class="reasoning-chars" style="color:var(--text-faint)"></span>';
+    const body = el('div', 'cb-body');
+    head.onclick = () => cb.classList.toggle('collapsed');
+    cb.appendChild(head); cb.appendChild(body);
+    document.getElementById('transcriptInner').appendChild(cb);
+    reasoningBubble = { cb, body, label: head.querySelector('span'), chars: head.querySelector('.reasoning-chars'), raw: '' };
+  }
+  reasoningBubble.raw += text;
+  reasoningBubble.body.textContent = reasoningBubble.raw;
+  reasoningBubble.chars.textContent = `${(reasoningBubble.raw.length / 1000).toFixed(1)}k chars`;
+  maybeScroll();
+}
+function finalizeReasoning() {
+  if (!reasoningBubble) return;
+  const b = reasoningBubble;
+  reasoningBubble = null;
+  b.label.textContent = 'Thinking';
+  b.cb.classList.add('collapsed');
+}
+
+/* --- streamed assistant reply (types itself out as tokens arrive) --- */
+let streamBubble = null;  // { row, textEl, raw }
+function appendStreamDelta(text) {
+  hideTyping();
+  finalizeReasoning();   // the real reply has started — the trace is done, collapse it
+  if (!streamBubble) {
+    const row = el('div', 'assistant-msg streaming');
+    row.appendChild(el('div', 'av', 'AI'));
+    const t = el('div', 'text-block md');
+    row.appendChild(t);
+    document.getElementById('transcriptInner').appendChild(row);
+    streamBubble = { row, textEl: t, raw: '' };
+  }
+  streamBubble.raw += text;
+  streamBubble.textEl.innerHTML = renderMarkdown(streamBubble.raw);
+  maybeScroll();
+}
+function finalizeStream(record) {
+  finalizeReasoning();   // the turn is over one way or another — don't leave the trace open
+  if (!streamBubble) return false;
+  const b = streamBubble;
+  streamBubble = null;
+  const content = record && (record.content || '').trim();
+  if (content) {
+    b.textEl.innerHTML = renderMarkdown(content);
+    if (record.message_id) { b.row.dataset.messageId = record.message_id; b.textEl.dataset.messageId = record.message_id; }
+    b.row.classList.remove('streaming');
+    return true;   // this assistant message is already on screen — caller should not re-render it
+  }
+  b.row.remove();   // turn produced only tool calls / no text — drop the empty bubble
+  return false;
+}
+
+document.getElementById('homeSendBtn').onclick = () => {
+  const input = document.getElementById('homeInput');
+  const content = input.value.trim();
+  if (state.mode !== 'assistant') {
+    input.value = '';
+    createAndStartAutonomous();
+    return;
+  }
+  if (!content) return;
+  input.value = '';
+  createAndSend(content);
+};
+
+document.getElementById('chatSendBtn').onclick = () => {
+  const input = document.getElementById('chatInput');
+  const content = input.value.trim();
+  if (!content || !state.currentSession) return;
+  input.value = ''; autoGrow(input);
+  sendToCurrentSession(content);
+};
+function autoGrow(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 200) + 'px'; }
+for (const id of ['chatInput', 'homeInput']) {
+  const t = document.getElementById(id);
+  t.addEventListener('input', () => autoGrow(t));
+  t.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      document.getElementById(id === 'chatInput' ? 'chatSendBtn' : 'homeSendBtn').click();
+    }
+  });
+}
+
+/* ---------- rendering messages ---------- */
+const TOOL_ICONS = {
+  http_recon: 'M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3',
+  knowledge_fetch: 'M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3',
+  knowledge_search: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-4.3-4.3',
+  port_discovery: 'M4 17l6-6-6-6M12 19h8',
+  run_command: 'M4 17l6-6-6-6M12 19h8',
+  browser_fetch: 'M3 4h18v16H3zM3 9h18',
+  osint_record: 'M9 12h6M9 16h6M9 8h6M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z',
+};
+
+function stripToolMarkers(content) {
+  const m = content.match(/^\[TOOL OUTPUT[^\]]*\]\n([\s\S]*)\n\[\/TOOL OUTPUT\]$/);
+  return m ? m[1] : content;
+}
+
+function extractVerdict(content) {
+  const m = content.match(/VERDICT:(SUSPICIOUS|MALICIOUS|UNKNOWN)/);
+  return m ? m[1] : null;
+}
+
+function prettyContent(raw) {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch (e) {
+    return raw;
+  }
+}
+
+/* --- smart scroll: only follow the tail if the operator is already near the bottom --- */
+function isNearBottom() {
+  const t = document.getElementById('transcript');
+  return t.scrollHeight - t.scrollTop - t.clientHeight < 120;
+}
+function maybeScroll() {
+  if (state.stickToBottom) {
+    const t = document.getElementById('transcript');
+    t.scrollTop = t.scrollHeight;
+    document.getElementById('jumpLatest').classList.add('hidden');
+  } else {
+    document.getElementById('jumpLatest').classList.remove('hidden');
+  }
+}
+document.getElementById('transcript').addEventListener('scroll', () => {
+  state.stickToBottom = isNearBottom();
+  if (state.stickToBottom) document.getElementById('jumpLatest').classList.add('hidden');
+});
+document.getElementById('jumpLatest').onclick = () => {
+  state.stickToBottom = true;
+  maybeScroll();
+};
+
+/* --- tiny markdown renderer (escape first, then a safe subset) --- */
+function renderMarkdown(src) {
+  const esc = escapeHtml(src);
+  const blocks = esc.split(/```/);
+  let out = '';
+  blocks.forEach((chunk, i) => {
+    if (i % 2 === 1) {  // fenced code
+      out += `<pre><code>${chunk.replace(/^\w*\n/, '')}</code></pre>`;
+      return;
+    }
+    const lines = chunk.split('\n');
+    let list = null;
+    const flush = () => { if (list) { out += `</${list}>`; list = null; } };
+    for (let raw of lines) {
+      const line = raw.replace(/\s+$/, '');
+      if (!line.trim()) { flush(); continue; }
+      let m;
+      if ((m = line.match(/^(#{1,3})\s+(.*)$/))) { flush(); out += `<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`; continue; }
+      if (/^(---|\*\*\*|___)\s*$/.test(line)) { flush(); out += '<hr>'; continue; }
+      if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) { if (list !== 'ul') { flush(); list = 'ul'; out += '<ul>'; } out += `<li>${inlineMd(m[1])}</li>`; continue; }
+      if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { if (list !== 'ol') { flush(); list = 'ol'; out += '<ol>'; } out += `<li>${inlineMd(m[1])}</li>`; continue; }
+      if ((m = line.match(/^&gt;\s?(.*)$/))) { flush(); out += `<blockquote>${inlineMd(m[1])}</blockquote>`; continue; }
+      flush();
+      out += `<p>${inlineMd(line)}</p>`;
+    }
+    flush();
+  });
+  return out;
+}
+function inlineMd(s) {
+  return s
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+
+/* --- driver-generated context injections we collapse rather than dump inline --- */
+const CONTEXT_RE = /^\s*(INTAKE|RECON|ANALYSIS|VALIDATION|REPORT|CLOSEOUT)\s+phase[.:]|RECORDED OBSERVATIONS|\[CURRENT HYPOTHESES\]/i;
+function looksLikeContext(text) {
+  return CONTEXT_RE.test(text) || (text.length > 900 && /\n/.test(text) && !/\?$/.test(text.trim()));
+}
+
+let lastToolGroup = null;  // {name, groupEl, bodyEl, count}
+
+function renderMessage(record) {
+  const inner = document.getElementById('transcriptInner');
+  const mid = record.message_id;
+  const tag = (node) => { if (mid) node.dataset.messageId = mid; return node; };
+  const wasNear = state.stickToBottom;
+  hideTyping();
+  if (record.role !== 'tool') lastToolGroup = null;
+
+  if (record.role === 'user') {
+    const clean = (record.content || '').replace(/\n\n\/no_think$/, '');
+    if (clean.startsWith('[OPERATOR STEER]')) {
+      renderSystemLine(clean.replace('[OPERATOR STEER]', 'steer:').trim());
+    } else if (looksLikeContext(clean)) {
+      inner.appendChild(tag(contextBlock('Phase / context injection', clean)));
+    } else {
+      const b = el('div', 'bubble-user');
+      b.textContent = clean;
+      inner.appendChild(tag(b));
+    }
+  } else if (record.role === 'assistant') {
+    if (record.content && record.content.trim()) {
+      const row = el('div', 'assistant-msg');
+      row.appendChild(el('div', 'av', 'AI'));
+      const b = el('div', 'text-block md');
+      b.innerHTML = renderMarkdown(record.content.trim());
+      row.appendChild(b);
+      inner.appendChild(tag(row));
+      // keep the message-id anchor on a node that .text-block selectors also see
+      if (mid) b.dataset.messageId = mid;
+    }
+  } else if (record.role === 'tool') {
+    const raw = record.content || '';
+    const verdict = extractVerdict(raw);
+    const body = stripToolMarkers(raw);
+    const name = record.name || 'tool';
+    const chip = el('div', 'tool-chip' + (verdict ? ' flagged' : ''));
+    const iconPath = TOOL_ICONS[name] || TOOL_ICONS.run_command;
+    chip.dataset.toolName = name;
+    chip.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${iconPath}"/></svg><span>${name}</span>` +
+      (verdict ? `<span class="verdict">${verdict}</span>` : '');
+    chip.onclick = () => openComputerPanel(name, body);
+
+    // coalesce a run of same-name tool calls into one expandable group (3+), else inline chip
+    if (lastToolGroup && lastToolGroup.name === name && !verdict) {
+      if (lastToolGroup.count === 1) {  // promote the earlier single chip into a group
+        const firstChip = lastToolGroup.groupEl;
+        if (firstChip.nextElementSibling && firstChip.nextElementSibling.classList.contains('tool-result'))
+          firstChip.nextElementSibling.remove();
+        const g = el('div', 'tool-group collapsed');
+        const head = el('div', 'tg-head');
+        head.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${iconPath}"/></svg><span>${name}</span><span class="tg-count"></span><span style="margin-left:auto">▸</span>`;
+        const bodyEl = el('div', 'tg-body');
+        head.onclick = () => g.classList.toggle('collapsed');
+        g.appendChild(head); g.appendChild(bodyEl);
+        firstChip.replaceWith(g);
+        bodyEl.appendChild(firstChip);
+        lastToolGroup = { name, groupEl: g, bodyEl, count: 1 };
+      }
+      lastToolGroup.bodyEl.appendChild(chip);
+      lastToolGroup.count++;
+      lastToolGroup.groupEl.querySelector('.tg-count').textContent = `×${lastToolGroup.count}`;
+    } else {
+      inner.appendChild(tag(chip));
+      lastToolGroup = { name, groupEl: chip, bodyEl: null, count: 1 };
+      const preview = toolPreview(body);
+      if (preview) { const p = el('div', 'tool-result'); p.textContent = preview; inner.appendChild(p); }
+    }
+
+    if (verdict) {
+      lastToolGroup = null;
+      const warn = el('div', 'warning-block');
+      warn.innerHTML = `<div class="head"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.8 1.8 0 001.5 2.7h15.6a1.8 1.8 0 001.5-2.7L13.7 3.9a1.8 1.8 0 00-3.4 0z"/></svg>Injection scan flagged this output: ${verdict}</div><div class="body">The session is now tainted for a bounded window — the broker will require approval for anything beyond passive recon until it clears.</div>`;
+      inner.appendChild(warn);
+    }
+  }
+  state.stickToBottom = wasNear;
+  maybeScroll();
+}
+
+function toolPreview(body) {
+  try {
+    const j = JSON.parse(body);
+    if (j.ok === true && j.hypothesis_id) return 'recorded';
+    if (j.ok === true && j.finding_id) return 'finding recorded';
+    if (j.final_status || j.status) return `status ${j.final_status || j.status}`;
+    if (Array.isArray(j.open_ports)) return `${j.open_ports.length} open ports`;
+    if (Array.isArray(j.results)) return `${j.results.length} results`;
+    if (j.ok === true) return 'ok';
+  } catch (e) {
+    const one = body.replace(/\s+/g, ' ').trim();
+    if (one && one.length < 120) return one;
+  }
+  return '';
+}
+
+function contextBlock(label, text) {
+  const cb = el('div', 'context-block collapsed');
+  const head = el('div', 'cb-head');
+  head.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg><span>${label}</span><span style="color:var(--text-faint)">${(text.length / 1000).toFixed(1)}k chars</span>`;
+  const body = el('div', 'cb-body');
+  body.textContent = text;
+  head.onclick = () => cb.classList.toggle('collapsed');
+  cb.appendChild(head); cb.appendChild(body);
+  return cb;
+}
+
+function renderSystemLine(text) {
+  const inner = document.getElementById('transcriptInner');
+  lastToolGroup = null;
+  const b = el('div', 'system-block');
+  b.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span></span>`;
+  b.querySelector('span').textContent = text;
+  inner.appendChild(b);
+  maybeScroll();
+}
+
+/* ---------- autonomous / consult rendering ---------- */
+let currentPhaseGroup = null;
+
+function phaseLine(html) {
+  const inner = document.getElementById('transcriptInner');
+  const target = currentPhaseGroup ? currentPhaseGroup.body : inner;
+  const b = el('div', 'autonomous-block');
+  b.innerHTML = html;
+  target.appendChild(b);
+}
+
+function renderAutonomousEvent(sse) {
+  // sse = {type: "autonomous_event", event: {...}} — the inner event object (from
+  // AutonomousDriver._emit()) is nested, not spread, so its own "type" field can't collide
+  // with the outer envelope's "type" (see server.py's own comment on this).
+  const data = sse.event;
+  const inner = document.getElementById('transcriptInner');
+  const kind = data.type;
+  lastToolGroup = null;
+  if (kind === 'engagement_bootstrapped') {
+    renderSystemLine(data.detail || 'engagement prepared');
+  } else if (kind === 'phase_entered') {
+    if (currentPhaseGroup) currentPhaseGroup.el.classList.add('done', 'collapsed');
+    const g = el('div', 'phase-group');
+    const head = el('div', 'phase-block', `<span>→ ${data.phase}</span>`);
+    const body = el('div', 'pg-body');
+    head.onclick = () => g.classList.toggle('collapsed');
+    g.appendChild(head); g.appendChild(body);
+    inner.appendChild(g);
+    currentPhaseGroup = { el: g, head, body };
+  } else if (kind === 'phase_advanced') {
+    if (currentPhaseGroup) {
+      currentPhaseGroup.head.innerHTML = `<span>✓ ${data.from_phase}</span>`;
+      currentPhaseGroup.el.classList.add('done', 'collapsed');
+    }
+  } else if (kind === 'deterministic_task_done') {
+    phaseLine(`<span class="${data.ok ? 'ab-ok' : 'ab-no'}">${data.ok ? '✓' : '✗'}</span> ${escapeHtml(data.task_type)} — ${escapeHtml(data.detail || '')}`);
+  } else if (kind === 'judgment_task_result') {
+    phaseLine(`${escapeHtml(data.task_type)}: ${escapeHtml(data.message || data.status || '')}`);
+  } else if (kind === 'judgment_task_error') {
+    renderSystemLine(`${data.task_id} error: ${data.error}`);
+  } else if (kind === 'blocked') {
+    currentPhaseGroup = null;
+    inner.appendChild(el('div', 'blocked-block', `Blocked — ${escapeHtml(data.reason)}`));
+    setAutonomousActive(false);
+  } else if (kind === 'consult_pending') {
+    renderConsultCard(data);
+  } else if (kind === 'consult_answered') {
+    markConsultCardAnswered(data.request_id, data.answer);
+  } else if (kind === 'consult_timeout' || kind === 'consult_interrupted_by_stop') {
+    markConsultCardAnswered(data.request_id, kind === 'consult_timeout' ? '(no response — stopped)' : '(stopped)');
+  } else if (kind === 'run_complete') {
+    if (currentPhaseGroup) currentPhaseGroup.el.classList.add('done', 'collapsed');
+    currentPhaseGroup = null;
+    inner.appendChild(el('div', 'phase-block', '<span>✓ Engagement closed out</span>'));
+  } else if (kind === 'stopped_by_operator') {
+    renderSystemLine('autonomous run stopped');
+  }
+  maybeScroll();
+}
+
+function renderAutonomousDone(data) {
+  setAutonomousActive(false);
+  currentPhaseGroup = null;
+  const b = el('div', data.status === 'closed_out' ? 'phase-block' : 'blocked-block');
+  b.textContent = `Run finished: ${data.status} — ${data.reason}`;
+  document.getElementById('transcriptInner').appendChild(b);
+  setHeaderStatus(`${data.status} · ${(data.phases_completed || []).join(', ')}`);
+  maybeScroll();
+}
+
+function renderConsultCard(data) {
+  const inner = document.getElementById('transcriptInner');
+  const card = el('div', 'consult-card');
+  card.id = `consult-${data.request_id}`;
+  card.innerHTML = `
+    <div class="question"></div>
+    <textarea placeholder="Optional note to redirect the next phase…"></textarea>
+    <div class="btns">
+      <button class="continue">Continue</button>
+      <button class="stop">Stop</button>
+    </div>
+  `;
+  card.querySelector('.question').textContent = data.question;
+  card.querySelector('.continue').onclick = () => resolveConsult(data.request_id, card.querySelector('textarea').value.trim() || 'continue');
+  card.querySelector('.stop').onclick = () => resolveConsult(data.request_id, 'stop');
+  inner.appendChild(card);
+  state.stickToBottom = true;
+  maybeScroll();
+}
+async function resolveConsult(requestId, answer) {
+  await api(`/api/consults/${requestId}/resolve`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({answer}),
+  });
+  markConsultCardAnswered(requestId, answer);
+}
+function markConsultCardAnswered(requestId, answer) {
+  const card = document.getElementById(`consult-${requestId}`);
+  if (!card) return;
+  card.classList.add('answered');
+  const q = card.querySelector('.question');
+  q.textContent = `${q.textContent} — answered: ${answer}`;
+}
+
+/* ---------- computer panel ---------- */
+function openComputerPanel(name, rawBody) {
+  const panel = document.getElementById('computerPanel');
+  const pretty = prettyContent(rawBody);
+  panel.classList.remove('hidden');
+  panel.innerHTML = `
+    <div class="head">
+      <div class="title">Tool output</div>
+      <div style="display:flex;gap:12px;align-items:center">
+        <button id="copyComputerBtn" title="Copy" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font:500 12px Inter">Copy</button>
+        <svg id="closeComputerBtn" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
+      </div>
+    </div>
+    <div class="subtitle">Executed <span>${escapeHtml(name)}</span></div>
+    <pre></pre>
+  `;
+  panel.querySelector('pre').textContent = pretty;
+  panel.querySelector('#closeComputerBtn').onclick = closeComputerPanel;
+  panel.querySelector('#copyComputerBtn').onclick = (e) => {
+    navigator.clipboard.writeText(pretty); e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy'; }, 1200);
+  };
+  document.getElementById('computerResize').classList.remove('hidden');
+}
+function closeComputerPanel() {
+  document.getElementById('computerPanel').classList.add('hidden');
+  document.getElementById('computerResize').classList.add('hidden');
+}
+
+/* ---------- drag-to-resize side panels ---------- */
+function makeResizable(handle, panel, cssVar, storeKey, min, max) {
+  try {
+    const saved = parseInt(localStorage.getItem(storeKey) || '', 10);
+    if (saved) document.documentElement.style.setProperty(cssVar, saved + 'px');
+  } catch (e) { /* private mode */ }
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const right = panel.getBoundingClientRect().right;
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    const onMove = (ev) => {
+      const w = Math.max(min, Math.min(max, right - ev.clientX));
+      document.documentElement.style.setProperty(cssVar, w + 'px');
+    };
+    const onUp = () => {
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      try { localStorage.setItem(storeKey, parseInt(getComputedStyle(panel).width, 10)); } catch (e) { /* */ }
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  handle.addEventListener('dblclick', () => {   // reset to the default width
+    document.documentElement.style.removeProperty(cssVar);
+    try { localStorage.removeItem(storeKey); } catch (e) { /* */ }
+  });
+}
+
+/* ---------- approvals ---------- */
+async function refreshApprovals() {
+  const pending = await api('/api/approvals');
+  const badge = document.getElementById('approvalBadge');
+  if (pending.length > 0) {
+    badge.textContent = pending.length;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+  const list = document.getElementById('approvalsList');
+  list.innerHTML = '';
+  if (pending.length === 0) {
+    const empty = el('div', '', 'Nothing pending.');
+    empty.id = 'approvalsEmpty';
+    list.appendChild(empty);
+    return;
+  }
+  for (const req of pending) {
+    const card = el('div', 'approval-card');
+    card.innerHTML = `
+      <div class="who">${req.tool} — session ${req.session_id.slice(0, 10)}…</div>
+      <div class="reason"></div>
+      <div class="btns"><button class="approve">Approve</button><button class="decline">Decline</button></div>
+    `;
+    card.querySelector('.reason').textContent = req.reason;
+    card.querySelector('.approve').onclick = () => resolveApproval(req.request_id, true);
+    card.querySelector('.decline').onclick = () => resolveApproval(req.request_id, false);
+    list.appendChild(card);
+  }
+}
+async function resolveApproval(requestId, approved) {
+  await api(`/api/approvals/${requestId}/resolve`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({approved}),
+  });
+  refreshApprovals();
+}
+
+document.getElementById('approvalsBtn').onclick = () => {
+  document.getElementById('approvalsDrawer').classList.remove('hidden');
+  refreshApprovals();
+};
+document.getElementById('closeApprovalsBtn').onclick = () => {
+  document.getElementById('approvalsDrawer').classList.add('hidden');
+};
+
+/* ---------- hypothesis tree panel ---------- */
+const graph = {
+  data: null, selected: null, selectedHid: null, focus: false, focusBranch: null,
+  version: null, poll: null, lastAnchor: null,
+  filters: { q: '', phase: '', status: '', confidence: '', activeOnly: false },
+  expanded: new Set(),   // hids the operator force-expanded (overrides auto-collapse)
+  collapsed: new Set(),  // hids the operator force-collapsed
+  compareSet: new Set(), // hids shift-clicked for side-by-side compare (§7.2)
+  queueCollapsed: false,
+  view: 'causal',        // 'causal' | 'timeline' | 'focus' (UI spec §9)
+  scaleExpanded: false,  // operator overrode the large-graph auto-collapse
+  tab: 'tree',           // 'tree' | 'notes'
+};
+const nb = { data: null, cat: '', q: '', poll: null, version: null, kbMode: false, kb: null };
+const findingsState = { data: null, poll: null };
+const VERDICT_GLYPH = { confirmed: '✓✓', supported: '✓', refuted: '×', inconclusive: '?', superseded: '⇒' };
+const CONF_LEVEL = { low: 1, medium: 2, high: 3 };
+const NEGATIVE_STATUSES = new Set(['parked', 'abandoned']);
+const PHASE_ORDER = ['INTAKE', 'RECON', 'ANALYSIS', 'VALIDATION', 'REPORT', 'CLOSEOUT'];
+const SCALE_THRESHOLD = 50;  // beyond this, closed branches auto-collapse (UI spec §10)
+
+document.getElementById('graphBtn').onclick = () => {
+  if (!state.currentSession) return;
+  openGraphPanel();
+};
+document.getElementById('graphCloseBtn').onclick = closeGraphPanel;
+document.getElementById('graphRefreshBtn').onclick = () => (graph.tab === 'notes' ? loadNotebook(true) : loadGraphOverview(true));
+document.getElementById('graphFocusBtn').onclick = function () {
+  graph.focus = !graph.focus;
+  graph.focusBranch = null;  // the header toggle is about the active path, not a picked branch
+  this.classList.toggle('active', graph.focus);
+  applyGraphFocus();
+};
+document.getElementById('graphQueueHead').onclick = () => {
+  graph.queueCollapsed = !graph.queueCollapsed;
+  document.getElementById('graphQueue').classList.toggle('collapsed', graph.queueCollapsed);
+  document.getElementById('graphQueueCaret').textContent = graph.queueCollapsed ? '▸' : '▾';
+};
+document.getElementById('graphViewSelect').onchange = function () {
+  graph.view = this.value;
+  graph.scaleExpanded = false;
+  renderGraph();
+};
+document.getElementById('graphStatsPanel').onclick = (e) => e.stopPropagation();
+document.getElementById('graphStatsBtn').onclick = function (e) {
+  e.stopPropagation();
+  const panel = document.getElementById('graphStatsPanel');
+  const show = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !show);
+  this.classList.toggle('active', show);
+  if (show) renderGraphStats();
+};
+document.addEventListener('click', () => {
+  document.getElementById('graphStatsPanel').classList.add('hidden');
+  document.getElementById('graphStatsBtn').classList.remove('active');
+});
+
+/* filter bar (§9) — all client-side over the already-fetched node list, no refetch */
+function wireGraphFilter(id, key, ev) {
+  const elm = document.getElementById(id);
+  elm.addEventListener(ev, () => {
+    graph.filters[key] = (elm.type === 'checkbox') ? elm.checked : elm.value.trim();
+    renderGraph();
+  });
+}
+wireGraphFilter('graphSearch', 'q', 'input');
+wireGraphFilter('graphPhaseFilter', 'phase', 'change');
+wireGraphFilter('graphStatusFilter', 'status', 'change');
+wireGraphFilter('graphConfFilter', 'confidence', 'change');
+wireGraphFilter('graphActiveOnly', 'activeOnly', 'change');
+document.getElementById('graphClearFilters').onclick = () => {
+  graph.filters = { q: '', phase: '', status: '', confidence: '', activeOnly: false };
+  for (const [id, val] of [['graphSearch', ''], ['graphPhaseFilter', ''], ['graphStatusFilter', ''], ['graphConfFilter', '']])
+    document.getElementById(id).value = val;
+  document.getElementById('graphActiveOnly').checked = false;
+  renderGraph();
+};
+
+function openGraphPanel() {
+  document.getElementById('graphView').classList.remove('hidden');
+  showGraphTab(graph.tab || 'tree');
+}
+function closeGraphPanel() {
+  document.getElementById('graphView').classList.add('hidden');
+  clearInterval(graph.poll); graph.poll = null;
+  clearInterval(nb.poll); nb.poll = null;
+}
+
+/* --- Tree / Notebook / Findings tabs --- */
+function showGraphTab(which) {
+  graph.tab = which;
+  const notes = which === 'notes';
+  const findings = which === 'findings';
+  const tree = which === 'tree';
+  document.getElementById('tabTree').classList.toggle('active', tree);
+  document.getElementById('tabNotes').classList.toggle('active', notes);
+  document.getElementById('tabFindings').classList.toggle('active', findings);
+  document.getElementById('notebookView').classList.toggle('hidden', !notes);
+  document.getElementById('findingsView').classList.toggle('hidden', !findings);
+  document.querySelector('#graphView .g-body').classList.toggle('hidden', !tree);
+  document.getElementById('graphFilters').classList.toggle('hidden', !tree);
+  document.getElementById('graphActivePath').classList.toggle('hidden', !tree);
+  for (const id of ['graphViewSelect', 'graphFocusBtn', 'graphStatsBtn'])
+    document.getElementById(id).classList.toggle('hidden', !tree);
+
+  clearInterval(graph.poll); graph.poll = null;
+  clearInterval(nb.poll); nb.poll = null;
+  clearInterval(findingsState.poll); findingsState.poll = null;
+  if (notes) {
+    loadNotebook(true);
+    nb.poll = setInterval(() => loadNotebook(false), 5000);
+  } else if (findings) {
+    loadFindings();
+    findingsState.poll = setInterval(loadFindings, 5000);
+  } else {
+    loadGraphOverview(true);
+    graph.poll = setInterval(() => loadGraphOverview(false), 4000);
+  }
+}
+document.getElementById('tabTree').onclick = () => showGraphTab('tree');
+document.getElementById('tabNotes').onclick = () => showGraphTab('notes');
+document.getElementById('tabFindings').onclick = () => showGraphTab('findings');
+
+async function loadGraphOverview(force) {
+  if (!state.currentSession) return;
+  let data;
+  try {
+    data = await api(`/api/engagements/${encodeURIComponent(state.engagementId)}/hypothesis-graph`);
+  } catch (e) {
+    graph.data = { exists: false, nodes: [], edges: [], graph_state: null };
+    renderGraph();
+    return;
+  }
+  const version = data.graph_state && data.graph_state.graph_version;
+  if (!force && version === graph.version && graph.data) return;  // §10 — re-render only on change
+  graph.version = version;
+  graph.data = data;
+  renderGraph();
+}
+
+function graphNodesById() {
+  return Object.fromEntries((graph.data.nodes || []).map(n => [n.hypothesis_id, n]));
+}
+
+function layoutGraph(nodes, view) {
+  const byId = Object.fromEntries(nodes.map(n => [n.hypothesis_id, n]));
+  const depth = {};
+  const depthOf = (n, seen) => {
+    if (n.hypothesis_id in depth) return depth[n.hypothesis_id];
+    if (seen.has(n.hypothesis_id)) return 0;  // defensive against a bad parent cycle
+    seen.add(n.hypothesis_id);
+    const p = n.primary_parent_id ? byId[n.primary_parent_id] : null;
+    return (depth[n.hypothesis_id] = p ? depthOf(p, seen) + 1 : 0);
+  };
+  nodes.forEach(n => depthOf(n, new Set()));
+  const ROW_H = 132, X0 = 44, Y0 = 44;
+  const pos = {};
+
+  if (view === 'timeline') {
+    // X = creation order (ordinal is a dense 1..N sequence and parents always precede children,
+    // so this never re-orders — spec §4/§10). Y = causal depth so branches separate vertically.
+    const COL_W = 134;
+    const ordered = [...nodes].sort((a, b) => a.ordinal - b.ordinal);
+    let maxDepth = 0;
+    ordered.forEach((n, i) => {
+      const dep = depth[n.hypothesis_id];
+      pos[n.hypothesis_id] = { x: X0 + i * COL_W, y: Y0 + dep * ROW_H };
+      maxDepth = Math.max(maxDepth, dep);
+    });
+    return {
+      pos, view, ordered,
+      width: X0 + ordered.length * COL_W + 40,
+      height: Y0 + (maxDepth + 1) * ROW_H + 40,
+    };
+  }
+
+  // causal (default / focus) — X = causal generation, Y = sibling row ordered by ordinal
+  const COL_W = 196;
+  const cols = {};
+  nodes.forEach(n => { (cols[depth[n.hypothesis_id]] ||= []).push(n); });
+  let maxRow = 0;
+  Object.keys(cols).forEach(k => {
+    cols[k].sort((a, b) => a.ordinal - b.ordinal).forEach((n, i) => {
+      pos[n.hypothesis_id] = { x: X0 + k * COL_W, y: Y0 + i * ROW_H };
+      maxRow = Math.max(maxRow, i);
+    });
+  });
+  const depths = Object.keys(cols).map(Number);
+  return {
+    pos, cols, view: 'causal', colW: COL_W,
+    width: X0 + (Math.max(0, ...depths) + 1) * COL_W + 40,
+    height: Y0 + (maxRow + 1) * ROW_H + 40,
+  };
+}
+
+/* --- filter / collapse model (§7.6, §9) --- */
+function primaryChildren() {
+  const kids = {};
+  for (const n of (graph.data.nodes || []))
+    if (n.primary_parent_id) (kids[n.primary_parent_id] ||= []).push(n);
+  return kids;
+}
+function descendantCount(hid, kids) {
+  let c = 0;
+  for (const k of (kids[hid] || [])) c += 1 + descendantCount(k.hypothesis_id, kids);
+  return c;
+}
+function isNegative(n) {
+  return n.verdict === 'refuted' || NEGATIVE_STATUSES.has(n.lifecycle_status);
+}
+function scaleCollapseActive() {
+  return !graph.scaleExpanded && ((graph.data && graph.data.nodes) || []).length > SCALE_THRESHOLD;
+}
+function nodeCollapsed(n, kids) {
+  const hid = n.hypothesis_id;
+  if ((kids[hid] || []).length === 0) return false;
+  if (graph.collapsed.has(hid)) return true;
+  if (graph.expanded.has(hid)) return false;
+  if (isNegative(n)) return true;  // negative branches auto-collapse (§7.6) — still one click away
+  if (n.lifecycle_status === 'completed' && scaleCollapseActive()) {
+    // large graph: fold closed (concluded) branches unless they're on the active path or picked
+    const onPath = ((graph.data.graph_state || {}).active_path || []).includes(hid);
+    return !onPath && graph.selectedHid !== hid;
+  }
+  return false;
+}
+function matchesFilters(n) {
+  const f = graph.filters;
+  if (f.phase && n.phase_created !== f.phase) return false;
+  if (f.confidence && n.confidence_band !== f.confidence) return false;
+  if (f.status) {
+    if (f.status.startsWith('v:')) { if (n.verdict !== f.status.slice(2)) return false; }
+    else if (n.lifecycle_status !== f.status) return false;
+  }
+  if (f.activeOnly) {
+    const path = new Set((graph.data.graph_state && graph.data.graph_state.active_path) || []);
+    if (!path.has(n.hypothesis_id)) return false;
+  }
+  if (f.q) {
+    const hay = `h-${n.ordinal} ${n.ordinal} ${n.title} ${n.claim} ${n.surface || ''}`.toLowerCase();
+    if (!hay.includes(f.q.toLowerCase())) return false;
+  }
+  return true;
+}
+function focusNeighborhoodHids() {
+  // active path + every node one primary-lineage hop away from it (UI spec §9 "Focus" view)
+  const path = ((graph.data.graph_state || {}).active_path) || [];
+  if (!path.length) return null;  // nothing to focus on -> fall back to showing everything
+  const byId = graphNodesById();
+  const kids = primaryChildren();
+  const keep = new Set(path);
+  for (const hid of path) {
+    const n = byId[hid];
+    if (n && n.primary_parent_id) keep.add(n.primary_parent_id);
+    for (const k of (kids[hid] || [])) keep.add(k.hypothesis_id);
+  }
+  return keep;
+}
+
+function visibleGraphNodes() {
+  const nodes = graph.data.nodes || [];
+  const byId = graphNodesById();
+  const kids = primaryChildren();
+  const searching = !!graph.filters.q;
+  const focusKeep = graph.view === 'focus' ? focusNeighborhoodHids() : null;
+  const underCollapsed = (n) => {
+    if (searching) return false;  // an explicit search reveals collapsed branches
+    let p = n.primary_parent_id ? byId[n.primary_parent_id] : null;
+    const seen = new Set();
+    while (p && !seen.has(p.hypothesis_id)) {
+      seen.add(p.hypothesis_id);
+      if (nodeCollapsed(p, kids)) return true;
+      p = p.primary_parent_id ? byId[p.primary_parent_id] : null;
+    }
+    return false;
+  };
+  return nodes.filter(n =>
+    matchesFilters(n) && !underCollapsed(n) && (!focusKeep || focusKeep.has(n.hypothesis_id)));
+}
+
+function renderGraph() {
+  const d = graph.data || { nodes: [], edges: [], graph_state: null };
+  const canvas = document.getElementById('graphCanvas');
+  const svg = canvas.querySelector('svg');
+  canvas.querySelectorAll('.g-node, .g-gen-label').forEach(n => n.remove());
+  svg.innerHTML = '';
+
+  const gs = d.graph_state || {};
+  const activePath = gs.active_path || [];
+  const byId = graphNodesById();
+  const activeNode = activePath.length ? byId[activePath[activePath.length - 1]] : null;
+  const totalTokens = (d.nodes || []).reduce((s, n) => s + (n.direct_tokens || 0), 0);
+  const total = (d.nodes || []).length;
+
+  const apLine = document.getElementById('graphActivePath');
+  if (activeNode && gs.active_path_reason) {
+    apLine.classList.remove('hidden');
+    apLine.innerHTML = `<span>Pursuing</span><b>H-${activeNode.ordinal}</b><span>— ${escapeHtml(gs.active_path_reason)}</span>`;
+  } else {
+    apLine.classList.add('hidden');
+  }
+
+  renderGraphQueue();
+  renderCompareBar();
+  renderScaleBanner(total);
+
+  if (!d.nodes || total === 0) {
+    document.getElementById('graphMeta').innerHTML =
+      `<span>Engagement: <b>${escapeHtml(state.engagementId)}</b></span><span>0 hypotheses</span>`;
+    if (!canvas.querySelector('.g-empty')) {
+      canvas.appendChild(el('div', 'g-empty',
+        d.exists === false
+          ? 'This engagement hasn\'t formed any hypotheses yet.<br>They appear here as the agent records them.'
+          : 'No hypotheses recorded.'));
+    }
+    canvas.style.width = ''; canvas.style.height = '';
+    return;
+  }
+
+  const visible = visibleGraphNodes();
+  const visibleHids = new Set(visible.map(n => n.hypothesis_id));
+
+  document.getElementById('graphMeta').innerHTML =
+    `<span>Engagement: <b>${escapeHtml(state.engagementId)}</b></span>` +
+    (activeNode ? `<span>Active: <b>H-${activeNode.ordinal}</b></span>` : '') +
+    `<span>Tokens: <b>${totalTokens.toLocaleString()}</b></span>` +
+    `<span>${visible.length === total ? total + ' hypotheses' : visible.length + ' of ' + total + ' shown'}</span>`;
+
+  const existingEmpty = canvas.querySelector('.g-empty');
+  if (existingEmpty) existingEmpty.remove();
+  if (visible.length === 0) {
+    canvas.appendChild(el('div', 'g-empty', `All ${total} hypotheses are hidden by the current filters.`));
+    canvas.style.width = ''; canvas.style.height = '';
+    return;
+  }
+
+  const lay = layoutGraph(d.nodes, graph.view);  // layout over ALL nodes so positions don't jump (§10)
+  canvas.style.width = lay.width + 'px';
+  canvas.style.height = lay.height + 'px';
+
+  // axis labels
+  if (graph.view === 'timeline') {
+    // one marker per phase, at the x of its earliest visible node
+    for (const ph of PHASE_ORDER) {
+      const first = visible.filter(n => n.phase_created === ph).sort((a, b) => a.ordinal - b.ordinal)[0];
+      if (!first) continue;
+      const label = el('div', 'g-gen-label', ph);
+      label.style.left = lay.pos[first.hypothesis_id].x + 'px';
+      canvas.appendChild(label);
+    }
+  } else {
+    const colsWithVisible = {};
+    visible.forEach(n => {
+      const k = Math.round((lay.pos[n.hypothesis_id].x - 44) / (lay.colW || 196));
+      (colsWithVisible[k] ||= []).push(n);
+    });
+    Object.keys(colsWithVisible).forEach(k => {
+      const phases = [...new Set(colsWithVisible[k].map(n => n.phase_created))];
+      const label = el('div', 'g-gen-label', `GEN ${k}${phases.length === 1 ? ' · ' + phases[0] : ''}`);
+      label.style.left = (44 + k * (lay.colW || 196)) + 'px';
+      canvas.appendChild(label);
+    });
+  }
+
+  // primary-lineage edges (between visible endpoints)
+  const pairInPath = (a, b) => {
+    const i = activePath.indexOf(a);
+    return i !== -1 && activePath[i + 1] === b;
+  };
+  for (const n of visible) {
+    if (!n.primary_parent_id || !visibleHids.has(n.primary_parent_id)) continue;
+    drawGraphEdge(lay.pos[n.primary_parent_id], lay.pos[n.hypothesis_id],
+                  pairInPath(n.primary_parent_id, n.hypothesis_id) ? 'active' : '', svg);
+  }
+
+  // non-primary (DAG) cross-links — drawn hidden, revealed on selection (§4)
+  for (const e of nonPrimaryGraphEdges()) {
+    if (!visibleHids.has(e.from_hypothesis_id) || !visibleHids.has(e.to_hypothesis_id)) continue;
+    const path = drawGraphEdge(lay.pos[e.from_hypothesis_id], lay.pos[e.to_hypothesis_id],
+                               `cross ${e.edge_type}`, svg);
+    path.dataset.a = e.from_hypothesis_id;
+    path.dataset.b = e.to_hypothesis_id;
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = `${e.edge_type}${e.reason ? ' — ' + e.reason : ''}`;
+    path.appendChild(title);
+  }
+
+  const kids = primaryChildren();
+  for (const n of visible) {
+    const p = lay.pos[n.hypothesis_id];
+    const card = el('div', 'g-node');
+    card.style.left = p.x + 'px';
+    card.style.top = p.y + 'px';
+    card.dataset.status = n.lifecycle_status;
+    card.dataset.hid = n.hypothesis_id;
+    if (n.verdict && n.verdict !== 'unassessed') card.dataset.verdict = n.verdict;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label',
+      `H-${n.ordinal}, ${n.phase_created}, ${n.lifecycle_status}, ${n.confidence_band} confidence`);
+    if (graph.compareSet.has(n.hypothesis_id)) card.classList.add('compare-pick');
+    card.onclick = (e) => { if (e.shiftKey) toggleCompare(n.hypothesis_id); else selectGraphNode(n.ordinal); };
+    card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectGraphNode(n.ordinal); } };
+
+    const circle = el('div', 'circle', String(n.ordinal));
+    if (n.attempt_count > 1) circle.appendChild(el('div', 'attempt-badge', `×${n.attempt_count}`));
+    if (VERDICT_GLYPH[n.verdict]) circle.appendChild(el('div', 'verdict-glyph', VERDICT_GLYPH[n.verdict]));
+    if (n.stale_reason) {
+      const flag = el('div', 'stale-flag', '!');
+      flag.title = `Possibly stale — ${n.stale_reason}`;
+      circle.appendChild(flag);
+    }
+    card.appendChild(circle);
+    card.appendChild(el('div', 'phase-tag', n.phase_created));
+    const t = el('div', 'n-title'); t.textContent = n.title; card.appendChild(t);
+    if (n.lifecycle_status === 'running') {
+      card.appendChild(el('div', 'n-metrics', 'Active'));
+    } else {
+      const band = (n.confidence_band || 'low');
+      card.appendChild(el('div', 'n-metrics',
+        `${band[0].toUpperCase() + band.slice(1)} · ${Math.round((n.coverage || 0) * 100)}% cov`));
+    }
+    const childCount = (kids[n.hypothesis_id] || []).length;
+    if (childCount > 0 && !graph.filters.q) {
+      const collapsed = nodeCollapsed(n, kids);
+      const toggle = el('div', 'g-collapse-toggle',
+        collapsed ? `▸ ${descendantCount(n.hypothesis_id, kids)}` : '▾ hide');
+      toggle.dataset.hid = n.hypothesis_id;
+      toggle.title = collapsed ? 'Expand this branch' : 'Collapse this branch';
+      toggle.onclick = (ev) => { ev.stopPropagation(); toggleGraphBranch(n.hypothesis_id, collapsed); };
+      card.appendChild(toggle);
+    }
+    canvas.appendChild(card);
+  }
+
+  if (graph.selectedHid && visibleHids.has(graph.selectedHid)) markGraphSelected(graph.selected);
+  applyGraphFocus();
+}
+
+function toggleGraphBranch(hid, wasCollapsed) {
+  if (wasCollapsed) { graph.collapsed.delete(hid); graph.expanded.add(hid); }
+  else { graph.expanded.delete(hid); graph.collapsed.add(hid); }
+  renderGraph();
+}
+
+function nonPrimaryGraphEdges() {
+  const byId = graphNodesById();
+  return (graph.data.edges || []).filter(e => {
+    if (e.edge_type === 'spawned_by') {
+      const to = byId[e.to_hypothesis_id];
+      if (to && to.primary_parent_id === e.from_hypothesis_id) return false;  // that IS the primary lineage
+    }
+    return true;
+  });
+}
+
+function drawGraphEdge(from, to, cls, svg) {
+  const x1 = from.x + 79, y1 = from.y + 25, x2 = to.x + 29, y2 = to.y + 25;
+  const midx = (x1 + x2) / 2;
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', `M ${x1} ${y1} C ${midx} ${y1}, ${midx} ${y2}, ${x2} ${y2}`);
+  path.setAttribute('class', 'edge-path' + (cls ? ' ' + cls : ''));
+  svg.appendChild(path);
+  return path;
+}
+
+function branchHids(rootHid) {
+  // the focused node + its primary-lineage descendants + its ancestor chain (so you see how it
+  // connects back to a root), for the drawer's "Focus this branch" action (§7.4)
+  const byId = graphNodesById();
+  const kids = primaryChildren();
+  const keep = new Set([rootHid]);
+  const walkDown = (h) => { for (const k of (kids[h] || [])) { keep.add(k.hypothesis_id); walkDown(k.hypothesis_id); } };
+  walkDown(rootHid);
+  let p = byId[rootHid] && byId[rootHid].primary_parent_id;
+  const seen = new Set();
+  while (p && !seen.has(p)) { seen.add(p); keep.add(p); p = byId[p] && byId[p].primary_parent_id; }
+  return keep;
+}
+
+function applyGraphFocus() {
+  const gs = (graph.data && graph.data.graph_state) || {};
+  let keep = null;
+  if (graph.focusBranch) keep = branchHids(graph.focusBranch);
+  else if (graph.focus) { const p = gs.active_path || []; if (p.length) keep = new Set(p); }
+  document.querySelectorAll('#graphCanvas .g-node').forEach(node => {
+    node.style.opacity = (keep && !keep.has(node.dataset.hid)) ? 0.28 : 1;
+  });
+}
+
+function markGraphSelected(ordinal) {
+  let selHid = null;
+  document.querySelectorAll('#graphCanvas .g-node').forEach(node => {
+    const n = (graph.data.nodes || []).find(x => x.hypothesis_id === node.dataset.hid);
+    const on = n && n.ordinal === ordinal;
+    node.classList.toggle('selected', on);
+    if (on) selHid = node.dataset.hid;
+  });
+  // reveal the non-primary cross-links touching the selected node (§4)
+  document.querySelectorAll('#graphCanvas .edge-path.cross').forEach(p => {
+    p.classList.toggle('visible', selHid && (p.dataset.a === selHid || p.dataset.b === selHid));
+  });
+  document.querySelectorAll('#graphQueueList .gq-item').forEach(it => {
+    it.classList.toggle('selected', Number(it.dataset.ordinal) === ordinal);
+  });
+}
+
+async function selectGraphNode(ordinal) {
+  graph.selected = ordinal;
+  const match = (graph.data.nodes || []).find(x => x.ordinal === ordinal);
+  graph.selectedHid = match ? match.hypothesis_id : null;
+  markGraphSelected(ordinal);
+  const drawer = document.getElementById('graphDrawer');
+  drawer.innerHTML = '<div class="d-empty">Loading…</div>';
+  let detail;
+  try {
+    detail = await api(`/api/engagements/${encodeURIComponent(state.engagementId)}/hypothesis-graph/nodes/${ordinal}`);
+  } catch (e) {
+    drawer.innerHTML = `<div class="d-empty">Could not load H-${ordinal}: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderGraphDrawer(detail);
+}
+
+function renderGraphDrawer(n) {
+  const d = document.getElementById('graphDrawer');
+  d.innerHTML = '';
+  const byId = graphNodesById();
+
+  // 1. header
+  const header = el('div', 'd-section');
+  const head = el('div', 'd-head');
+  head.appendChild(el('div', 'd-ord', `H-${n.ordinal}`));
+  const ht = el('div', 'd-title'); ht.textContent = n.title; head.appendChild(ht);
+  header.appendChild(head);
+  const tags = el('div', 'd-tags');
+  tags.appendChild(el('span', 'tag', n.phase_created));
+  tags.appendChild(el('span', `tag status ${n.lifecycle_status}`, n.lifecycle_status.replace('_', ' ')));
+  if (n.verdict && n.verdict !== 'unassessed') tags.appendChild(el('span', `tag verdict ${n.verdict}`, n.verdict));
+  header.appendChild(tags);
+  if (n.lifecycle_status === 'parked' && n.park_reason)
+    header.appendChild(el('div', 'd-rationale', `⏸ parked — ${escapeHtml(n.park_reason)}`));
+  if (n.lifecycle_status === 'abandoned' && n.abandon_reason)
+    header.appendChild(el('div', 'd-rationale', `⊗ abandoned — ${escapeHtml(n.abandon_reason)}`));
+  const ovNode = byId[n.hypothesis_id];
+  if (ovNode && ovNode.stale_reason) {
+    const st = el('div', 'd-stale');
+    st.innerHTML = `<span>⏱</span><span>Possibly stale — ${escapeHtml(ovNode.stale_reason)}. Advisory only; the status is unchanged.</span>`;
+    header.appendChild(st);
+  }
+  d.appendChild(header);
+
+  // 2. claim
+  const claim = el('div', 'd-section');
+  claim.appendChild(el('div', 'd-label', 'Claim'));
+  const ct = el('div', 'd-claim'); ct.textContent = n.claim; claim.appendChild(ct);
+  d.appendChild(claim);
+
+  // 3. why it exists
+  const why = el('div', 'd-section');
+  why.appendChild(el('div', 'd-label', 'Why this hypothesis exists'));
+  const wt = el('div', 'd-rationale'); wt.textContent = n.rationale; why.appendChild(wt);
+  if (n.primary_parent_id && byId[n.primary_parent_id]) {
+    const parent = byId[n.primary_parent_id];
+    const link = el('span', 'd-link', `derived from H-${parent.ordinal} →`);
+    link.onclick = () => selectGraphNode(parent.ordinal);
+    why.appendChild(link);
+  }
+  d.appendChild(why);
+
+  // 6. metrics — confidence / coverage / priority kept separate (spec §6)
+  const m = el('div', 'd-section');
+  m.appendChild(el('div', 'd-label', 'Confidence · Coverage · Priority'));
+  const confRow = el('div', 'metric-row');
+  confRow.appendChild(el('div', 'metric-name', 'Confidence'));
+  const dots = el('div', 'conf-band');
+  for (let i = 0; i < 3; i++) dots.appendChild(el('div', 'conf-dot' + (i < (CONF_LEVEL[n.confidence_band] || 0) ? ' on' : '')));
+  confRow.appendChild(dots);
+  const cv = el('div', 'metric-val');
+  cv.textContent = (n.confidence_band || 'low')[0].toUpperCase() + (n.confidence_band || 'low').slice(1);
+  confRow.appendChild(cv);
+  m.appendChild(confRow);
+  if (n.confidence_reason) {
+    const cr = el('div', 'd-rationale'); cr.textContent = n.confidence_reason; cr.style.marginBottom = '10px';
+    m.appendChild(cr);
+  }
+  const sug = n.suggested_confidence;
+  if (sug && sug.reason && sug.reason !== 'no direct observations yet') {
+    const ai = el('div', 'ai-estimate');
+    ai.innerHTML = `<b>AI estimate:</b> ${escapeHtml(sug.band)} — ${escapeHtml(sug.reason)}`;
+    m.appendChild(ai);
+  }
+  const covRow = el('div', 'metric-row');
+  covRow.appendChild(el('div', 'metric-name', 'Coverage'));
+  const track = el('div', 'bar-track'); const fill = el('div', 'bar-fill');
+  fill.style.width = Math.round((n.coverage || 0) * 100) + '%'; track.appendChild(fill);
+  covRow.appendChild(track);
+  const planned = n.planned_tests || 1;
+  const done = Math.round((n.coverage || 0) * planned);
+  covRow.appendChild(el('div', 'metric-val', `${done} of ${planned}`));
+  m.appendChild(covRow);
+  const prio = n.priority || { tier: 'later', components: {} };
+  const prioRow = el('div', 'metric-row');
+  prioRow.appendChild(el('div', 'metric-name', 'Priority'));
+  prioRow.appendChild(el('span', `priority-tier ${prio.tier}`, prio.tier));
+  const explainToggle = el('span', 'explain-toggle', 'Explain ▾');
+  prioRow.appendChild(explainToggle);
+  m.appendChild(prioRow);
+  const explainBox = el('div', 'explain-box'); explainBox.hidden = true;
+  const c = prio.components || {};
+  const fmt = (v) => (v === undefined || v === null) ? '–' : v;
+  explainBox.innerHTML =
+    '<ul>' +
+    `<li>impact — <span>${fmt(c.impact_norm)}</span></li>` +
+    `<li>information gain (coverage still to do) — <span>${fmt(c.information_gain)}</span></li>` +
+    `<li>phase relevance — <span>${fmt(c.phase_relevance)}</span></li>` +
+    `<li>remaining test cost — <span>${fmt(c.remaining_cost)}</span> (never counts tokens already spent)</li>` +
+    `<li>combined score — <span>${fmt(prio.score)}</span></li>` +
+    '</ul>';
+  explainToggle.onclick = () => { explainBox.hidden = !explainBox.hidden; };
+  m.appendChild(explainBox);
+  d.appendChild(m);
+
+  // 5. tokens
+  const tok = el('div', 'd-section');
+  tok.appendChild(el('div', 'd-label', 'Tokens'));
+  tok.appendChild(el('div', 'token-count', `${(n.direct_tokens || 0).toLocaleString()} direct`));
+  tok.appendChild(el('div', 'token-sub', 'own attempts on this hypothesis only'));
+  d.appendChild(tok);
+
+  // attempts (read-only)
+  const exps = n.experiments || [];
+  if (exps.length) {
+    const att = el('div', 'd-section');
+    att.appendChild(el('div', 'd-label', `Attempts (${exps.length})`));
+    for (const x of exps) {
+      const card = el('div', 'attempt');
+      const top = el('div', 'attempt-top');
+      top.appendChild(el('span', 'attempt-no', `#${x.attempt_no}`));
+      top.appendChild(el('span', `attempt-status ${x.status}`, x.status));
+      card.appendChild(top);
+      const meth = el('div', 'attempt-method'); meth.textContent = x.method_summary; card.appendChild(meth);
+      const res = el('div', 'attempt-result'); res.textContent = x.observed_result || '— pending —'; card.appendChild(res);
+      for (const o of (x.observations || [])) {
+        const obs = el('div', 'attempt-obs');
+        obs.appendChild(el('span', `obs-dot ${o.polarity}`));
+        obs.appendChild(document.createTextNode(`${o.polarity} · ${o.strength}`));
+        card.appendChild(obs);
+      }
+      att.appendChild(card);
+    }
+    d.appendChild(att);
+  }
+
+  // 8. chat anchors
+  const firstExp = exps[0] || {};
+  const lastExp = exps[exps.length - 1] || {};
+  const anchorDefs = [
+    ['Go to creation', n.origin_ref],
+    ['Go to attempt start', firstExp.chat_start_message_id],
+    ['Go to result', lastExp.chat_result_message_id],
+  ];
+  const anchors = el('div', 'd-section');
+  anchors.appendChild(el('div', 'd-label', 'Chat anchors'));
+  const aWrap = el('div', 'anchors');
+  for (const [label, mid] of anchorDefs) {
+    const b = el('button', 'anchor-btn', label);
+    if (mid) b.onclick = () => goToChatMessage(mid, n.ordinal);
+    else b.disabled = true;
+    aWrap.appendChild(b);
+  }
+  anchors.appendChild(aWrap);
+  d.appendChild(anchors);
+
+  // derived hypotheses (navigation only)
+  if ((n.derived || []).length) {
+    const der = el('div', 'd-section');
+    der.appendChild(el('div', 'd-label', `Derived hypotheses (${n.derived.length})`));
+    for (const child of n.derived) {
+      const row = el('div', 'derived-item');
+      const left = el('div');
+      const dt = el('div'); dt.textContent = `H-${child.ordinal} ${child.title}`; left.appendChild(dt);
+      const dr = el('div', 'di-reason');
+      dr.textContent = `${child.edge_type}${child.reason ? ' — ' + child.reason : ''}`;
+      left.appendChild(dr);
+      row.appendChild(left);
+      const focus = el('span', 'di-focus', 'Focus →');
+      focus.onclick = () => selectGraphNode(child.ordinal);
+      row.appendChild(focus);
+      der.appendChild(row);
+    }
+    d.appendChild(der);
+  }
+
+  // operator notes (§7.4) — append-only, never touch claim/evidence/verdict
+  if ((n.operator_notes || []).length) {
+    const notes = el('div', 'd-section');
+    notes.appendChild(el('div', 'd-label', `Operator notes (${n.operator_notes.length})`));
+    for (const note of n.operator_notes) {
+      const row = el('div', 'op-note');
+      row.textContent = note.text;
+      notes.appendChild(row);
+    }
+    d.appendChild(notes);
+  }
+
+  // steering (§7.4). Park / Reopen / Note are the operator write-path — reversible, non-history
+  // graph mutations that go straight to the service (a parked branch shows in the model's
+  // every-turn digest, so the model stops spending effort on it). Re-evaluate / Suggest send a
+  // chat message instead; Focus is a client-only view change. The claim / evidence / verdict
+  // history is never writable from here.
+  const steer = el('div', 'd-section');
+  steer.appendChild(el('div', 'd-label', 'Steer'));
+  const sWrap = el('div', 'steer-actions');
+  const focusing = graph.focusBranch === n.hypothesis_id;
+  const bFocus = el('button', 'steer-btn', focusing ? 'Clear branch focus' : 'Focus this branch');
+  bFocus.onclick = () => {
+    graph.focusBranch = focusing ? null : n.hypothesis_id;
+    graph.focus = false;
+    document.getElementById('graphFocusBtn').classList.remove('active');
+    applyGraphFocus();
+    renderGraphDrawer(n);
+  };
+  sWrap.appendChild(bFocus);
+
+  if (n.lifecycle_status === 'parked') {
+    const bReopen = el('button', 'steer-btn', 'Reopen this branch');
+    bReopen.onclick = () => graphOperatorAction(n.ordinal, 'reopen', {});
+    sWrap.appendChild(bReopen);
+  } else if (n.lifecycle_status !== 'abandoned') {
+    const bPark = el('button', 'steer-btn', 'Park this branch');
+    bPark.onclick = () => {
+      const reason = prompt(`Why park H-${n.ordinal}? Include when it should be revisited.`);
+      if (reason && reason.trim()) graphOperatorAction(n.ordinal, 'park', { reason: reason.trim() });
+    };
+    sWrap.appendChild(bPark);
+  }
+  const bNote = el('button', 'steer-btn', 'Add a note');
+  bNote.onclick = () => {
+    const text = prompt(`Note or constraint for H-${n.ordinal}:`);
+    if (text && text.trim()) graphOperatorAction(n.ordinal, 'note', { text: text.trim() });
+  };
+  sWrap.appendChild(bNote);
+
+  const bRecheck = el('button', 'steer-btn', 'Ask AI to re-evaluate');
+  bRecheck.onclick = () => sendSteerMessage(
+    `Re-evaluate hypothesis H-${n.ordinal} ("${n.title}"): review its evidence and update its ` +
+    `confidence band and/or verdict if warranted.`);
+  sWrap.appendChild(bRecheck);
+  const bSuggest = el('button', 'steer-btn', 'Suggest a related hypothesis');
+  bSuggest.onclick = () => sendSteerMessage(
+    `Based on what we now know about H-${n.ordinal} ("${n.title}"), consider whether a new, ` +
+    `distinct hypothesis is worth recording.`);
+  sWrap.appendChild(bSuggest);
+  if (!state.currentSession) [bRecheck, bSuggest].forEach(b => { b.disabled = true; });
+  steer.appendChild(sWrap);
+  steer.appendChild(el('div', 'token-sub',
+    'Park / Reopen / Note write to the graph (reversible, never history). Re-evaluate / Suggest send a chat message.'));
+  d.appendChild(steer);
+
+  d.setAttribute('aria-live', 'polite');
+}
+
+async function graphOperatorAction(ordinal, action, extra) {
+  try {
+    await api(
+      `/api/engagements/${encodeURIComponent(state.engagementId)}/hypothesis-graph/nodes/${ordinal}/operator-action`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...extra }) });
+  } catch (e) {
+    renderSystemLine(`[graph] ${action} on H-${ordinal} failed: ${e.message}`);
+    return;
+  }
+  await loadGraphOverview(true);
+  selectGraphNode(ordinal);
+}
+
+function sendSteerMessage(text) {
+  if (!state.currentSession) { renderSystemLine('[steer] no active session'); return; }
+  closeGraphPanel();
+  if (state.taskStartedAt || state.autonomousActive) {
+    api(`/api/sessions/${state.currentSession}/steer`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }),
+    }).then(() => renderSystemLine(`[steer sent] ${text}`)).catch(e => renderSystemLine(`[error] ${e.message}`));
+  } else {
+    sendToCurrentSession(text);
+  }
+}
+
+/* --- large-graph auto-collapse banner (§10) --- */
+function renderScaleBanner(total) {
+  const b = document.getElementById('graphScaleBanner');
+  if (!scaleCollapseActive()) { b.classList.add('hidden'); return; }
+  b.classList.remove('hidden');
+  b.innerHTML = '';
+  b.appendChild(el('span', '', `Large graph (${total} hypotheses) — concluded branches are folded to keep it readable.`));
+  const btn = el('button', '', 'Expand all');
+  btn.onclick = () => { graph.scaleExpanded = true; renderGraph(); };
+  b.appendChild(btn);
+}
+
+/* --- analytics (§12.4) — computed client-side from the overview payload --- */
+function renderGraphStats() {
+  const panel = document.getElementById('graphStatsPanel');
+  const nodes = (graph.data && graph.data.nodes) || [];
+  const gs = (graph.data && graph.data.graph_state) || {};
+  panel.innerHTML = '';
+  if (!nodes.length) { panel.appendChild(el('div', '', 'No hypotheses yet.')); return; }
+
+  const count = (key) => nodes.reduce((m, n) => (m[n[key]] = (m[n[key]] || 0) + 1, m), {});
+  const rows = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<div class="st-row"><span>${k.replace('_', ' ')}</span><span>${v}</span></div>`).join('');
+
+  const byPhaseTokens = {};
+  nodes.forEach(n => { byPhaseTokens[n.phase_created] = (byPhaseTokens[n.phase_created] || 0) + (n.direct_tokens || 0); });
+  const totalTokens = nodes.reduce((s, n) => s + (n.direct_tokens || 0), 0);
+  const byId = graphNodesById();
+  let activeTokens = 0;
+  for (const hid of (gs.active_path || [])) if (byId[hid]) activeTokens += byId[hid].direct_tokens || 0;
+
+  panel.innerHTML =
+    `<div class="st-group"><h4>Lifecycle</h4>${rows(count('lifecycle_status'))}</div>` +
+    `<div class="st-group"><h4>Verdict</h4>${rows(count('verdict'))}</div>` +
+    `<div class="st-group"><h4>Tokens by phase</h4>` +
+      PHASE_ORDER.filter(p => byPhaseTokens[p]).map(p =>
+        `<div class="st-row"><span>${p}</span><span>${byPhaseTokens[p].toLocaleString()}</span></div>`).join('') +
+      `<div class="st-row"><span>active branch</span><span>${activeTokens.toLocaleString()}</span></div>` +
+      `<div class="st-row"><span>total</span><span>${totalTokens.toLocaleString()}</span></div>` +
+    `</div>`;
+}
+
+/* --- "Next up" decision panel (§9) — ranking mirrors what the model was shown --- */
+function renderGraphQueue() {
+  const list = document.getElementById('graphQueueList');
+  list.innerHTML = '';
+  const ranked = (graph.data && graph.data.ranked_open) || [];
+  if (ranked.length === 0) {
+    list.appendChild(el('div', 'gq-empty', 'Nothing actionable — every open hypothesis is done, parked, or blocked.'));
+    return;
+  }
+  for (const r of ranked) {
+    const item = el('div', 'gq-item' + (r.ordinal === graph.selected ? ' selected' : ''));
+    item.dataset.ordinal = r.ordinal;
+    item.appendChild(el('span', `gq-tier ${r.priority_tier}`, r.priority_tier));
+    item.appendChild(el('span', 'gq-ord', `H-${r.ordinal}`));
+    const t = el('span', 'gq-title'); t.textContent = r.title; item.appendChild(t);
+    item.onclick = () => selectGraphNode(r.ordinal);
+    list.appendChild(item);
+  }
+}
+
+/* --- compare (§7.2) --- */
+function toggleCompare(hid) {
+  if (graph.compareSet.has(hid)) graph.compareSet.delete(hid);
+  else {
+    if (graph.compareSet.size >= 3) { renderSystemLine('[compare] pick at most 3'); return; }
+    graph.compareSet.add(hid);
+  }
+  document.querySelectorAll('#graphCanvas .g-node').forEach(node =>
+    node.classList.toggle('compare-pick', graph.compareSet.has(node.dataset.hid)));
+  renderCompareBar();
+}
+
+function renderCompareBar() {
+  const bar = document.getElementById('graphCompareBar');
+  const n = graph.compareSet.size;
+  if (n === 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  bar.innerHTML = '';
+  const byId = graphNodesById();
+  const ords = [...graph.compareSet].map(h => byId[h] && byId[h].ordinal).filter(x => x != null).sort((a, b) => a - b);
+  bar.appendChild(el('span', '', `Compare: ${ords.map(o => 'H-' + o).join(', ')}`));
+  const go = el('button', '', 'Compare');
+  go.disabled = n < 2;
+  go.onclick = () => renderCompareView(ords);
+  bar.appendChild(go);
+  const clear = el('button', 'ghost', 'Clear');
+  clear.onclick = () => { graph.compareSet.clear(); renderGraph(); };
+  bar.appendChild(clear);
+}
+
+async function renderCompareView(ordinals) {
+  const d = document.getElementById('graphDrawer');
+  d.innerHTML = '<div class="d-empty">Loading comparison…</div>';
+  let details;
+  try {
+    details = await Promise.all(ordinals.map(o =>
+      api(`/api/engagements/${encodeURIComponent(state.engagementId)}/hypothesis-graph/nodes/${o}`)));
+  } catch (e) {
+    d.innerHTML = `<div class="d-empty">Compare failed: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  const byId = graphNodesById();
+  d.innerHTML = '';
+  const sec = el('div', 'd-section');
+  const head = el('div', 'd-head');
+  head.appendChild(el('div', 'd-label', `Comparing ${details.length} hypotheses`));
+  const exit = el('span', 'explain-toggle', '✕ exit compare');
+  exit.onclick = () => { graph.compareSet.clear(); renderGraph(); if (graph.selected != null) selectGraphNode(graph.selected); else d.innerHTML = '<div class="d-empty">Select a hypothesis to see its detail.</div>'; };
+  head.appendChild(exit);
+  sec.appendChild(head);
+
+  const rows = [
+    ['', h => `H-${h.ordinal}`],
+    ['Claim', h => h.claim],
+    ['Status', h => h.lifecycle_status.replace('_', ' ') + (h.verdict && h.verdict !== 'unassessed' ? ` · ${h.verdict}` : '')],
+    ['Confidence', h => h.confidence_band],
+    ['Coverage', h => `${Math.round((h.coverage || 0) * 100)}%`],
+    ['Priority', h => `${h.priority ? h.priority.tier : '–'} (${h.priority ? h.priority.score : '–'})`],
+    ['Direct tokens', h => (h.direct_tokens || 0).toLocaleString()],
+    ['Blockers', h => {
+      const ov = byId[h.hypothesis_id];
+      if (ov && ov.stale_reason) return 'stale: ' + ov.stale_reason;
+      return h.lifecycle_status === 'blocked' || h.lifecycle_status === 'awaiting_approval' ? h.lifecycle_status : '—';
+    }],
+  ];
+  const table = el('table', 'cmp');
+  for (const [label, fn] of rows) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th'); th.textContent = label; tr.appendChild(th);
+    for (const h of details) {
+      const td = document.createElement('td'); td.textContent = fn(h); tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  const wrap = el('div', 'cmp-wrap');
+  wrap.appendChild(table);
+  sec.appendChild(wrap);
+  d.appendChild(sec);
+}
+
+function goToChatMessage(messageId, ordinal) {
+  closeGraphPanel();
+  const target = document.querySelector(`[data-message-id="${cssEscape(messageId)}"]`);
+  if (!target) {
+    renderSystemLine(`[chat anchor] the message for H-${ordinal} isn't in the loaded transcript`);
+    return;
+  }
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  target.classList.add('anchor-highlight');
+  setTimeout(() => target.classList.remove('anchor-highlight'), 2000);
+  showBackToGraphPill(ordinal);
+}
+
+function showBackToGraphPill(ordinal) {
+  let pill = document.getElementById('backToGraphPill');
+  if (!pill) {
+    pill = el('button', '', '');
+    pill.id = 'backToGraphPill';
+    document.querySelector('main').appendChild(pill);
+  }
+  pill.textContent = `↩ Back to H-${ordinal} in the tree`;
+  pill.onclick = () => {
+    pill.remove();
+    openGraphPanel();
+    if (ordinal != null) setTimeout(() => selectGraphNode(ordinal), 200);
+  };
+  clearTimeout(graph.lastAnchor);
+  graph.lastAnchor = setTimeout(() => pill && pill.remove(), 15000);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+function cssEscape(s) {
+  return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
+}
+
+/* ---------- Notebook tab (docs/working-notebook-spec.md §6) ---------- */
+const NB_CAT_ORDER = ['dead-end', 'todo', 'technique', 'recon', 'auth', 'access-control',
+  'injection', 'crypto', 'config', 'business-logic', 'infra', 'misc'];
+
+async function loadNotebook(force) {
+  if (!state.currentSession) return;
+  if (nb.kbMode) { await loadTechniqueKb(); return; }
+  let data;
+  try {
+    data = await api(`/api/engagements/${encodeURIComponent(state.engagementId)}/notebook`);
+  } catch (e) { data = { exists: false, notes: [], counts: {} }; }
+  if (!force && data.version === nb.version && nb.data) return;
+  nb.version = data.version;
+  nb.data = data;
+  renderNotebook();
+}
+
+document.getElementById('notebookSearch').addEventListener('input', (e) => {
+  nb.q = e.target.value.trim().toLowerCase();
+  renderNotebook();
+});
+document.getElementById('notebookKbToggle').addEventListener('click', () => {
+  nb.kbMode = !nb.kbMode;
+  document.getElementById('notebookKbToggle').classList.toggle('active', nb.kbMode);
+  document.getElementById('notebookCats').style.display = nb.kbMode ? 'none' : '';
+  loadNotebook(true);
+});
+
+async function loadTechniqueKb() {
+  try { nb.kb = await api('/api/technique-kb'); } catch (e) { nb.kb = { techniques: [], count: 0 }; }
+  renderNotebook();
+}
+
+function nbMatches(n) {
+  if (nb.cat && n.category !== nb.cat) return false;
+  if (nb.q) {
+    const hay = `n-${n.ordinal} ${n.category} ${n.note} ${(n.tags || []).join(' ')} ${n.surface || ''}`.toLowerCase();
+    if (!hay.includes(nb.q)) return false;
+  }
+  return true;
+}
+
+function renderNotebook() {
+  if (nb.kbMode) { renderTechniqueKb(); return; }
+  const d = nb.data || { notes: [], counts: {} };
+  const cats = document.getElementById('notebookCats');
+  cats.innerHTML = '';
+  const all = el('div', 'nb-cat' + (nb.cat ? '' : ' active'), `all <span class="nb-count">${d.notes.length}</span>`);
+  all.onclick = () => { nb.cat = ''; renderNotebook(); };
+  cats.appendChild(all);
+  for (const c of NB_CAT_ORDER) {
+    if (!d.counts[c]) continue;
+    const chip = el('div', 'nb-cat' + (nb.cat === c ? ' active' : ''), `${c} <span class="nb-count">${d.counts[c]}</span>`);
+    chip.onclick = () => { nb.cat = (nb.cat === c ? '' : c); renderNotebook(); };
+    cats.appendChild(chip);
+  }
+
+  const list = document.getElementById('notebookList');
+  list.innerHTML = '';
+  if (d.exists === false || d.notes.length === 0) {
+    list.appendChild(el('div', '', d.exists === false
+      ? 'No notes yet — the agent writes cross-cutting observations, techniques, todos and dead-ends here as it works.'
+      : 'No notes.')).id = 'notebookEmpty';
+    return;
+  }
+  const visible = d.notes.filter(nbMatches);
+  if (visible.length === 0) { const e = el('div', '', 'No notes match.'); e.id = 'notebookEmpty'; list.appendChild(e); return; }
+
+  const pinned = visible.filter(n => n.status === 'open' && (n.category === 'dead-end' || n.category === 'todo'));
+  const rest = visible.filter(n => !pinned.includes(n));
+  if (pinned.length && !nb.cat && !nb.q) {
+    list.appendChild(el('div', 'nb-section-label', 'Ruled out / to-do'));
+    pinned.forEach(n => list.appendChild(nbNoteRow(n)));
+    list.appendChild(el('div', 'nb-section-label', 'All notes'));
+  }
+  (pinned.length && !nb.cat && !nb.q ? rest : visible).forEach(n => list.appendChild(nbNoteRow(n)));
+}
+
+function nbNoteRow(n) {
+  const row = el('div', 'nb-note' + (n.status === 'resolved' ? ' resolved' : ''));
+  row.appendChild(el('div', `nb-tag ${n.category}`, n.category));
+  const body = el('div', 'nb-body');
+  const text = el('div', 'nb-text'); text.textContent = n.note; body.appendChild(text);
+  const meta = el('div', 'nb-meta');
+  meta.appendChild(el('span', 'nb-ord', `N-${n.ordinal}`));
+  if (n.surface) meta.appendChild(el('span', 'nb-chip', '@' + n.surface));
+  for (const t of (n.tags || [])) meta.appendChild(el('span', 'nb-chip', '#' + t));
+  for (const r of (n.refs || [])) meta.appendChild(el('span', 'nb-chip', '→ ' + r));
+  if (n.status === 'resolved' && n.resolved_reason) meta.appendChild(el('span', '', 'resolved: ' + n.resolved_reason));
+  body.appendChild(meta);
+  row.appendChild(body);
+
+  const actions = el('div', 'nb-actions');
+  if (n.chat_message_id) {
+    const b = el('button', 'nb-btn', 'chat →');
+    b.onclick = () => goToChatMessage(n.chat_message_id, 'N-' + n.ordinal);
+    actions.appendChild(b);
+  }
+  if (n.category === 'todo' || n.category === 'dead-end') {
+    const resolved = n.status === 'resolved';
+    const b = el('button', 'nb-btn', resolved ? 'reopen' : 'resolve');
+    b.onclick = () => nbResolve(n.ordinal, resolved ? 'reopen' : 'resolve');
+    actions.appendChild(b);
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+function renderTechniqueKb() {
+  const list = document.getElementById('notebookList');
+  list.innerHTML = '';
+  const techs = (nb.kb && nb.kb.techniques) || [];
+  const q = nb.q;
+  const shown = q
+    ? techs.filter(t => `${t.title} ${t.body} ${(t.tags || []).join(' ')} ${(t.surfaces || []).join(' ')}`.toLowerCase().includes(q))
+    : techs;
+  if (shown.length === 0) {
+    const e = el('div', '', techs.length === 0
+      ? 'No techniques saved yet — every note the agent files as "technique" is kept here, across all engagements.'
+      : 'No techniques match.');
+    e.id = 'notebookEmpty'; list.appendChild(e); return;
+  }
+  list.appendChild(el('div', 'nb-section-label', `Global library — ${techs.length} technique(s)`));
+  for (const t of shown) {
+    const row = el('div', 'nb-note');
+    row.appendChild(el('div', 'nb-tag technique', 'technique'));
+    const body = el('div', 'nb-body');
+    const txt = el('div', 'nb-text'); txt.textContent = t.body; body.appendChild(txt);
+    const meta = el('div', 'nb-meta');
+    meta.appendChild(el('span', 'nb-ord', `T-${t.ordinal}`));
+    if (t.source_engagement) meta.appendChild(el('span', 'nb-chip', 'from ' + t.source_engagement));
+    if (t.use_count) meta.appendChild(el('span', '', `used ${t.use_count}×`));
+    for (const s of (t.surfaces || [])) meta.appendChild(el('span', 'nb-chip', '@' + s));
+    for (const tag of (t.tags || [])) meta.appendChild(el('span', 'nb-chip', '#' + tag));
+    body.appendChild(meta);
+    row.appendChild(body);
+    const del = el('button', 'nb-btn', 'forget');
+    del.onclick = async () => {
+      if (!confirm(`Forget technique T-${t.ordinal}?`)) return;
+      try { await api(`/api/technique-kb/${t.ordinal}`, { method: 'DELETE' }); } catch (e) { return; }
+      loadTechniqueKb();
+    };
+    const actions = el('div', 'nb-actions'); actions.appendChild(del); row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+/* --- Findings tab: read-only except the "mark reviewed" action (docs: human review gate) --- */
+async function loadFindings() {
+  if (!state.currentSession) return;
+  try {
+    findingsState.data = await api(`/api/engagements/${encodeURIComponent(state.engagementId)}/findings`);
+  } catch (e) {
+    findingsState.data = { findings: [], count: 0, reviewed_count: 0 };
+  }
+  renderFindings();
+}
+
+const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+function renderFindings() {
+  const d = findingsState.data || { findings: [], count: 0, reviewed_count: 0 };
+  const banner = document.getElementById('findingsBanner');
+  if (d.count === 0) {
+    banner.classList.add('hidden');
+  } else {
+    banner.classList.remove('hidden');
+    const unreviewed = d.count - d.reviewed_count;
+    banner.classList.toggle('all-reviewed', unreviewed === 0);
+    banner.textContent = unreviewed === 0
+      ? `✅ All ${d.count} finding(s) human-reviewed`
+      : `⚠️ ${unreviewed} of ${d.count} finding(s) NOT human-reviewed — do not deliver this report yet`;
+  }
+
+  const list = document.getElementById('findingsList');
+  list.innerHTML = '';
+  if (d.findings.length === 0) {
+    const e = el('div', '', 'No findings recorded yet — record_finding writes here as the agent confirms issues.');
+    e.id = 'findingsEmpty'; list.appendChild(e); return;
+  }
+  const sorted = [...d.findings].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
+  sorted.forEach(f => list.appendChild(findingRow(f)));
+}
+
+function findingRow(f) {
+  const row = el('div', 'nb-note');
+  row.appendChild(el('div', `nb-tag sev-${f.severity}`, f.severity));
+  const body = el('div', 'nb-body');
+  const text = el('div', 'nb-text'); text.textContent = f.title; body.appendChild(text);
+  const meta = el('div', 'nb-meta');
+  meta.appendChild(el('span', 'nb-chip', f.status));
+  meta.appendChild(el('span', 'nb-chip', f.confidence));
+  if (f.target) meta.appendChild(el('span', 'nb-chip', f.target));
+  meta.appendChild(el('span', '', f.reviewed_by ? `✅ reviewed by ${f.reviewed_by}` : '⚠️ not reviewed'));
+  body.appendChild(meta);
+  row.appendChild(body);
+
+  const actions = el('div', 'nb-actions');
+  const b = el('button', 'nb-btn' + (f.reviewed_by ? ' reviewed' : ''), f.reviewed_by ? 'reviewed ✓' : 'mark reviewed');
+  if (!f.reviewed_by) {
+    b.onclick = async () => {
+      const name = prompt('Reviewing as (your name/handle):');
+      if (!name || !name.trim()) return;
+      try {
+        await api(`/api/engagements/${encodeURIComponent(state.engagementId)}/findings/${f.finding_id}/review`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reviewed_by: name.trim() }),
+        });
+      } catch (e) { alert('Failed to mark reviewed: ' + e.message); return; }
+      loadFindings();
+    };
+  } else {
+    b.disabled = true;
+  }
+  actions.appendChild(b);
+  row.appendChild(actions);
+  return row;
+}
+
+async function nbResolve(ordinal, action) {
+  let reason = prompt(action === 'reopen' ? `Reopen N-${ordinal} — why?` : `Resolve N-${ordinal} — why? (what you found / why it's moot)`);
+  if (reason === null || (action === 'resolve' && !reason.trim())) return;
+  try {
+    await api(`/api/engagements/${encodeURIComponent(state.engagementId)}/notebook/notes/${ordinal}/resolve`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, reason: reason.trim() }) });
+  } catch (e) { renderSystemLine(`[notebook] ${action} N-${ordinal} failed: ${e.message}`); return; }
+  loadNotebook(true);
+}
+
+/* ---------- boot ---------- */
+document.getElementById('securityPillLabel').textContent = `Security tools: ${state.security ? 'on' : 'off'}`;
+document.getElementById('isolationPillLabel').textContent = `Isolation: ${state.isolation}`;
+document.getElementById('engagementPillLabel').textContent = state.engagementId;
+document.getElementById('modePillLabel').textContent = MODE_OPTIONS.find(o => o.value === state.mode).label;
+updateModeVisibility();
+makeResizable(document.getElementById('computerResize'), document.getElementById('computerPanel'),
+              '--computer-w', 'localai.computerW', 300, Math.round(innerWidth * 0.7));
+makeResizable(document.getElementById('graphResize'), document.getElementById('graphRightCol'),
+              '--graph-drawer-w', 'localai.graphW', 320, Math.round(innerWidth * 0.55));
+refreshSessionList();
+refreshApprovals();
+document.getElementById('homeInput').focus();
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); document.getElementById('newSessionBtn').click(); }
+});
+setInterval(refreshApprovals, 3000);
+setInterval(refreshSessionList, 12000);
+</script>
+</body>
+</html>

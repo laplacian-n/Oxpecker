@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;background:#000}*{box-sizing:border-box}
+*:focus-visible{outline:2px solid oklch(70% 0.19 25);outline-offset:2px}
+::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:#262626;border-radius:4px}
+@keyframes ag-px{0%,100%{opacity:.15;transform:scale(.9)}50%{opacity:.95;transform:scale(1.1)}}
+@keyframes ag-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+@keyframes ag-fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@keyframes ag-spin{to{transform:rotate(360deg)}}
+@keyframes ag-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes ag-blink{50%{opacity:0}}
+.ag-px{display:grid;grid-template-columns:repeat(3,3px);gap:1.5px;flex:none}
+.ag-px i{width:3px;height:3px;border-radius:50%;background:#e5e5e5;opacity:.2;animation:ag-px 650ms cubic-bezier(.23,1,.32,1) infinite}
+.ag-px i:nth-child(1),.ag-px i:nth-child(5),.ag-px i:nth-child(7){animation-delay:90ms}
+.ag-px i:nth-child(2),.ag-px i:nth-child(6),.ag-px i:nth-child(8){animation-delay:180ms}
+.ag-px i:nth-child(3),.ag-px i:nth-child(9){animation-delay:270ms}
+.ag-shim{background-image:linear-gradient(90deg,#777 35%,#fff 50%,#777 65%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:500;animation:ag-shimmer 1.6s linear infinite}
+.ag-spin{animation:ag-spin .75s linear infinite}
+.ag-pulse{animation:ag-pulse 1.2s ease-in-out infinite}
+.ag-fade{animation:ag-fade 280ms cubic-bezier(.23,1,.32,1) both}
+.ag-caret::after{content:"▍";color:oklch(62% 0.21 25);animation:ag-blink 1s step-start infinite}
+.ag-row .ch{position:absolute;opacity:0;transition:opacity .15s,transform .2s}
+.ag-row .ic{transition:opacity .15s;display:flex}
+.ag-has:hover .ic{opacity:0}.ag-has:hover .ch{opacity:1}
+.ag-icoff{opacity:0}.ag-chon{opacity:1!important}
+@media (prefers-reduced-motion:reduce){.ag-px i,.ag-shim,.ag-spin,.ag-pulse,.ag-fade,.ag-caret::after{animation:none}.ag-px i{opacity:.6}.ag-shim{color:#bbb}}
+</style>
+</helmet>
+<div style="min-height:100vh;background:#000;color:#ededed;font-family:'Instrument Sans',system-ui,sans-serif">
+  <div style="position:sticky;top:0;z-index:20;background:rgba(0,0,0,.92);backdrop-filter:blur(8px);border-bottom:1px solid #1a1a1a">
+    <div style="max-width:880px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:9px;white-space:nowrap"><img src="assets/oxpecker-logo.png" alt="Oxpecker" style="height:22px;width:auto;display:block;flex:none"><span style="font:500 14px 'JetBrains Mono',monospace">Ox<span style="color:oklch(70% 0.19 25)">pecker</span></span><span style="font:400 13px 'Instrument Sans';color:#8a8a8a;white-space:nowrap">· chat animation demo</span></div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <sc-for list="{{ speeds }}" as="sp" hint-placeholder-count="3"><div role="button" tabindex="0" onClick="{{ sp.pick }}" style="padding:5px 11px;border-radius:7px;cursor:pointer;font:500 12.5px 'JetBrains Mono',monospace;border:1px solid {{ sp.bd }};color:{{ sp.fg }};background:{{ sp.bg }}">{{ sp.label }}</div></sc-for>
+        <div role="button" tabindex="0" onClick="{{ replay }}" style="padding:6px 14px;border-radius:7px;cursor:pointer;background:oklch(62% 0.21 25);color:#000;font:600 13px 'Instrument Sans'" style-hover="filter:brightness(1.1)">{{ replayLabel }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width:880px;margin:0 auto;padding:36px 24px 120px;display:flex;flex-direction:column;gap:26px">
+    <div style="display:flex;justify-content:flex-end"><div style="max-width:80%;background:oklch(62% 0.21 25 / .12);border:1px solid oklch(62% 0.21 25 / .3);border-radius:14px 14px 4px 14px;padding:12px 18px;font:400 16px/1.6 'Instrument Sans'">Run a full assessment of lab-01 (10.0.2.15) and harden whatever you find. Report when done.</div></div>
+
+    <sc-for list="{{ phases }}" as="p" hint-placeholder-count="1">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div role="button" tabindex="0" onClick="{{ p.toggle }}" style="align-self:flex-start;display:flex;align-items:center;gap:9px;cursor:pointer;color:#9a9a9a;white-space:nowrap;font:400 15.5px 'Instrument Sans'" style-hover="color:#fff">
+        <sc-if value="{{ p.working }}" hint-placeholder-val="{{ false }}"><span class="ag-px"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></sc-if>
+        <sc-if value="{{ p.working }}" hint-placeholder-val="{{ false }}"><span class="ag-shim">{{ p.label }}…</span></sc-if>
+        <sc-if value="{{ p.notWorking }}" hint-placeholder-val="{{ true }}"><span>Worked for <span style="font:400 13.5px 'JetBrains Mono',monospace">{{ p.elapsed }}</span> {{ p.secWord }}</span></sc-if>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55;transform:{{ p.chev }};transition:transform .3s"><path d="M6 9l6 6 6-6"></path></svg>
+      </div>
+
+      <div style="display:grid;grid-template-rows:{{ p.gtr }};opacity:{{ p.gop }};transition:grid-template-rows .3s ease-out,opacity .3s ease-out">
+      <div style="min-height:0;overflow:hidden">
+      <div style="margin:4px 0 0 8px;padding:2px 0 2px 14px;border-left:1px solid #1f1f1f;display:flex;flex-direction:column;gap:2px">
+        <sc-for list="{{ p.nodes }}" as="n" hint-placeholder-count="2">
+        <div class="ag-fade" style="display:flex;flex-direction:column">
+
+          <sc-if value="{{ n.isReasoning }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column">
+            <div role="button" tabindex="0" onClick="{{ n.toggle }}" class="ag-row {{ n.hasCls }}" style="display:flex;align-items:center;gap:10px;height:34px;padding:0 8px;border-radius:8px;cursor:{{ n.cur }}" style-hover="background:#0e0e0e">
+              <span style="position:relative;flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:#9a9a9a"><span class="ic {{ n.icCls }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"></path></svg></span><svg class="ch {{ n.chCls }}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="transform:{{ n.chRot }}"><path d="M6 9l6 6 6-6"></path></svg></span>
+              <sc-if value="{{ n.active }}" hint-placeholder-val="{{ false }}"><span class="ag-shim" style="font-size:15px;white-space:nowrap">Thinking…</span></sc-if>
+              <sc-if value="{{ n.finished }}" hint-placeholder-val="{{ false }}"><span style="white-space:nowrap;font:500 15px 'Instrument Sans';color:#ededed">Thought for <span style="font:400 13px 'JetBrains Mono',monospace">{{ n.durText }}s</span></span></sc-if>
+            </div>
+            <div style="display:grid;grid-template-rows:{{ n.gtr }};opacity:{{ n.gop }};transition:grid-template-rows .3s cubic-bezier(.23,1,.32,1),opacity .3s">
+            <div style="min-height:0;overflow:hidden"><div style="margin:4px 0 6px 12px;padding:2px 0 2px 12px;border-left:1px solid #1f1f1f">
+              <div style="overflow:hidden;padding-right:4px;transition:height .3s ease-out;height:{{ n.viewH }}px;-webkit-mask-image:{{ n.mask }};mask-image:{{ n.mask }}">
+                <div style="display:flex;flex-direction:column;gap:8px;transition:transform .4s ease-out;transform:translateY({{ n.translate }}px)">
+                  <sc-for list="{{ n.sentences }}" as="s" hint-placeholder-count="2"><p class="ag-fade" style="margin:0;height:46px;font:425 14px/23px 'Instrument Sans';letter-spacing:-.005em;color:#9a9a9a;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">{{ s.t }}</p></sc-for>
+                </div>
+              </div>
+            </div></div></div>
+          </div></sc-if>
+
+          <sc-if value="{{ n.isRow }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column">
+            <div role="button" tabindex="0" onClick="{{ n.toggle }}" class="ag-row {{ n.hasCls }}" style="display:flex;align-items:center;gap:10px;height:34px;padding:0 8px;border-radius:8px;cursor:{{ n.cur }}" style-hover="background:#0e0e0e">
+              <span style="position:relative;flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:#9a9a9a">
+                <span class="ic {{ n.icCls }}">
+                  <sc-if value="{{ n.active }}" hint-placeholder-val="{{ false }}"><span class="ag-spin" style="width:14px;height:14px;border-radius:50%;border:1.5px solid #333;border-top-color:#fff;display:block"></span></sc-if>
+                  <sc-if value="{{ n.fail }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="oklch(70% 0.19 25)" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v5M12 16v.5"></path></svg></sc-if>
+                  <sc-if value="{{ n.iFile }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"></path></svg></sc-if>
+                  <sc-if value="{{ n.iSearch }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10" cy="10" r="7"></circle><path d="M21 21l-6-6"></path></svg></sc-if>
+                  <sc-if value="{{ n.iCmd }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ededed" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l5 5-5 5M12 19h7"></path></svg></sc-if>
+                  <sc-if value="{{ n.iDb }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><ellipse cx="12" cy="5" rx="8" ry="3"></ellipse><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path></svg></sc-if>
+                  <sc-if value="{{ n.iEdit }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ededed" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"></path></svg></sc-if>
+                  <sc-if value="{{ n.iStep }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ededed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg></sc-if>
+                </span>
+                <svg class="ch {{ n.chCls }}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="transform:{{ n.chRot }}"><path d="M6 9l6 6 6-6"></path></svg>
+              </span>
+              <span style="flex:none;white-space:nowrap;font:500 15px 'Instrument Sans';color:#ededed">{{ n.primary }}</span>
+              <sc-if value="{{ n.secondary }}" hint-placeholder-val="{{ false }}"><span style="flex:0 1 auto;min-width:0;max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d0d0d;border:1px solid #1f1f1f;border-radius:7px;padding:2px 9px;font:400 13px {{ n.ff }};color:#9a9a9a">{{ n.secondary }}</span></sc-if>
+              <sc-if value="{{ n.hasDelta }}" hint-placeholder-val="{{ false }}"><span style="margin-left:auto;display:flex;gap:6px;font:500 12.5px 'JetBrains Mono',monospace"><span style="color:#ededed">+{{ n.add }}</span><span style="color:oklch(70% 0.19 25)">−{{ n.del }}</span></span></sc-if>
+            </div>
+            <div style="display:grid;grid-template-rows:{{ n.gtr }};opacity:{{ n.gop }};transition:grid-template-rows .3s cubic-bezier(.23,1,.32,1),opacity .3s">
+            <div style="min-height:0;overflow:hidden"><div style="margin:4px 0 8px 16px;padding:2px 0 2px 14px;border-left:1px solid #1f1f1f;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ n.details }}" as="d" hint-placeholder-count="1"><div style="font:400 {{ d.fs }} 'Instrument Sans';color:#9a9a9a;line-height:1.6;font-family:{{ d.ff }}">{{ d.t }}</div></sc-for>
+              <sc-if value="{{ n.hasSources }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-wrap:wrap;gap:7px"><sc-for list="{{ n.sources }}" as="so" hint-placeholder-count="2"><span class="ag-fade" style="display:inline-flex;align-items:center;gap:6px;border:1px solid #262626;border-radius:999px;padding:3px 12px;font:400 13px 'Instrument Sans';color:#b5b5b5"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="opacity:.7"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"></path></svg>{{ so.name }}</span></sc-for></div></sc-if>
+            </div></div></div>
+          </div></sc-if>
+
+          <sc-if value="{{ n.isTerm }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column">
+            <div role="button" tabindex="0" onClick="{{ n.toggle }}" class="ag-row ag-has" style="display:flex;align-items:center;gap:10px;height:34px;padding:0 8px;border-radius:8px;cursor:pointer" style-hover="background:#0e0e0e">
+              <span style="position:relative;flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:#9a9a9a">
+                <span class="ic {{ n.icCls }}">
+                  <sc-if value="{{ n.active }}" hint-placeholder-val="{{ false }}"><span class="ag-spin" style="width:14px;height:14px;border-radius:50%;border:1.5px solid #333;border-top-color:#fff;display:block"></span></sc-if>
+                  <sc-if value="{{ n.termFail }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="oklch(70% 0.19 25)" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v5M12 16v.5"></path></svg></sc-if>
+                  <sc-if value="{{ n.termOk }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ededed" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l5 5-5 5M12 19h7"></path></svg></sc-if>
+                </span>
+                <svg class="ch {{ n.chCls }}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="transform:{{ n.chRot }}"><path d="M6 9l6 6 6-6"></path></svg>
+              </span>
+              <span style="flex:none;white-space:nowrap;font:500 15px 'Instrument Sans';color:#ededed">Run</span>
+              <span style="min-width:0;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d0d0d;border:1px solid #1f1f1f;border-radius:7px;padding:2px 9px;font:400 13px 'JetBrains Mono',monospace;color:#9a9a9a">{{ n.command }}</span>
+            </div>
+            <div style="display:grid;grid-template-rows:{{ n.gtr }};opacity:{{ n.gop }};transition:grid-template-rows .3s cubic-bezier(.23,1,.32,1),opacity .3s">
+            <div style="min-height:0;overflow:hidden"><div style="margin:4px 0 8px 16px;padding:2px 0 2px 14px;border-left:1px solid #1f1f1f">
+              <div style="border:1px solid #1f1f1f;border-radius:10px;overflow:hidden;background:#070707;font:400 12.5px 'JetBrains Mono',monospace">
+                <div style="display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid #1a1a1a;background:#0c0c0c"><span style="color:#8a8a8a;font-weight:700">$</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ededed;font-weight:500">{{ n.command }}</span>
+                  <sc-if value="{{ n.showDur }}" hint-placeholder-val="{{ false }}"><span style="color:#8a8a8a;font-size:11.5px">{{ n.durText }}ms</span></sc-if>
+                  <sc-if value="{{ n.active }}" hint-placeholder-val="{{ false }}"><span class="ag-pulse" style="display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:1px 9px;font-size:11.5px;background:oklch(62% 0.21 25 / .14);color:oklch(75% 0.17 25)"><span style="width:6px;height:6px;border-radius:50%;background:oklch(62% 0.21 25)"></span>running</span></sc-if>
+                  <sc-if value="{{ n.exitShow }}" hint-placeholder-val="{{ false }}"><span style="border-radius:5px;padding:1px 7px;font-size:11.5px;background:#141414;color:{{ n.exitColor }}">{{ n.exitLabel }}</span></sc-if>
+                </div>
+                <div style="padding:10px 12px;overflow-x:auto;line-height:1.65"><sc-for list="{{ n.lines }}" as="ln" hint-placeholder-count="2"><div class="ag-fade" style="white-space:pre;color:{{ ln.c }};font-weight:{{ ln.w }}">{{ ln.t }}</div></sc-for></div>
+              </div>
+            </div></div></div>
+          </div></sc-if>
+
+          <sc-if value="{{ n.isDiff }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-direction:column">
+            <div role="button" tabindex="0" onClick="{{ n.toggle }}" class="ag-row ag-has" style="display:flex;align-items:center;gap:10px;height:34px;padding:0 8px;border-radius:8px;cursor:pointer" style-hover="background:#0e0e0e">
+              <span style="position:relative;flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:#9a9a9a">
+                <span class="ic {{ n.icCls }}"><sc-if value="{{ n.active }}" hint-placeholder-val="{{ false }}"><span class="ag-spin" style="width:14px;height:14px;border-radius:50%;border:1.5px solid #333;border-top-color:#fff;display:block"></span></sc-if><sc-if value="{{ n.finished }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ededed" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"></path></svg></sc-if></span>
+                <svg class="ch {{ n.chCls }}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="transform:{{ n.chRot }}"><path d="M6 9l6 6 6-6"></path></svg>
+              </span>
+              <span style="flex:none;white-space:nowrap;font:500 15px 'Instrument Sans';color:#ededed">Edit</span>
+              <span style="min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0d0d0d;border:1px solid #1f1f1f;border-radius:7px;padding:2px 9px;font:400 13px 'JetBrains Mono',monospace;color:#9a9a9a">{{ n.file }}</span>
+              <span style="margin-left:auto;display:flex;gap:6px;font:500 12.5px 'JetBrains Mono',monospace"><span style="color:#ededed">+{{ n.add }}</span><span style="color:oklch(70% 0.19 25)">−{{ n.del }}</span></span>
+            </div>
+            <div style="display:grid;grid-template-rows:{{ n.gtr }};opacity:{{ n.gop }};transition:grid-template-rows .3s cubic-bezier(.23,1,.32,1),opacity .3s">
+            <div style="min-height:0;overflow:hidden"><div style="margin:4px 0 8px 16px;padding:2px 0 2px 14px;border-left:1px solid #1f1f1f">
+              <div style="border:1px solid #1f1f1f;border-radius:10px;overflow:hidden;background:#070707;font:400 12.5px 'JetBrains Mono',monospace">
+                <div style="display:flex;justify-content:space-between;padding:7px 12px;border-bottom:1px solid #1a1a1a;background:#0c0c0c"><span style="color:#ededed;font-weight:500">{{ n.file }}</span><span><span style="color:#ededed">+{{ n.add }}</span> <span style="color:oklch(70% 0.19 25)">−{{ n.del }}</span></span></div>
+                <div style="padding:6px 0;overflow-x:auto;line-height:21px"><sc-for list="{{ n.rows }}" as="r" hint-placeholder-count="3"><div class="ag-fade" style="position:relative;display:grid;grid-template-columns:34px 34px 20px 1fr;background:{{ r.bg }}"><span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{{ r.bar }}"></span><span style="text-align:right;padding-right:8px;font-size:11px;color:#6a6a6a">{{ r.old }}</span><span style="text-align:right;padding-right:8px;font-size:11px;color:#6a6a6a">{{ r.cur }}</span><span style="text-align:center;font-weight:700;color:{{ r.mc }}">{{ r.mark }}</span><span style="white-space:pre;padding:0 12px 0 4px;color:{{ r.fg }};text-decoration:{{ r.deco }};opacity:{{ r.op }}">{{ r.text }}</span></div></sc-for></div>
+              </div>
+            </div></div></div>
+          </div></sc-if>
+
+        </div>
+        </sc-for>
+      </div></div></div>
+
+      <sc-if value="{{ p.hasMsg }}" hint-placeholder-val="{{ false }}"><div class="ag-fade {{ p.caret }}" style="font:400 16.5px/1.75 'Instrument Sans';color:#d4d4d4;white-space:pre-line;text-wrap:pretty;margin-top:6px">{{ p.msg }}</div></sc-if>
+    </div>
+    </sc-for>
+
+    <sc-if value="{{ finished }}" hint-placeholder-val="{{ false }}"><div style="text-align:center;font:400 14px 'Instrument Sans';color:#8a8a8a;padding-top:8px">Run finished. Click any row or the "Worked for" line to expand it, or replay.</div></sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { phases: [], speed: 1, running: false, finished: false, manual: {}, rowOpen: {} };
+  tok = 0;
+  defs = [
+    { label: 'Auditing lab-01', nodes: [
+      { type: 'reasoning', dur: 7.4, sentences: [
+        'The target is a single host inside the signed scope, so I can start with passive checks.',
+        'Scope file first, then what the knowledge base already says about the software that is likely running.',
+        'An active version scan needs approval under the RoE, so I will batch every port into one command.',
+        'The rate limit is 50 packets per second, which means the scan will take a few minutes, not seconds.',
+        'If PostgreSQL answers on a routable address, that becomes the first hypothesis to test.'] },
+      { type: 'row', icon: 'file', primary: 'Read', secondary: 'engagement/scope.txt', mono: true, ms: 1700, details: [{ t: '10.0.2.0/24', mono: true }, { t: '10.0.3.0/24 (read-only)', mono: true }, { t: 'deny: 10.0.2.1', mono: true }] },
+      { type: 'row', icon: 'search', primary: 'Search advisories', secondary: 'postgresql 15.4', ms: 2300, details: [{ t: '0 critical advisories, 2 low-severity (fixed in 15.5).' }], sources: ['Local knowledge base', 'PostgreSQL release notes', 'NVD feed'] },
+      { type: 'terminal', command: 'nmap -sV -p 22,80,5432 10.0.2.15', exit: 0, dur: 3140, out: ['Starting scan of 10.0.2.15', '22/tcp   open  ssh         OpenSSH 9.2', '80/tcp   open  http        nginx 1.24', '5432/tcp open  postgresql  PostgreSQL 15.4', 'WARN: 5432 reachable on a non-loopback address', 'Scan finished: 1 host up'] }
+    ], message: 'Three services answer on 10.0.2.15: SSH (OpenSSH 9.2), HTTP (nginx 1.24) and PostgreSQL 15.4.\nPostgreSQL listening on a routable address is the item to examine first.' },
+    { label: 'Testing PostgreSQL exposure', nodes: [
+      { type: 'reasoning', dur: 3.6, sentences: ['Anonymous access first, because it needs no approval and tells me whether the exposure is exploitable at all.', 'Then the host rules, to see what limits the network range that can connect.'] },
+      { type: 'row', icon: 'db', primary: 'Inspect config', secondary: 'pg_hba.conf', mono: true, ms: 2000, details: [{ t: 'host  all  all  0.0.0.0/0  scram-sha-256', mono: true }, { t: 'The rule accepts any source address.' }] },
+      { type: 'terminal', command: 'psql -h 10.0.2.15 -U anonymous -c "select 1"', exit: 1, dur: 412, out: ['psql: connection to server at "10.0.2.15", port 5432 failed', 'FATAL: password authentication failed for user "anonymous"'] },
+      { type: 'row', icon: 'step', primary: 'Hypothesis updated', secondary: 'H2 confirmed · H5 open', ms: 1300, details: [{ t: 'Anonymous access is rejected. Exposure remains a finding because any valid credential grants network access.' }] }
+    ], message: 'Anonymous access is rejected, so the server is not open to unauthenticated use.\nThe rule still accepts connections from any address, which widens the attack surface.' },
+    { label: 'Hardening and report', nodes: [
+      { type: 'diff', file: 'pg_hba.conf', add: 2, del: 1, ms: 2600, rows: [
+        { old: 84, cur: 84, type: 'ctx', text: '# TYPE  DATABASE  USER  ADDRESS        METHOD' },
+        { old: 85, cur: null, type: 'del', text: 'host    all       all   0.0.0.0/0      scram-sha-256' },
+        { old: null, cur: 85, type: 'add', text: 'host    all       all   10.0.2.0/24    scram-sha-256' },
+        { old: null, cur: 86, type: 'add', text: 'host    all       all   127.0.0.1/32   scram-sha-256' },
+        { old: 86, cur: 87, type: 'ctx', text: 'local   all       all                  peer' }] },
+      { type: 'terminal', command: './export-report.sh --format md', exit: 0, dur: 880, out: ['✓ collected 3 findings', '✓ linked evidence 3/3', '✓ wrote report/lab-01.md (2.1 KB)'] }
+    ], message: 'The hardening patch is ready for review: connections are limited to the internal range and loopback.\nThe report is written to report/lab-01.md with three findings and their remediation.' }
+  ];
+  sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  wait = async (ms, my) => { await this.sleep(ms / this.state.speed); return my === this.tok; };
+  componentDidMount() { this.replay(); }
+  componentWillUnmount() { this.tok++; }
+  upPhase(pi, fn) { this.setState(s => ({ phases: s.phases.map((p, i) => i === pi ? fn(p) : p) })); }
+  upNode(pi, ni, fn) { this.upPhase(pi, p => ({ ...p, nodes: p.nodes.map((n, i) => i === ni ? fn(n) : n) })); }
+  replay = () => { this.setState({ phases: [], manual: {}, rowOpen: {}, finished: false, running: true }, () => this.run()); };
+  async run() {
+    const my = ++this.tok, W = (ms) => this.wait(ms, my);
+    for (let pi = 0; pi < this.defs.length; pi++) {
+      const d = this.defs[pi], t0 = Date.now();
+      this.setState(s => ({ phases: [...s.phases, { label: d.label, nodes: [], working: true, elapsed: 0, msg: '', msgDone: false }] }));
+      await W(500); if (my !== this.tok) return;
+      for (let ni = 0; ni < d.nodes.length; ni++) {
+        const nd = d.nodes[ni];
+        this.upPhase(pi, p => ({ ...p, nodes: [...p.nodes, { ...nd, status: 'active', count: 0, lines: 0, rows: 0, srcs: 0 }] }));
+        if (nd.type === 'reasoning') {
+          for (let k = 1; k <= nd.sentences.length; k++) { if (!(await W(1500))) return; this.upNode(pi, ni, n => ({ ...n, count: k })); }
+          if (!(await W(700))) return;
+        } else if (nd.type === 'terminal') {
+          if (!(await W(700))) return;
+          for (let k = 1; k <= nd.out.length; k++) { if (!(await W(420))) return; this.upNode(pi, ni, n => ({ ...n, lines: k })); }
+          if (!(await W(500))) return;
+        } else if (nd.type === 'diff') {
+          if (!(await W(700))) return;
+          for (let k = 1; k <= nd.rows.length; k++) { if (!(await W(300))) return; this.upNode(pi, ni, n => ({ ...n, rows: k })); }
+          if (!(await W(500))) return;
+        } else {
+          if (nd.sources) { for (let k = 1; k <= nd.sources.length; k++) { if (!(await W(nd.ms / (nd.sources.length + 1)))) return; this.upNode(pi, ni, n => ({ ...n, srcs: k })); } if (!(await W(300))) return; }
+          else if (!(await W(nd.ms))) return;
+        }
+        this.upNode(pi, ni, n => ({ ...n, status: 'done' }));
+        await W(250); if (my !== this.tok) return;
+      }
+      const el = Math.max(1, Math.round((Date.now() - t0) / 1000 * this.state.speed));
+      this.upPhase(pi, p => ({ ...p, working: false, elapsed: el }));
+      if (!(await W(900))) return;
+      if (d.message) {
+        const words = d.message;
+        for (let i = 0; i <= words.length; i += 2) { if (!(await W(18))) return; this.upPhase(pi, p => ({ ...p, msg: words.slice(0, i + 2) })); }
+        this.upPhase(pi, p => ({ ...p, msg: words, msgDone: true }));
+      }
+      if (!(await W(700))) return;
+    }
+    this.setState({ running: false, finished: true });
+  }
+  renderVals() {
+    const s = this.state, A = 'oklch(70% 0.19 25)';
+    const phases = s.phases.map((p, pi) => {
+      const manual = s.manual[pi], expanded = manual !== undefined ? manual : p.working;
+      const nodes = p.nodes.map((n, ni) => {
+        const key = pi + ':' + ni, active = n.status === 'active', finished = n.status === 'done';
+        const hasDetails = n.type === 'reasoning' ? finished : n.type === 'terminal' ? (n.lines > 0 || finished) : n.type === 'diff' ? n.rows > 0 : !!((n.details && n.details.length) || n.sources);
+        const defOpen = n.type === 'reasoning' ? active : n.type === 'terminal' ? active : n.type === 'diff' ? active : active && !!n.sources;
+        const open = s.rowOpen[key] !== undefined ? s.rowOpen[key] : defOpen;
+        const toggle = () => { if (hasDetails) this.setState(st => ({ rowOpen: { ...st.rowOpen, [key]: !(st.rowOpen[key] !== undefined ? st.rowOpen[key] : defOpen) } })); };
+        const base = { toggle, open, gtr: open ? '1fr' : '0fr', gop: open ? 1 : 0, active, finished, cur: hasDetails ? 'pointer' : 'default', hasCls: hasDetails ? 'ag-has' : '', icCls: open && hasDetails ? 'ag-icoff' : '', chCls: open && hasDetails ? 'ag-chon' : '', chRot: open ? 'none' : 'rotate(-90deg)' };
+        if (n.type === 'reasoning') {
+          const SENT = 46, GAP = 8, MAXH = 124, FADE = 18, count = finished ? n.sentences.length : n.count;
+          const contentH = count > 0 ? count * SENT + (count - 1) * GAP : 0, capped = contentH > MAXH, viewH = capped ? MAXH : contentH, scrollable = finished && open;
+          const translate = scrollable ? 0 : capped ? MAXH - FADE - contentH : 0;
+          const mask = capped ? 'linear-gradient(to bottom, transparent 0, #000 ' + (finished ? 0 : 0) + 'px, #000 calc(100% - ' + FADE + 'px), transparent 100%)' : 'none';
+          return { ...base, isReasoning: true, durText: n.dur, sentences: n.sentences.slice(0, count).map(t => ({ t })), viewH, translate, mask };
+        }
+        if (n.type === 'terminal') {
+          const fail = n.exit !== 0, shown = n.out.slice(0, n.lines);
+          return { ...base, isTerm: true, command: n.command, termFail: finished && fail, termOk: finished && !fail, showDur: finished, durText: n.dur, exitShow: finished, exitLabel: 'exit ' + n.exit, exitColor: fail ? A : '#8a8a8a',
+            lines: shown.map(t => ({ t, c: /FATAL|failed|Error/.test(t) ? A : /WARN/.test(t) ? 'oklch(78% 0.1 60)' : /✓|open|finished/.test(t) ? '#ededed' : '#9a9a9a', w: /FATAL|✓/.test(t) ? 500 : 400 })) };
+        }
+        if (n.type === 'diff') {
+          const rows = n.rows ? n.rows : 0, def = this.defs[pi].nodes[ni];
+          return { ...base, isDiff: true, file: n.file, add: n.add, del: n.del,
+            rows: def.rows.slice(0, rows).map(r => ({ old: r.old == null ? '' : r.old, cur: r.cur == null ? '' : r.cur, text: r.text, mark: r.type === 'add' ? '+' : r.type === 'del' ? '−' : '', mc: r.type === 'del' ? A : '#ededed',
+              bg: r.type === 'add' ? 'rgba(255,255,255,.06)' : r.type === 'del' ? 'oklch(62% 0.21 25 / .1)' : 'transparent', bar: r.type === 'add' ? '#ededed' : r.type === 'del' ? A : 'transparent',
+              fg: r.type === 'ctx' ? '#8a8a8a' : '#ededed', deco: r.type === 'del' ? 'line-through' : 'none', op: r.type === 'del' ? 0.8 : 1 })) };
+        }
+        const ic = n.icon;
+        return { ...base, isRow: true, primary: n.primary, secondary: n.secondary, ff: n.mono ? "'JetBrains Mono',monospace" : "'Instrument Sans',sans-serif", fail: false,
+          iFile: !active && ic === 'file', iSearch: !active && ic === 'search', iCmd: !active && ic === 'cmd', iDb: !active && ic === 'db', iEdit: !active && ic === 'edit', iStep: !active && ic === 'step',
+          hasDelta: false, details: (n.details || []).map(d => ({ t: d.t, fs: d.mono ? '13px' : '14.5px', ff: d.mono ? "'JetBrains Mono',monospace" : "'Instrument Sans',sans-serif" })),
+          hasSources: !!n.sources && n.srcs > 0, sources: (n.sources || []).slice(0, n.srcs).map(name => ({ name })) };
+      });
+      return { label: p.label, working: p.working, notWorking: !p.working, elapsed: p.elapsed, secWord: p.elapsed === 1 ? 'second' : 'seconds', chev: expanded ? 'rotate(180deg)' : 'none',
+        gtr: expanded ? '1fr' : '0fr', gop: expanded ? 1 : 0, toggle: () => { if (!p.working) this.setState(st => ({ manual: { ...st.manual, [pi]: !expanded } })); },
+        nodes, hasMsg: !!p.msg, msg: p.msg, caret: p.msg && !p.msgDone ? 'ag-caret' : '' };
+    });
+    const speeds = [0.5, 1, 2].map(v => ({ label: v + '×', pick: () => this.setState({ speed: v }), bd: s.speed === v ? '#ededed' : '#262626', fg: s.speed === v ? '#fff' : '#9a9a9a', bg: s.speed === v ? '#161616' : 'transparent' }));
+    return { phases, speeds, replay: this.replay, replayLabel: s.running ? 'Restart' : 'Replay', finished: s.finished };
+  }
+}
+</script>
+</body>
+</html>

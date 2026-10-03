@@ -1,0 +1,7 @@
+[Unit]
+Description=localAI state backup (agent/state/, engagements/, engagement/)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nicotine/localAI
+ExecStart=/home/nicotine/localAI/deploy/backup-localai.sh

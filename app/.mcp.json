@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "oxpecker-dev": {
+      "command": "py",
+      "args": ["-m", "agent.dev_mcp_server"],
+      "env": { "PYTHONUTF8": "1" }
+    },
+    "oxpecker": {
+      "command": "py",
+      "args": ["-m", "agent.oxpecker_control_mcp"],
+      "env": { "PYTHONUTF8": "1" }
+    }
+  }
+}

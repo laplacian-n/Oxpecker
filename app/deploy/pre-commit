@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Local CI: runs the project's fast test subset (no live model / Playwright needed — the exact
+# subset doc/handoff.md's own "Run the tests" section calls fast) before every commit, and
+# blocks the commit if anything fails. There's no CI runner for this repo (no git remote as of
+# writing), so this is what actually catches a regression before it lands, not a formality.
+#
+# Skips agent/web/ entirely — test_server.py's TestLiveEndToEnd and all of test_frontend.py need
+# a live, unloaded llama-server (and test_frontend.py needs a headless Chromium too), so they're
+# not something every commit should block on. Run those yourself before anything that touches
+# agent/web/ or agent/loop.py's model-calling path.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+export PYTHONPATH="$(pwd)"
+PY="$(pwd)/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+echo "pre-commit: running fast test subset..."
+failed=0
+out="$(mktemp)"
+for f in $(find agent -name "test_*.py" ! -path "*/web/*"); do
+  mod="$(echo "$f" | sed 's#/#.#g; s#\.py$##')"
+  if ! "$PY" -m "$mod" > "$out" 2>&1; then
+    echo "FAIL: $mod"
+    cat "$out"
+    failed=1
+  fi
+done
+rm -f "$out"
+
+if [ "$failed" -ne 0 ]; then
+  echo
+  echo "pre-commit: fast test subset FAILED — commit blocked."
+  echo "Fix the failure, or 'git commit --no-verify' to skip this check (not recommended)."
+  exit 1
+fi
+echo "pre-commit: fast test subset passed."

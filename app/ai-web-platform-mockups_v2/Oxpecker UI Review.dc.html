@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>html,body{margin:0;background:#000}*{box-sizing:border-box}a{color:oklch(70% 0.19 25)}a:hover{text-decoration:underline}</style>
+</helmet>
+<div style="min-height:100vh;background:#000;color:#ededed;font-family:'Instrument Sans','Noto Sans Thai',system-ui,sans-serif;padding:48px 24px 80px">
+<div style="max-width:880px;margin:0 auto">
+  <div style="font:500 12px 'JetBrains Mono',monospace;color:oklch(70% 0.19 25);letter-spacing:.08em;text-transform:uppercase">Oxpecker · UI review</div>
+  <h1 style="font:500 34px/1.3 'Instrument Sans','Noto Sans Thai';letter-spacing:-.02em;margin:10px 0 12px">เช็คลิสต์การปรับปรุง UI</h1>
+  <div style="font:400 14px/1.7 'Instrument Sans','Noto Sans Thai';color:#9a9a9a;max-width:660px">วิเคราะห์จากการอ่านโค้ดของต้นแบบที่ออกแบบใหม่ และ index.html เดิม (อ่านแล้ว 960 จาก 3,186 บรรทัด) ไม่ใช่การตรวจจากหน้าจอจริง แต่ละหมวดเรียงตามลำดับความสำคัญ</div>
+
+  <div style="display:flex;align-items:center;gap:16px;margin:28px 0 8px">
+    <div style="flex:1;height:4px;background:#1a1a1a;border-radius:2px;overflow:hidden"><div style="height:100%;width:{{ pct }}%;background:oklch(62% 0.21 25)"></div></div>
+    <div style="font:500 12px 'JetBrains Mono',monospace;color:#b5b5b5">{{ doneCount }} / {{ total }}</div>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:28px;flex-wrap:wrap">
+    <sc-for list="{{ filters }}" as="f" hint-placeholder-count="4"><div onClick="{{ f.pick }}" style="padding:5px 12px;border-radius:999px;cursor:pointer;font:500 12px 'Instrument Sans','Noto Sans Thai';border:1px solid {{ f.bd }};color:{{ f.fg }};background:{{ f.bg }}">{{ f.label }}</div></sc-for>
+  </div>
+
+  <sc-for list="{{ groups }}" as="g" hint-placeholder-count="3">
+    <div style="margin-bottom:34px">
+      <div style="display:flex;align-items:baseline;gap:12px;padding-bottom:10px;border-bottom:1px solid #1f1f1f;flex-wrap:wrap"><h2 style="font:600 16px 'Instrument Sans','Noto Sans Thai';margin:0">{{ g.title }}</h2><span style="font:400 12.5px 'Instrument Sans','Noto Sans Thai';color:#7d7d7d">{{ g.note }}</span></div>
+      <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="2">
+        <div onClick="{{ it.toggle }}" style="display:flex;gap:14px;padding:14px 4px;border-bottom:1px solid #111;cursor:pointer" style-hover="background:#080808">
+          <div style="flex:none;width:18px;height:18px;margin-top:3px;border-radius:5px;border:1.5px solid {{ it.boxBd }};background:{{ it.boxBg }};display:flex;align-items:center;justify-content:center"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:{{ it.tick }}"><path d="M5 12l5 5 9-10"></path></svg></div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="font:500 14px/1.5 'Instrument Sans','Noto Sans Thai';color:{{ it.fg }};text-decoration:{{ it.deco }}">{{ it.title }}</span><span style="font:600 9.5px 'JetBrains Mono',monospace;padding:2px 6px;border-radius:4px;background:{{ it.pbg }};color:{{ it.pfg }}">{{ it.p }}</span><span style="font:400 11px 'JetBrains Mono',monospace;color:#555">{{ it.effort }}</span></div>
+            <div style="font:400 13px/1.7 'Instrument Sans','Noto Sans Thai';color:#8a8a8a;margin-top:4px">{{ it.why }}</div>
+            <div style="font:400 13px/1.7 'Instrument Sans','Noto Sans Thai';color:#b5b5b5;margin-top:4px"><span style="color:#777">วิธีแก้ · </span>{{ it.fix }}</div>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </sc-for>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { done: {}, filter: 'all' };
+  data = [
+    { title: 'ความปลอดภัยและการอนุมัติ', note: 'ผลิตภัณฑ์รันเครื่องมือด้านความปลอดภัย หมวดนี้จึงเสี่ยงที่สุด', items: [
+      ['การ์ดขออนุมัติแสดงบริบทครบ', 'P0', 'M', 'ตอนนี้ลิ้นชักแสดงแค่คำสั่งกับโน้ตหนึ่งบรรทัด ผู้ใช้อนุมัติโดยไม่เห็นผลตรวจ scope, โหมด isolation หรือ timeout', 'แสดงเป้าหมาย, scope ที่ตรงกัน, ผลตรวจ deny-list, isolation, timeout และผลข้างเคียงที่คาดไว้ พร้อมปุ่มคัดลอกคำสั่ง'],
+      ['ไม่ให้พลาดการอนุมัติที่รออยู่', 'P0', 'S', 'การอนุมัติซ่อนอยู่หลังตัวเลขที่แถบข้าง การรันที่หยุดรออนุมัติดูเหมือนค้าง', 'ใส่การ์ดอนุมัติในแชตตรงขั้นที่หยุด และแถบสถานะการรันปักหมุด ("รออนุมัติ · 1")'],
+      ['แสดง scope ถาวร', 'P0', 'S', 'Engagement และ isolation เป็นชิปเล็กๆ ที่ header แต่การเปลี่ยนเป็น isolation: direct เสี่ยงสูง', 'ให้ isolation: direct เป็นชิปแดงทึบ และต้องพิมพ์ยืนยันก่อนเลือก'],
+      ['เห็นการกระทำที่ถูกบล็อกชัดเจน', 'P1', 'S', 'การชน deny-list แสดงเป็นบรรทัดในกลุ่ม phase ที่พับอยู่', 'แสดงเป็นบล็อกในแชตพร้อมกฎที่ตรงและลิงก์ไปยังรายการ RoE']
+    ] },
+    { title: 'การเข้าถึง (Accessibility)', note: 'หลายข้อแก้ง่ายและใช้เวลาน้อย', items: [
+      ['เพิ่ม contrast ของข้อความจาง', 'P0', 'S', 'ข้อความสี #555 บนพื้นดำมี contrast ประมาณ 2.8:1 เวลา, ชิป meta, ป้าย phase ในกราฟ และ placeholder จึงไม่ผ่าน 4.5:1', 'ตั้งระดับข้อความจางเป็น #8a8a8a หรืออ่อนกว่า (ประมาณ 5.5:1) ใช้ #555 กับเส้นขอบเท่านั้น'],
+      ['ใช้ปุ่มจริงและรองรับคีย์บอร์ด', 'P0', 'M', 'ส่วนควบคุมส่วนใหญ่เป็น div ที่กดได้ ไม่มีลำดับ Tab และไม่มีกรอบ focus', 'ใช้ button หรือ role="button" พร้อม tabindex ใส่กรอบ focus หนา 2px สีแดง และให้ Esc ปิดลิ้นชักกับ modal'],
+      ['ไม่พึ่งสีอย่างเดียวบอกสถานะ', 'P1', 'S', 'โหนดที่กำลังรัน, ถูกหักล้าง และรออนุมัติ ต่างกันหลักๆ ด้วยแดงกับเทา', 'คงสัญลักษณ์ทุกสถานะ (เสร็จ ✓, กำลังรัน spinner, หักล้าง ✕, รออนุมัติ !) และใส่ข้อความใน tooltip'],
+      ['เคารพ reduced motion', 'P1', 'S', 'ASCII wake, shimmer, เคอร์เซอร์กะพริบ และ pulse ทำงานเสมอ', 'หยุด wake ที่สถานะพื้นหลัง และปิด shimmer กับ pulse เมื่อผู้ใช้ตั้ง prefers-reduced-motion'],
+      ['ประกาศเนื้อหาที่ไหลเข้ามา', 'P2', 'S', 'ส่วนแชตไม่ใช่ live region', 'ใส่ role="log" และ aria-live="polite" ที่แชต ส่วนการขออนุมัติให้ประกาศแบบ assertive'],
+      ['ขนาดข้อความขั้นต่ำ', 'P2', 'S', 'ป้ายในกราฟใช้ขนาด 8.5 ถึง 11px', 'ขั้นต่ำ 11px และชื่อโหนด 12px']
+    ] },
+    { title: 'แชตและบทสนทนา', note: 'ข้อความของ assistant ซ้อนได้ถึงสี่บล็อก', items: [
+      ['render markdown ในคำตอบ', 'P0', 'M', 'ต้นแบบแสดงเป็นข้อความธรรมดา ของเดิม render หัวข้อ, รายการ, ตาราง และบล็อกโค้ด', 'ย้ายสไตล์ .md เดิมมา ใส่ปุ่มคัดลอกบนบล็อกโค้ดและให้ตารางเลื่อนแนวนอนได้'],
+      ['พับขั้นตอนที่เสร็จแล้วอัตโนมัติ', 'P1', 'S', 'Thinking, thought chain และกลุ่ม tool เปิดค้างทั้งหมด ดันคำตอบลงไปข้างล่าง', 'เมื่อรันเสร็จให้พับ chain กับ tools เหลือสรุปหนึ่งบรรทัดเหนือคำตอบ และรวม Thinking เข้ากับ chain'],
+      ['แถบสถานะการรันปักหมุด', 'P1', 'M', 'Phase, จำนวนขั้น, เวลา และปุ่ม Stop กระจายอยู่ที่ header กับ todo panel', 'แถบบางๆ ใต้ header: phase, todo 2/4, เวลา, Stop แล้วให้ todo panel กางออกจากแถบนี้'],
+      ['ปุ่ม Jump ชนกับ composer', 'P2', 'S', 'ปุ่มวางด้วยระยะคงที่ และเลื่อนเมื่อเปิดแถบ Steer', 'ผูกตำแหน่งกับกล่อง composer แทนระยะพิกเซล'],
+      ['ปุ่มจัดการข้อความแสดงเมื่อ hover', 'P2', 'S', 'Copy, regenerate และ like แสดงใต้ทุกคำตอบตลอด', 'แสดงเมื่อ hover หรือ focus ที่ข้อความ และคงไว้เฉพาะข้อความล่าสุด']
+    ] },
+    { title: 'วินัยการใช้สีแดง', note: 'ตอนนี้สีแดงอยู่ที่ไอคอนคำสั่ง, ปุ่ม mode, ปุ่ม security และชิปหลายตัว', items: [
+      ['กำหนดสีแดงสามระดับ', 'P1', 'S', 'สีแดงใช้กับสถานะสด, ปุ่มหลัก และอันตรายด้วยน้ำหนักเท่ากัน', 'แดงทึบ: ปุ่มหลักและอันตราย  แดงจาง 14%: สถานะสดหรือที่เลือก  ตัวอักษรแดง: ลิงก์และป้ายสถานะ อย่างอื่นห้ามใช้'],
+      ['ใช้สีกลางกับข้อมูลทั่วไป', 'P2', 'S', 'สีปุ่ม Assistant และ Autonomous เปลี่ยนตามโหมด', 'ให้ปุ่มเป็นสีกลาง และแสดงจุดแดงเล็กๆ เฉพาะตอนที่กำลังรัน']
+    ] },
+    { title: 'Hypothesis Tree', note: 'ใช้ได้ดีกับประมาณสิบโหนด กราฟใหญ่กว่านั้นต้องมีเครื่องมือนำทาง', items: [
+      ['Pan, zoom และ minimap', 'P1', 'L', 'แคนวาสเลื่อนได้อย่างเดียว แต่งานจริงสร้างโหนดเป็นสิบๆ', 'เพิ่ม zoom ด้วยล้อเมาส์, ลากเพื่อ pan, fit-to-view และ minimap คืนแบนเนอร์เตือนขนาดกราฟของเดิมเมื่อโหนดเกินเกณฑ์'],
+      ['ปรับความกว้าง drawer ได้', 'P1', 'S', 'Drawer กว้างคงที่ 380px ของเดิมมีที่ลาก', 'ใช้ handle แบบเดียวกับ tool panel และจำความกว้างใน localStorage'],
+      ['การ์ดข้อมูลเมื่อ hover โหนด', 'P2', 'S', 'ชื่อถูกตัดเหลือสองบรรทัด อ่านข้อกล่าวอ้างจากแคนวาสไม่ได้', 'แสดง claim, verdict และ attempt ล่าสุดในการ์ด hover'],
+      ['ระยะห่างของมุมมอง Timeline', 'P2', 'S', 'โหนดอยู่แถวเดียว ห่างกัน 130px และเส้นเชื่อมทับกัน', 'เยื้องแนวตั้งตามความลึก และลากเส้นโค้งเหนือแถว'],
+      ['ใช้คีย์บอร์ดนำทาง', 'P2', 'M', 'โหนดใช้เมาส์ได้อย่างเดียว', 'ลูกศรย้ายระหว่าง parent, child, sibling  Enter เลือก  Esc ล้างการเลือก']
+    ] },
+    { title: 'Notebook และ Findings', note: '', items: [
+      ['เพิ่มและแก้ไขโน้ต', 'P1', 'S', 'โน้ตทำได้แค่ Resolve หรือ Delete', 'เพิ่มแถวสร้างโน้ตพร้อมตัวเลือกหมวด และแก้ไขในที่เดิม'],
+      ['Finding ลิงก์ไปหลักฐาน', 'P1', 'M', 'แต่ละ finding ระบุ hypothesis แต่เปิดผลลัพธ์ของ tool ที่อยู่เบื้องหลังไม่ได้', 'เพิ่ม "ดูหลักฐาน" ที่เปิด tool panel ตรงผลลัพธ์นั้น'],
+      ['เรียงลำดับและส่งออก', 'P2', 'M', 'ไม่มีการเรียงตามความรุนแรงและไม่มีการส่งออกรายงาน', 'เรียงตามความรุนแรงเป็นค่าเริ่มต้น และเพิ่มการส่งออก Markdown ของ finding ที่ตรวจแล้ว']
+    ] },
+    { title: 'หน้า Home และการนำทาง', note: '', items: [
+      ['แสดงบริบทล่าสุดในหน้า Home', 'P2', 'S', 'หน้า Home มีแค่ composer ผู้ใช้ที่กลับมาต้องไปหาที่แถบข้าง', 'เพิ่มสรุป engagement ปัจจุบันและ session ล่าสุดสามรายการใต้ composer'],
+      ['คีย์ลัด', 'P2', 'S', 'ยังไม่มีคีย์ลัด', '⌘K ค้นหา session, ⌘N session ใหม่, ⌘↵ ส่ง, Esc ปิด overlay และแสดงรายการใน popover ช่วยเหลือ'],
+      ['แถบข้างย่อได้และรองรับหน้าจอแคบ', 'P1', 'M', 'แถบข้างกว้างคงที่ 264px และ tool panel กว้างได้ถึง 720px', 'ย่อแถบข้างเมื่อต่ำกว่า 900px และให้ tool panel เป็น overlay เมื่อต่ำกว่า 1100px'],
+      ['ประสิทธิภาพของ wake', 'P2', 'S', 'แคนวาสวาดใหม่ทุกเฟรม แม้แท็บถูกซ่อน', 'หยุดเมื่อ visibilitychange จำกัด 30fps และข้ามการวาดเมื่อไม่มีเซลล์ร้อน']
+    ] },
+    { title: 'สถานะและการตอบกลับ', note: 'ต้นแบบแสดงเฉพาะกรณีที่ทุกอย่างราบรื่น', items: [
+      ['สถานะการเชื่อมต่อและข้อผิดพลาด', 'P0', 'M', 'ไม่มีแบนเนอร์เมื่อ WebSocket หลุด, 401 จากการไม่มี API key หรือ tool ล้มเหลว', 'เพิ่มแบนเนอร์กำลังเชื่อมต่อใหม่, หน้าขอ API key และแถว tool แบบ error พร้อมปุ่มลองใหม่'],
+      ['สถานะว่างและกำลังโหลด', 'P1', 'S', 'Notebook ว่าง, ไม่มี finding, ไม่มีการอนุมัติ และการโหลด session ยังไม่ได้ออกแบบ', 'ใช้รูปแบบเดียว: ข้อความสั้นหนึ่งบรรทัดกับหนึ่งการกระทำ และ skeleton ตอนโหลดรายการ session'],
+      ['Toast ยืนยันการกระทำ', 'P2', 'S', 'Copy แสดงข้อความในที่ และการลบ session ย้อนกลับไม่ได้', 'เพิ่ม toast พร้อมปุ่ม Undo สำหรับการลบ session และการตัดสินใจอนุมัติ'],
+      ['เปลี่ยนชื่อ session', 'P2', 'S', 'ชื่อคือ 44 ตัวอักษรแรกของข้อความที่ส่ง', 'ดับเบิลคลิกเพื่อเปลี่ยนชื่อ และสร้างชื่ออัตโนมัติหลังคำตอบแรก']
+    ] },
+    { title: 'ระบบภาพ (Visual system)', note: '', items: [
+      ['ทำ token ของสี ขนาด และระยะห่าง', 'P1', 'M', 'ค่าสีซ้ำกันทั่วไฟล์ และมีขนาดฟอนต์ประมาณ 15 ขนาด', 'กำหนดตัวแปร CSS สำหรับพื้นผิว (#000, #050505, #0a0a0a, #111), เส้นขอบ, ระดับข้อความ และสีเน้น ลดเหลือสเกลตัวอักษร 6 ระดับบนกริด 4px'],
+      ['เพิ่มมิติพื้นผิวบนพื้นดำล้วน', 'P1', 'S', 'พื้นดำล้วนกับเส้นขอบ #1a1a1a ทำให้แผงต่างๆ ดูแบน', 'ใช้พื้นผิวยกสูงสองระดับ คงเส้นขอบ #1f1f1f และใช้เงาเฉพาะเมนูที่ลอย'],
+      ['ใช้ชุดไอคอนเดียว', 'P2', 'S', 'ไอคอนเป็น path ที่เขียนเอง น้ำหนักเส้นไม่เท่ากัน', 'ใช้ชุดเดียว เส้นหนา 1.75px ขนาด 14 และ 16px'],
+      ['ตัวเลขแบบ tabular สำหรับข้อมูล', 'P2', 'S', 'จำนวน, เวลา และพอร์ตบางที่ใช้ตัวเลขความกว้างไม่เท่ากัน', 'ใช้ฟอนต์ mono หรือ tabular-nums กับคอลัมน์ตัวเลขทุกที่']
+    ] },
+    { title: 'การนำไปใช้กับ backend จริง', note: 'ต้นแบบเป็นแบบอ้างอิง ตัวผลิตภัณฑ์คือ index.html แบบ static ที่ FastAPI เสิร์ฟ', items: [
+      ['เก็บ ID ของ element ที่เทสต์ใช้', 'P0', 'S', 'test_frontend.py (Playwright) อ้างถึง ID เช่น #newSessionBtn, #approvalsBtn, #sessionList, #chatInput, #graphView', 'ย้าย ID และ event hook เดิมมาที่ markup ใหม่ แล้วรันเทสต์ทั้งชุดก่อน merge'],
+      ['อ่าน JS ที่เหลือราว 2,200 บรรทัด', 'P0', 'M', 'ยังไม่ได้ตรวจการจัดการ event, ขั้นตอน API key, การแยก SSE และการ render markdown', 'จับคู่ event แต่ละชนิดกับบล็อกในแชตก่อนย้ายโค้ด'],
+      ['ย้ายทีละส่วนในไฟล์เดิม', 'P1', 'L', 'การเขียนใหม่ 3,185 บรรทัดในครั้งเดียวรีวิวยาก', 'ลำดับ: token และโครง, แถบข้างกับ Home, บล็อกในแชต, tool panel, การอนุมัติ, กราฟ, notebook และ findings']
+    ] }
+  ];
+  all() { return this.data.map((g, gi) => ({ title: g.title, note: g.note, items: g.items.map((it, ii) => ({ key: gi + '-' + ii, title: it[0], p: it[1], effort: 'effort ' + it[2], why: it[3], fix: it[4] })) })); }
+  componentDidMount() { try { const d = JSON.parse(localStorage.getItem('oxpecker.review') || '{}'); this.setState({ done: d }); } catch (e) {} }
+  toggle(k) { this.setState(s => { const d = { ...s.done, [k]: !s.done[k] }; try { localStorage.setItem('oxpecker.review', JSON.stringify(d)); } catch (e) {} return { done: d }; }); }
+  renderVals() {
+    const s = this.state, A = 'oklch(70% 0.19 25)', all = this.all();
+    const flat = all.flatMap(g => g.items), doneCount = flat.filter(i => s.done[i.key]).length;
+    const pc = { P0: ['oklch(62% 0.21 25 / .16)', A], P1: ['#1c1c1c', '#ddd'], P2: ['#111', '#8a8a8a'] };
+    const groups = all.map(g => ({ title: g.title, note: g.note, items: g.items.filter(i => s.filter === 'all' || i.p === s.filter).map(i => ({ ...i, toggle: () => this.toggle(i.key), pbg: pc[i.p][0], pfg: pc[i.p][1],
+      boxBd: s.done[i.key] ? '#ededed' : '#3a3a3a', boxBg: s.done[i.key] ? '#ededed' : 'transparent', tick: s.done[i.key] ? 1 : 0, fg: s.done[i.key] ? '#666' : '#ededed', deco: s.done[i.key] ? 'line-through' : 'none' })) })).filter(g => g.items.length);
+    const filters = [['all', 'ทั้งหมด'], ['P0', 'P0 · ทำก่อน'], ['P1', 'P1 · ถัดไป'], ['P2', 'P2 · ขัดเกลา']].map(([k, label]) => ({ label, pick: () => this.setState({ filter: k }), bd: s.filter === k ? '#ededed' : '#262626', fg: s.filter === k ? '#fff' : '#9a9a9a', bg: s.filter === k ? '#161616' : 'transparent' }));
+    return { groups, filters, doneCount, total: flat.length, pct: Math.round(doneCount / flat.length * 100) };
+  }
+}
+</script>
+</body>
+</html>

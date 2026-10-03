@@ -1,0 +1,5 @@
+# ADR-0003: seccomp filter for the bubblewrap tier. Pure-ctypes wrapper around the already-
+# present libseccomp.so.2 system library — no compilation needed. The Debian package
+# `python3-seccomp` provides the same binding for "plain system Python" use without this venv;
+# not installed on this host as of this pass (needs interactive sudo this session didn't have).
+pyseccomp==0.1.2

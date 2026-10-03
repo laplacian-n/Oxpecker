@@ -1,0 +1,23 @@
+{
+  "pythonCmd": "py",
+  "startLlama": true,
+  "devServer": {
+    "script": "agent/web/dev_server.py",
+    "port": 7777,
+    "ragIndex": "C:/Users/dinuc/OneDrive/เอกสาร/localAI/agent/knowledge_rag/index/vectors.npy",
+    "ragMeta": "C:/Users/dinuc/OneDrive/เอกสาร/localAI/agent/knowledge_rag/index/meta.jsonl",
+    "embedUrl": "http://127.0.0.1:8091"
+  },
+  "chatLlama": {
+    "exe": "C:/Users/dinuc/OneDrive/เอกสาร/digital/ai/llama/llama-server.exe",
+    "model": "C:/Users/dinuc/AppData/Local/FPGA Ecosystem/models/Qwen3.5-4B-Q6_K.gguf",
+    "port": 8080,
+    "args": ["-ngl", "999", "-c", "32768", "-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "-np", "1", "-lm", "none"]
+  },
+  "embedLlama": {
+    "exe": "C:/Users/dinuc/AppData/Local/FPGA Ecosystem/llama/llama-b11016-bin-win-vulkan-x64/llama-server.exe",
+    "model": "C:/Users/dinuc/OneDrive/เอกสาร/localAI/agent/knowledge_rag/models/nomic-embed-text-v1.5.f16.gguf",
+    "port": 8091,
+    "args": ["--embedding", "-ngl", "0"]
+  }
+}

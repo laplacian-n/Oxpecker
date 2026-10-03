@@ -1,0 +1,2398 @@
+"""Oxpecker standalone dev server — runs on any machine with llama-server (llama.cpp).
+Designed for: Windows laptop, RTX 4050 6GB, Qwen3.5-4B-Q6_K.
+
+Implements the FULL API surface that agent/web/static/index.html expects, with:
+  - LLM inference via llama-server's OpenAI-compatible API (streaming)
+  - RAG retrieval via TF-IDF (no embedding server needed)
+  - In-memory session, engagement, approval, hypothesis graph, notebook, findings stores
+  - SSE streaming for real-time token delivery
+  - WebSocket support for bidirectional comms
+
+Prerequisites:
+  pip install fastapi uvicorn scikit-learn numpy
+
+Usage:
+  Step 1 — Start llama-server (in a separate terminal):
+    llama-server.exe -m Qwen3.5-4B-Q6_K.gguf --port 8080 -ngl 99 --cors "*"
+
+  Step 2 — Start Oxpecker dev server:
+    python dev_server.py --port 7777
+
+  Then open http://127.0.0.1:7777 in your browser.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import hmac
+import json
+import logging
+import os
+import platform
+import queue
+import re
+import textwrap
+import threading
+import time
+import urllib.request
+import urllib.error
+import uuid
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+log = logging.getLogger("oxpecker.dev")
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+DATA_DIR = Path(__file__).resolve().parent / "dev_data"
+RAG_CORPUS_DIR = DATA_DIR / "rag_corpus"
+API_VERSION = "1.0.0-dev"
+
+def _platform_facts() -> str:
+    """Tell the model what the run_command host actually is, so a small model
+    stops reaching for Linux-only tools on Windows (and vice versa)."""
+    if platform.system() == "Windows":
+        return textwrap.dedent("""\
+        HOST ENVIRONMENT: run_command executes on Windows via cmd.exe. Linux-only tools
+        (nmap, ss, lsof, dig, nc, curl) are usually NOT installed. Use Windows equivalents:
+          - TCP port / connectivity:  powershell -NoProfile -Command "Test-NetConnection <host> -Port <port>"
+          - HTTP GET (headers+body):  powershell -NoProfile -Command "(Invoke-WebRequest -UseBasicParsing <url>).Content"
+          - HTTP headers only:        powershell -NoProfile -Command "(Invoke-WebRequest -UseBasicParsing -Method Head <url>).Headers"
+          - DNS lookup:               nslookup <host>
+          - Listening ports:          netstat -ano
+          - Ping / traceroute:        ping -n 4 <host>   |   tracert <host>
+        Prefer a single `powershell -NoProfile -Command "..."` for anything non-trivial.
+        Each run_command runs in a fresh shell: no cwd or environment persists between calls.""")
+    return textwrap.dedent("""\
+        HOST ENVIRONMENT: run_command executes on a POSIX shell (Linux/macOS). Common tools
+        (curl, dig, ss, nc, and nmap if installed) are available. Prefer non-interactive flags.""")
+
+
+DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
+You are Oxpecker, a self-hosted AI penetration testing assistant. You help security \
+professionals with reconnaissance, vulnerability analysis, exploitation, and reporting.
+
+You have access to the following tools:
+- http_request: Send an HTTP request to an in-scope target (status + headers + body). PREFER
+  this for ALL web testing — send payloads as structured fields instead of shell-quoting.
+- run_command: Execute a shell command on the host (see HOST ENVIRONMENT below)
+- read_file: Read file contents from the workspace
+- write_file: Write or create files in the workspace
+- knowledge_search: Search the local security knowledge base
+- record_hypothesis / update_hypothesis_status: track theories in the hypothesis graph
+- record_note: keep a running notebook (technique / dead-end / todo / observation)
+- record_finding: log a confirmed vulnerability with evidence
+
+WEB TESTING RULE: Use http_request — NOT run_command/PowerShell — to probe URLs and send
+SQLi/XSS/auth payloads. PowerShell quote-escaping wastes turns and corrupts payloads.
+- FIRST MOVE on a web target: call http_request GET on the operator's EXACT url (the
+  http://host:port/ you were given) before anything else. Do NOT warm up with Test-NetConnection,
+  Invoke-WebRequest, ping, or netstat — they tell you nothing useful about a remote web app.
+- TARGET LOCK: the operator's target and the "In-scope targets" list below are authoritative and
+  ARE in scope. NEVER switch to localhost / 127.0.0.1, and NEVER claim the given target is out of
+  scope. If a request fails, retry http_request against the SAME host (try http vs https, or a
+  different path) — never change the host or wander to the local machine.
+- Do NOT use netstat / Test-NetConnection / Get-NetTCPConnection / Get-Process to investigate a
+  web target — those show YOUR machine, not the remote server, and are a dead-end loop.
+For OWASP Juice Shop the real login API is POST /rest/user/login with JSON
+{"email":"<payload>","password":"<payload>"}; the SQLi bypass is email "' OR 1=1--".
+Angular routes like /#/login are client-side only — never POST to them.
+
+When given a target and scope, plan your approach systematically:
+1. Enumerate services and open ports
+2. Identify potential vulnerabilities
+3. Attempt exploitation with appropriate caution
+4. Document findings with severity ratings
+
+Tool-calling rules:
+- Call a tool by emitting its function call — NEVER describe what you are about to do and then
+  end the turn. If you write "let me…", "now I'll…", "next I will…", "let me try…", you MUST
+  emit that tool call in the SAME turn. An announcement with no tool call is a FAILED turn.
+- Chain freely: keep calling tools, step after step, until the objective is met. Do NOT stop
+  after one tool to ask "should I continue?" — continue on your own. A normal turn runs several
+  tools: probe, read the result, decide, probe again.
+- Do NOT repeat a tool call you already made this session with the same arguments. The earlier
+  results are in the conversation — read them and take the NEXT action instead of re-sending
+  identical requests.
+- Only end your turn when (a) the task is done and you are giving the final report with real
+  evidence, or (b) you are truly blocked and must ask the operator one specific question.
+- When you say a vulnerability is likely, immediately test it (send the payload) in the same
+  turn rather than announcing the plan — confirm or refute it with a tool, then move on.
+- Use the exact target host/URL given by the operator. Never substitute localhost/127.0.0.1
+  unless the operator's target is actually local.
+
+EVIDENCE RULE (do not violate):
+- Report ONLY what a tool actually returned this session. Never invent ports, services,
+  versions, CVEs, or findings, and never copy an example into a result as if it were real.
+- If you have not verified something with a tool, say "not verified" — do not guess.
+- netstat / Get-NetTCPConnection / Get-Process show the LOCAL machine you run on, NOT the
+  target. Never attribute local ports or processes to the target.
+- Quote the real evidence (the command and a snippet of its output) when you state a finding.
+
+TRACK YOUR WORK (keep the hypothesis graph and notebook alive — do this continuously, not just at the end):
+- When you form a theory about a weakness, call record_hypothesis (title, what you'll test, phase)
+  BEFORE you test it. Link it to a parent with parent_ordinal when it follows from an earlier one.
+- When a tool confirms or refutes that theory, call update_hypothesis_status (status=completed,
+  verdict=confirmed or refuted, evidence=the real proof you just saw). NEVER mark a hypothesis
+  confirmed or refuted until you have ACTUALLY run the test with a tool — if you recorded a
+  hypothesis to test the login SQLi, you must send that POST payload before judging it. No verdict
+  without evidence from a tool call this turn.
+- Jot record_note as you work: a technique that worked, a dead-end to avoid, a todo, an observation.
+- Call record_finding for every CONFIRMED vulnerability, with evidence.
+A real red-teamer leaves a trail — the operator watches the hypothesis tree and notebook fill up
+as you go, so keep them current round by round.
+
+Always respect the Rules of Engagement. Never scan or attack targets outside the defined scope.
+
+{platform_facts}
+
+Be direct and autonomous: when you state an intention, act on it in the SAME turn — never end a
+turn on "let me…" or "next I'll…". Drive the engagement forward yourself (recon → analysis →
+exploitation → evidence) without waiting to be nudged step by step. Do not pad with long \
+preamble — the operator wants commands run and real results, not a plan recited back.
+""").replace("{platform_facts}", _platform_facts())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM Client (llama-server OpenAI-compatible API)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class LLMClient:
+    """Talks to llama-server via its OpenAI-compatible /v1/chat/completions endpoint."""
+
+    def __init__(self, server_url: str = "http://127.0.0.1:8080"):
+        self.base_url = server_url.rstrip("/")
+        log.info("Connecting to llama-server at %s", self.base_url)
+        self._check_health()
+
+    def _check_health(self):
+        try:
+            req = urllib.request.Request(f"{self.base_url}/health")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            status = data.get("status", "unknown")
+            if status == "ok":
+                log.info("llama-server is ready")
+            else:
+                log.warning("llama-server status: %s (may still be loading)", status)
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"Cannot connect to llama-server at {self.base_url}.\n"
+                f"Start it first:\n"
+                f"  llama-server -m your-model.gguf --port 8080 -ngl 99\n\n{e}"
+            ) from e
+
+    def chat(self, messages: list[dict], *, max_tokens: int = 3072,
+             temperature: float = 0.6, stream: bool = False,
+             tools: list[dict] | None = None, enable_thinking: bool = False) -> Any:
+        # Qwen3-recommended sampling (temp 0.6 / top_p 0.95 / top_k 20); a bigger
+        # max_tokens so a <think> block can't eat the whole budget and leave empty content.
+        payload = {
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": 0.95,
+            "top_k": 20,
+            "repeat_penalty": 1.1,
+            "stream": stream,
+            # Qwen3 thinking: off by default — a 4B otherwise spends the whole token budget
+            # inside <think> and often returns EMPTY content. When on, llama.cpp surfaces the
+            # reasoning as delta.reasoning_content (handled by the agent loop) so the UI can
+            # show it without the answer being swallowed.
+            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        }
+        if stream:
+            # Ask llama-server for a trailing usage chunk so the UI can show the REAL
+            # prompt-token count (drives the context monitor + makes compaction visible).
+            payload["stream_options"] = {"include_usage": True}
+        if tools:
+            payload["tools"] = tools
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/chat/completions", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+
+        if not stream:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return json.loads(resp.read())
+
+        return self._stream_response(req)
+
+    def _stream_response(self, req):
+        """Read SSE stream from llama-server (OpenAI format: 'data: {...}' lines)."""
+        resp = urllib.request.urlopen(req, timeout=300)
+        try:
+            buffer = b""
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line == b"data: [DONE]":
+                        return
+                    if line.startswith(b"data: "):
+                        try:
+                            obj = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        yield obj
+        finally:
+            resp.close()
+
+    def token_count(self, text: str) -> int:
+        return len(text) // 4
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RAG: TF-IDF vector store (CPU-only, no embedding server)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TFIDFStore:
+    """Simple TF-IDF-based RAG store. Loads text files from a corpus directory,
+    builds a TF-IDF matrix in memory, and does cosine-similarity search."""
+
+    def __init__(self):
+        self.documents: list[dict] = []
+        self.vectorizer = None
+        self.tfidf_matrix = None
+
+    def index_directory(self, corpus_dir: Path) -> int:
+        if not corpus_dir.exists():
+            return 0
+        texts, metas = [], []
+        for fp in sorted(corpus_dir.rglob("*")):
+            if fp.suffix not in (".txt", ".md", ".json", ".jsonl"):
+                continue
+            try:
+                content = fp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if fp.suffix == ".jsonl":
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        text = obj.get("text", "") or obj.get("content", "")
+                        if not text:
+                            continue
+                        meta = {
+                            "title": obj.get("title", fp.stem),
+                            "source": obj.get("source", fp.parent.name),
+                            "url": obj.get("url", ""),
+                            "tags": obj.get("tags", []),
+                            "text": text[:2000],
+                        }
+                        texts.append(text[:2000])
+                        metas.append(meta)
+                    except json.JSONDecodeError:
+                        continue
+            else:
+                chunks = self._chunk_text(content, max_chars=1500)
+                for i, chunk in enumerate(chunks):
+                    meta = {
+                        "title": fp.stem + (f" (part {i+1})" if len(chunks) > 1 else ""),
+                        "source": fp.parent.name,
+                        "url": "",
+                        "tags": [],
+                        "text": chunk,
+                    }
+                    texts.append(chunk)
+                    metas.append(meta)
+
+        if not texts:
+            return 0
+
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        self.vectorizer = TfidfVectorizer(
+            max_features=50000,
+            stop_words="english",
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+        )
+        self.tfidf_matrix = self.vectorizer.fit_transform(texts)
+        self.documents = metas
+        return len(texts)
+
+    def index_from_existing_meta(self, meta_path: Path) -> int:
+        """Load from the project's existing meta.jsonl (the same format knowledge_rag uses)."""
+        if not meta_path.exists():
+            return 0
+        texts, metas = [], []
+        with open(meta_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    text = obj.get("text", "")
+                    if not text:
+                        continue
+                    texts.append(text[:2000])
+                    metas.append(obj)
+                except json.JSONDecodeError:
+                    continue
+        if not texts:
+            return 0
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        self.vectorizer = TfidfVectorizer(
+            max_features=50000,
+            stop_words="english",
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+        )
+        self.tfidf_matrix = self.vectorizer.fit_transform(texts)
+        self.documents = metas
+        return len(texts)
+
+    def search(self, query: str, top_k: int = 5, source: str | None = None) -> list[dict]:
+        if self.vectorizer is None or self.tfidf_matrix is None:
+            return []
+        q_vec = self.vectorizer.transform([query])
+        from sklearn.metrics.pairwise import cosine_similarity
+        scores = cosine_similarity(q_vec, self.tfidf_matrix).flatten()
+        order = scores.argsort()[::-1]
+        results = []
+        for i in order:
+            if scores[i] < 0.01:
+                break
+            doc = self.documents[i]
+            if source and doc.get("source") != source:
+                continue
+            results.append({
+                "title": doc.get("title", ""),
+                "text": doc.get("text", ""),
+                "source": doc.get("source", ""),
+                "url": doc.get("url", ""),
+                "score": round(float(scores[i]), 3),
+                "tags": doc.get("tags", []),
+            })
+            if len(results) >= top_k:
+                break
+        return results
+
+    def count(self) -> int:
+        return len(self.documents)
+
+    @staticmethod
+    def _chunk_text(text: str, max_chars: int = 1500) -> list[str]:
+        if len(text) <= max_chars:
+            return [text] if text.strip() else []
+        chunks = []
+        lines = text.split("\n")
+        current = []
+        current_len = 0
+        for line in lines:
+            if current_len + len(line) + 1 > max_chars and current:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += len(line) + 1
+        if current:
+            chunks.append("\n".join(current))
+        return [c for c in chunks if c.strip()]
+
+
+class VectorRAG:
+    """Dense RAG over a large prebuilt index, kept memory-safe.
+
+    A 547k-chunk index is ~1.7GB of vectors + ~1GB of JSONL metadata; loading both into
+    RAM (np.load + [json.loads(l) for l in f]) costs ~5GB and OOMs a 24GB box that is
+    already full. Instead: vectors are memory-MAPPED (paged by the OS, ~0 resident), and
+    metadata is read on demand via a cached byte-offset index — so steady-state RAM is a
+    few MB. Query embedding goes to a small nomic-embed llama-server (/embedding).
+    """
+
+    def __init__(self, vectors_path: Path, meta_path: Path, embed_url: str,
+                 query_prefix: str = "search_query: "):
+        import numpy as np
+        self._np = np
+        self.vectors = np.load(str(vectors_path), mmap_mode="r")  # (n, dim), L2-normalized rows
+        self.meta_path = Path(meta_path)
+        self.embed_url = embed_url.rstrip("/")
+        self.query_prefix = query_prefix
+        self.offsets = self._load_or_build_offsets()
+        self._n = int(min(len(self.offsets), self.vectors.shape[0]))
+        self._dim = int(self.vectors.shape[1])
+
+    def _load_or_build_offsets(self):
+        np = self._np
+        off_path = self.meta_path.with_suffix(".offsets.npy")
+        try:
+            if off_path.exists() and off_path.stat().st_mtime >= self.meta_path.stat().st_mtime:
+                return np.load(str(off_path))
+        except OSError:
+            pass
+        offs = []
+        with open(self.meta_path, "rb") as f:
+            pos = f.tell()
+            line = f.readline()
+            while line:
+                if line.strip():
+                    offs.append(pos)
+                pos = f.tell()
+                line = f.readline()
+        arr = np.array(offs, dtype=np.int64)
+        try:
+            np.save(str(off_path), arr)
+        except OSError:
+            pass
+        return arr
+
+    def embed_query(self, text: str):
+        payload = json.dumps({"content": [self.query_prefix + text]}).encode()
+        req = urllib.request.Request(
+            f"{self.embed_url}/embedding", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        # llama.cpp shapes vary: [{"embedding":[[...]]}] or [{"embedding":[...]}] or {"embedding":[...]}
+        row = data[0] if isinstance(data, list) else data
+        emb = row.get("embedding", row) if isinstance(row, dict) else row
+        if isinstance(emb, list) and emb and isinstance(emb[0], list):
+            emb = emb[0]
+        return self._np.asarray(emb, dtype=self._np.float32)
+
+    def search(self, query: str, top_k: int = 5, source: str | None = None) -> list[dict]:
+        query = (query or "").strip()
+        if not query or self._n == 0:
+            return []
+        np = self._np
+        try:
+            q = self.embed_query(query)
+        except Exception as e:  # degrade silently — RAG is reference, never load-bearing
+            log.warning("embed query failed: %s", e)
+            return []
+        if q.shape[0] != self._dim:
+            return []
+        qn = np.linalg.norm(q)
+        if qn > 0:
+            q = q / qn
+        scores = np.asarray(self.vectors[:self._n] @ q)  # memmap matmul, streams from page cache
+        pool = int(min(max(top_k * 8, 40), self._n))
+        cand = np.argpartition(-scores, pool - 1)[:pool]
+        cand = cand[np.argsort(-scores[cand])]
+        qtok = set(re.findall(r"[a-z0-9]{2,}", query.lower()))
+        results, seen = [], set()
+        with open(self.meta_path, "rb") as f:
+            for i in cand:
+                f.seek(int(self.offsets[i]))
+                try:
+                    m = json.loads(f.readline())
+                except json.JSONDecodeError:
+                    continue
+                if source and m.get("source") != source:
+                    continue
+                key = (m.get("source", ""), (m.get("title", "") or "")[:40])
+                if key in seen:
+                    continue
+                seen.add(key)
+                tags = {str(t).lower() for t in (m.get("tags") or [])}
+                ttok = set(re.findall(r"[a-z0-9]{2,}", (m.get("title", "") or "").lower()))
+                bonus = 0.08 * len(qtok & tags) + 0.05 * len(qtok & ttok)
+                results.append({
+                    "title": m.get("title", ""), "text": (m.get("text", "") or "")[:2000],
+                    "source": m.get("source", ""), "url": m.get("url", ""),
+                    "score": round(float(scores[i]) + bonus, 3), "tags": list(tags),
+                })
+        results.sort(key=lambda r: -r["score"])
+        return results[:top_k]
+
+    def count(self) -> int:
+        return self._n
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# In-memory stores
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class Session:
+    session_id: str
+    messages: list[dict] = field(default_factory=list)
+    events: queue.Queue = field(default_factory=queue.Queue)
+    running: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    created_at: float = field(default_factory=time.time)
+    use_security_tools: bool = False
+    engagement_id: str = "lab-default"
+    isolation_tier: str = "bubblewrap"
+    profile: str = "safe"
+    autonomous_active: bool = False
+    autonomous_mode: str = ""
+    stop_requested: bool = False
+    thinking: bool = False     # expose the model's <think> reasoning to the UI when True
+    last_prompt_tokens: int = 0  # real prompt-token count from llama-server's last turn
+    summary: str = ""          # running condensed summary of folded-away older turns
+    summary_upto: int = 0      # messages[:summary_upto] are represented by `summary`
+    stage: str = "RECON"       # current pentest stage (operator-driven, not auto-advanced)
+    guided: bool = False       # follow the staged pentest protocol (vs free chat)
+    pending_steers: list[str] = field(default_factory=list)  # operator notes to inject mid-run
+
+    def push(self, event: dict):
+        self.events.put(event)
+
+    def append(self, role: str, content: str, extra: dict | None = None) -> dict:
+        record = {
+            "role": role,
+            "content": content,
+            "message_id": str(uuid.uuid4())[:8],
+            "timestamp": time.time(),
+        }
+        if extra:
+            record.update(extra)
+        self.messages.append(record)
+        self.push({"type": "message", "record": record})
+        return record
+
+
+@dataclass
+class Engagement:
+    engagement_id: str
+    description: str = ""
+    allow_targets: list[str] = field(default_factory=list)
+    allowed_action_classes: list[str] = field(default_factory=list)
+    authorized_by: str = ""
+    valid_until: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return {
+            "engagement_id": self.engagement_id,
+            "description": self.description,
+            "allow_targets": self.allow_targets,
+            "allowed_action_classes": self.allowed_action_classes,
+            "valid_until": self.valid_until,
+        }
+
+
+@dataclass
+class ApprovalRequest:
+    request_id: str
+    session_id: str
+    tool: str = ""
+    description: str = ""
+    command: str = ""
+    detail: str = ""
+    prompt: str = ""
+    status: str = "pending"
+    resolved_by: str = ""
+    event: threading.Event = field(default_factory=threading.Event)
+    approved: bool = False
+
+
+@dataclass
+class ConsultRequest:
+    request_id: str
+    session_id: str
+    question: str = ""
+    prompt: str = ""
+    status: str = "pending"
+    resolved_by: str = ""
+    event: threading.Event = field(default_factory=threading.Event)
+    answer: str = ""
+
+
+@dataclass
+class HypothesisNode:
+    ordinal: int
+    title: str
+    claim: str = ""
+    description: str = ""
+    phase: str = "RECON"
+    status: str = "open"
+    verdict: str = ""
+    parent_ordinal: int | None = None
+    why: str = ""
+    attempts: list[dict] = field(default_factory=list)
+    observations: list[dict] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def to_summary(self) -> dict:
+        return {
+            "ordinal": self.ordinal, "title": self.title, "claim": self.claim,
+            "phase": self.phase, "status": self.status, "verdict": self.verdict,
+            "parent_ordinal": self.parent_ordinal,
+        }
+
+    def to_detail(self) -> dict:
+        return {**self.to_summary(), "description": self.description, "why": self.why,
+                "attempts": self.attempts, "observations": self.observations, "notes": self.notes}
+
+
+@dataclass
+class NotebookNote:
+    ordinal: int
+    text: str
+    category: str = "observation"
+    refs: list[str] = field(default_factory=list)
+    resolved: bool = False
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return {"ordinal": self.ordinal, "text": self.text, "category": self.category,
+                "refs": self.refs, "resolved": self.resolved, "created_at": self.created_at}
+
+
+@dataclass
+class Finding:
+    finding_id: str
+    title: str
+    severity: str = "medium"
+    description: str = ""
+    target: str = ""
+    text: str = ""
+    reviewed_by: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return {"finding_id": self.finding_id, "title": self.title, "severity": self.severity,
+                "description": self.description, "target": self.target, "text": self.text,
+                "reviewed_by": self.reviewed_by, "created_at": self.created_at}
+
+
+# Global stores
+_sessions: dict[str, Session] = {}
+_engagements: dict[str, Engagement] = {"lab-default": Engagement(
+    engagement_id="lab-default", description="Local lab environment",
+    allow_targets=["127.0.0.1", "localhost"], allowed_action_classes=["passive_recon", "active_recon"],
+    authorized_by="operator",
+)}
+_approvals: dict[str, ApprovalRequest] = {}
+_consults: dict[str, ConsultRequest] = {}
+_graphs: dict[str, list[HypothesisNode]] = {}
+_graph_edges: dict[str, list[dict]] = {}
+_notebooks: dict[str, list[NotebookNote]] = {}
+_findings: dict[str, list[Finding]] = {}
+_technique_kb: list[dict] = []
+
+# Serializes access to the single-slot llama-server: concurrent generations (e.g. two
+# MCP-driven turns at once) otherwise pile onto `-np 1` and wedge the slot.
+_LLM_LOCK = threading.Lock()
+
+# LLM and RAG globals (set during startup)
+_llm: LLMClient | None = None
+_rag: TFIDFStore = TFIDFStore()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Persistence — best-effort JSON snapshot so a dev_server restart keeps sessions,
+# engagements, findings, hypotheses and notebooks (all otherwise in-memory only).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+STATE_FILE = DATA_DIR / "state.json"
+_persist_lock = threading.Lock()
+
+
+def _mk(cls, d: dict):
+    """Build a dataclass from a dict, ignoring unknown keys."""
+    return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+def _persist():
+    try:
+        data = {
+            "sessions": [
+                {"session_id": s.session_id, "messages": s.messages, "created_at": s.created_at,
+                 "use_security_tools": s.use_security_tools, "engagement_id": s.engagement_id,
+                 "isolation_tier": s.isolation_tier, "profile": s.profile,
+                 "autonomous_mode": s.autonomous_mode, "thinking": s.thinking,
+                 "stage": s.stage, "guided": s.guided,
+                 "summary": s.summary, "summary_upto": s.summary_upto}
+                for s in list(_sessions.values())
+            ],
+            "engagements": [
+                {"engagement_id": e.engagement_id, "description": e.description,
+                 "allow_targets": e.allow_targets, "allowed_action_classes": e.allowed_action_classes,
+                 "authorized_by": e.authorized_by, "valid_until": e.valid_until, "created_at": e.created_at}
+                for e in list(_engagements.values())
+            ],
+            "findings": {eid: [f.to_dict() for f in fs] for eid, fs in _findings.items()},
+            "graphs": {eid: [n.to_detail() for n in ns] for eid, ns in _graphs.items()},
+            "graph_edges": _graph_edges,
+            "notebooks": {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()},
+        }
+        with _persist_lock:
+            tmp = STATE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(STATE_FILE)
+    except Exception as e:
+        log.warning("persist failed: %s", e)
+
+
+def _load_state():
+    if not STATE_FILE.exists():
+        return
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("load state failed: %s", e)
+        return
+    for e in data.get("engagements", []):
+        _engagements[e["engagement_id"]] = _mk(Engagement, e)
+    for eid, fs in data.get("findings", {}).items():
+        _findings[eid] = [_mk(Finding, f) for f in fs]
+    for eid, ns in data.get("graphs", {}).items():
+        _graphs[eid] = [_mk(HypothesisNode, n) for n in ns]
+    _graph_edges.update(data.get("graph_edges", {}))
+    for eid, ns in data.get("notebooks", {}).items():
+        _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
+    for sd in data.get("sessions", []):
+        s = Session(
+            session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
+            engagement_id=sd.get("engagement_id", "lab-default"),
+            isolation_tier=sd.get("isolation_tier", "bubblewrap"), profile=sd.get("profile", "safe"),
+            created_at=sd.get("created_at", time.time()),
+        )
+        s.messages = sd.get("messages", [])
+        s.autonomous_mode = sd.get("autonomous_mode", "")
+        s.thinking = sd.get("thinking", False)
+        s.stage = sd.get("stage", "RECON")
+        s.guided = sd.get("guided", False)
+        s.summary = sd.get("summary", "")
+        s.summary_upto = sd.get("summary_upto", 0)
+        _sessions[s.session_id] = s
+    log.info("Restored state: %d sessions, %d engagements, %d finding-sets",
+             len(_sessions), len(_engagements), len(_findings))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tool execution (sandboxed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Safety net: refuse clearly destructive host commands (no approval prompt, just a block).
+# This is a seatbelt, not a scope wall — it stops a 4B from wiping the dev box by accident.
+_DESTRUCTIVE_PATTERNS = [
+    r"\bformat\s+[a-zA-Z]:",             # format C:
+    r"\bformat-volume\b", r"\bdiskpart\b", r"\bmkfs(\.\w+)?\b",
+    r"\bdel\s+/[a-zA-Z]*[fsq]",          # del /f /s /q
+    r"\berase\s+/[a-zA-Z]*[fsq]",
+    r"\b(?:rd|rmdir)\s+/s\b",            # rd /s
+    r"\brm\s+-\w*[rf]\w*[rf]", r"\brm\s+-r\b",   # rm -rf / -fr / -r
+    r"\bremove-item\b.*-recurse",        # Remove-Item ... -Recurse
+    r"\bshutdown\b", r"\b(?:stop|restart)-computer\b",
+    r"\breg\s+delete\b", r"\bcipher\s+/w",
+    r"\bdd\s+if=.*of=/dev/", r">\s*/dev/sd[a-z]",
+    r":\(\)\s*\{.*\|.*&.*\}\s*;",         # fork bomb
+]
+_DESTRUCTIVE_RE = re.compile("|".join(_DESTRUCTIVE_PATTERNS), re.IGNORECASE | re.DOTALL)
+
+# An HTTP fetch via the shell (Invoke-WebRequest / Invoke-RestMethod / curl / wget against an
+# http(s) URL) → redirect to the http_request tool. Plain TCP probes (Test-NetConnection,
+# netstat, nslookup) are left alone.
+_HTTP_IN_CMD_RE = re.compile(
+    r"(?:invoke-webrequest|invoke-restmethod|\biwr\b|\bcurl\b|\bwget\b).*?https?://|https?://\S+.*?(?:invoke-webrequest|invoke-restmethod)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# ── PowerShell routing: run PS via list-args (shell=False) so pipes/quotes inside a
+# `powershell -Command "... | Select-String ..."` don't get mangled by cmd.exe.
+_PS_WRAPPER_RE = re.compile(
+    r"^\s*(?:powershell|pwsh)(?:\.exe)?\b(?:\s+-[^\s]+)*?\s+-(?:Command|c)\s+(?P<body>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_PS_CMDLET_RE = re.compile(
+    r"\b(?:Invoke|Get|Set|Test|Select|New|Remove|Start|Stop|ConvertTo|ConvertFrom|"
+    r"Out|Where|ForEach|Measure|Resolve|Format|Add|Clear|Export|Import)-\w+",
+    re.IGNORECASE,
+)
+
+
+def _powershell_body(cmd: str) -> str | None:
+    """If cmd wraps a PowerShell script (`powershell -Command "..."`), return the inner
+    script; if it's a bare PowerShell cmdlet pipeline, return it as-is; else None (use cmd.exe)."""
+    m = _PS_WRAPPER_RE.match(cmd)
+    if m:
+        body = m.group("body").strip()
+        if len(body) >= 2 and body[0] in "\"'" and body[-1] == body[0]:
+            body = body[1:-1]
+        return body
+    if _PS_CMDLET_RE.search(cmd):   # bare cmdlet pipeline, no wrapper
+        return cmd.strip()
+    return None
+
+
+# A small model often picks a near-miss tool name — accept the obvious synonyms.
+_TOOL_NAME_ALIASES = {
+    "run": "run_command", "bash": "run_command", "sh": "run_command", "shell": "run_command",
+    "exec": "run_command", "execute": "run_command", "command": "run_command", "run_cmd": "run_command",
+    "read": "read_file", "cat": "read_file", "open_file": "read_file", "readfile": "read_file",
+    "write": "write_file", "create_file": "write_file", "writefile": "write_file", "save_file": "write_file",
+    "search": "knowledge_search", "kb_search": "knowledge_search", "search_knowledge": "knowledge_search",
+    "knowledge": "knowledge_search", "knowledgebase": "knowledge_search",
+    "http": "http_request", "request": "http_request", "fetch": "http_request",
+    "curl": "http_request", "http_get": "http_request", "http_post": "http_request",
+    "web_request": "http_request", "httprequest": "http_request",
+}
+
+
+def _run_tool(name: str, args: dict, session: Session) -> dict:
+    """Execute a tool call. Returns the tool result dict."""
+    name = _TOOL_NAME_ALIASES.get(name, name)
+    if name == "run_command":
+        cmd = args.get("command", "")
+        if not cmd:
+            return {"ok": False, "error": "empty command"}
+        if _DESTRUCTIVE_RE.search(cmd):
+            return {"ok": False, "error": "blocked: this looks like a destructive host command "
+                                          "(format/shutdown/recursive-delete/etc.) and was NOT run. "
+                                          "Pentest the target over the network instead."}
+        # Deterministically steer HTTP fetches to http_request: a small model keeps reaching
+        # for Invoke-WebRequest/curl and then either loses to quote-escaping or hallucinates a
+        # response from echoed output. http_request returns the REAL status+body instead.
+        if _HTTP_IN_CMD_RE.search(cmd):
+            return {"ok": False, "error": "Do not fetch HTTP with run_command. Use the http_request "
+                                          "tool instead: {\"url\":\"<full url incl. path>\", "
+                                          "\"method\":\"GET|POST\", \"headers\":{...}, \"body\":{...}}. "
+                                          "It returns the real status, headers, and body — no shell quoting."}
+        import subprocess
+        # On Windows, route PowerShell through list-args (shell=False) so a pipe inside
+        # `powershell -Command "... | Select-String ..."` isn't eaten by cmd.exe.
+        if platform.system() == "Windows":
+            body = _powershell_body(cmd)
+            if body is not None:
+                run_args, use_shell = ["powershell", "-NoProfile", "-NonInteractive",
+                                       "-Command", body], False
+            else:
+                run_args, use_shell = cmd, True  # dir/netstat/ping/&& → cmd.exe
+        else:
+            run_args, use_shell = cmd, True
+        try:
+            result = subprocess.run(
+                run_args, shell=use_shell, capture_output=True, text=True, timeout=20,
+                cwd=str(DATA_DIR),
+            )
+            output = result.stdout + result.stderr
+            return {"ok": True, "exit_code": result.returncode, "output": output[:1500]}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "command timed out (20s) — likely a slow port scan; "
+                                          "prefer a single HTTP request against the target URL"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    elif name == "read_file":
+        path = args.get("path", "")
+        if not path:
+            return {"ok": False, "error": "empty path"}
+        try:
+            fp = (DATA_DIR / path).resolve()
+            if not str(fp).startswith(str(DATA_DIR)):
+                return {"ok": False, "error": "path traversal blocked"}
+            content = fp.read_text(encoding="utf-8", errors="replace")[:8000]
+            return {"ok": True, "content": content}
+        except FileNotFoundError:
+            return {"ok": False, "error": f"file not found: {path}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    elif name == "write_file":
+        path = args.get("path", "")
+        content = args.get("content", "")
+        if not path:
+            return {"ok": False, "error": "empty path"}
+        try:
+            fp = (DATA_DIR / path).resolve()
+            if not str(fp).startswith(str(DATA_DIR)):
+                return {"ok": False, "error": "path traversal blocked"}
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(content, encoding="utf-8")
+            return {"ok": True, "path": str(fp)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    elif name == "http_request":
+        # Structured HTTP — the web-pentest workhorse. Lets the model send payloads
+        # (SQLi/XSS/auth) as JSON fields instead of fighting PowerShell quote-escaping,
+        # which was the #1 cause of wasted tool rounds. Enforces engagement scope.
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "empty url"}
+        if not re.match(r"^https?://", url, re.IGNORECASE):
+            url = "http://" + url
+        method = str(args.get("method") or "GET").upper()
+        headers = args.get("headers") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        # NOTE: _normalize_tool_args aliases body/data → "content" (for write_file), so the
+        # request body can arrive under any of these keys. Check all of them.
+        body = args.get("body")
+        if body is None:
+            body = args.get("data")
+        if body is None:
+            body = args.get("content")
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        eng = _engagements.get(session.engagement_id)
+        if eng and eng.allow_targets and host:
+            allowed = any(host == str(t).lower() or host in str(t).lower() for t in eng.allow_targets)
+            if not allowed:
+                return {"ok": False, "error": f"out of scope: host {host!r} is not in engagement "
+                                              f"targets {eng.allow_targets}. Add it to the engagement first."}
+        data = None
+        if body is not None:
+            if isinstance(body, (dict, list)):
+                data = json.dumps(body).encode()
+                headers.setdefault("Content-Type", "application/json")
+            else:
+                data = str(body).encode()
+        hdrs = {str(k): str(v) for k, v in headers.items()}
+        hdrs.setdefault("User-Agent", "Oxpecker/1.0")
+        try:
+            req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read(200000)
+                return {"ok": True, "status": resp.status,
+                        "headers": dict(resp.headers),
+                        "body": raw.decode("utf-8", "replace")[:4000]}
+        except urllib.error.HTTPError as e:
+            raw = e.read(200000)
+            return {"ok": True, "status": e.code, "headers": dict(e.headers),
+                    "body": raw.decode("utf-8", "replace")[:4000]}
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    elif name == "knowledge_search":
+        query = args.get("query", "")
+        if not query:
+            return {"ok": False, "error": "empty query"}
+        results = _rag.search(query, top_k=args.get("top_k", 5))
+        return {"ok": True, "results": results, "count": len(results)}
+
+    elif name == "record_hypothesis":
+        eng_id = session.session_id  # graph is per-session (each chat keeps its own tree)
+        if eng_id not in _graphs:
+            _graphs[eng_id] = []
+            _graph_edges[eng_id] = []
+        nodes = _graphs[eng_id]
+        title = (args.get("title") or "").strip()
+        if not title:
+            return {"ok": False, "error": "title is required for a hypothesis"}
+        # Dedup: a 4B often re-records the same hypothesis several times in one turn.
+        for n in nodes:
+            if (n.title or "").strip().lower() == title.lower():
+                return {"ok": True, "hypothesis_id": f"h-{n.ordinal}", "ordinal": n.ordinal, "deduped": True}
+        ordinal = len(nodes) + 1
+        node = HypothesisNode(
+            ordinal=ordinal,
+            title=args.get("title", ""),
+            claim=args.get("description", args.get("claim", "")),
+            description=args.get("description", ""),
+            phase=args.get("phase", "RECON"),
+            parent_ordinal=args.get("parent_ordinal"),
+        )
+        nodes.append(node)
+        if node.parent_ordinal:
+            _graph_edges[eng_id].append({
+                "from_ordinal": node.parent_ordinal,
+                "to_ordinal": ordinal,
+                "edge_type": "derives",
+            })
+        return {"ok": True, "hypothesis_id": f"h-{ordinal}", "ordinal": ordinal}
+
+    elif name == "update_hypothesis_status":
+        eng_id = session.session_id
+        nodes = _graphs.get(eng_id, [])
+        h_id = args.get("hypothesis_id", "")
+        ordinal = int(re.sub(r"[^0-9]", "", h_id)) if h_id else args.get("ordinal", 0)
+        for n in nodes:
+            if n.ordinal == ordinal:
+                n.status = args.get("status", n.status)
+                n.verdict = args.get("verdict", n.verdict)
+                if args.get("evidence"):
+                    n.attempts.append({"method": "evidence", "result": args["evidence"], "status": "done"})
+                return {"ok": True, "hypothesis_id": h_id}
+        return {"ok": False, "error": f"hypothesis {h_id} not found"}
+
+    elif name == "record_finding":
+        eng_id = session.session_id
+        title = (args.get("title") or "").strip()
+        desc = (args.get("description") or "").strip()
+        # Reject malformed/empty findings (a 4B sometimes emits a junk call with only a stray
+        # "raw" blob and no real title/description — that used to create an empty finding).
+        if not title or not desc:
+            return {"ok": False, "error": "a finding needs both a title and a description"}
+        if eng_id not in _findings:
+            _findings[eng_id] = []
+        # Dedup by title so repeated calls in one turn don't pile up duplicates.
+        for f in _findings[eng_id]:
+            if (f.title or "").strip().lower() == title.lower():
+                return {"ok": True, "finding_id": f.finding_id, "deduped": True}
+        # Monotonic id from the max existing ordinal (not len) — len-based ids collide
+        # after a finding is deleted (e.g. f-1,f-3 → len 2 → a second "f-3").
+        max_ord = 0
+        for f in _findings[eng_id]:
+            m = re.match(r"f-(\d+)$", f.finding_id or "")
+            if m:
+                max_ord = max(max_ord, int(m.group(1)))
+        fid = f"f-{max_ord + 1}"
+        finding = Finding(
+            finding_id=fid,
+            title=args.get("title", ""),
+            severity=args.get("severity", "medium"),
+            description=args.get("description", ""),
+            target=args.get("target", ""),
+        )
+        _findings[eng_id].append(finding)
+        return {"ok": True, "finding_id": fid}
+
+    elif name == "record_note":
+        eng_id = session.session_id
+        if eng_id not in _notebooks:
+            _notebooks[eng_id] = []
+        notes = _notebooks[eng_id]
+        ordinal = len(notes) + 1
+        cat = args.get("category", "observation")
+        if cat not in ("technique", "dead-end", "todo", "observation"):
+            cat = "observation"
+        # _normalize_tool_args aliases text → content globally (for write_file), so a note's
+        # body can arrive under either key.
+        note_text = (args.get("text") or args.get("content") or "").strip()
+        if not note_text:
+            return {"ok": False, "error": "note text is required"}
+        for n in notes:
+            if (n.text or "").strip() == note_text:
+                return {"ok": True, "note_ordinal": n.ordinal, "deduped": True}
+        notes.append(NotebookNote(ordinal=ordinal, text=note_text, category=cat,
+                                  refs=args.get("refs", []) or []))
+        return {"ok": True, "note_ordinal": ordinal}
+
+    return {"ok": False, "error": f"unknown tool: {name}"}
+
+
+# Tool schemas exposed to the model
+TOOL_SCHEMAS = [
+    {"type": "function", "function": {"name": "run_command", "description": "Execute a shell command in the sandboxed workspace.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The command to execute"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "http_request", "description": "Send an HTTP request to an in-scope target and get back status, headers, and body. PREFER this over run_command for any web testing — send SQLi/XSS/auth payloads as structured fields (no shell quote-escaping). For Juice Shop login use POST http://HOST:3000/rest/user/login with a JSON body {\"email\":\"...\",\"password\":\"...\"}.", "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Full URL incl. path and query string"}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"], "default": "GET"}, "headers": {"type": "object", "description": "Request headers as key/value pairs"}, "body": {"description": "Request body — a JSON object (sent as application/json) or a raw string"}}, "required": ["url"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to read"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write content to a file in the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to write"}, "content": {"type": "string", "description": "File content"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "knowledge_search", "description": "Search the security knowledge base (GTFOBins, HackTricks, exploit-db, etc.).", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_k": {"type": "integer", "description": "Number of results", "default": 5}}, "required": ["query"]}}},
+]
+
+SECURITY_TOOL_SCHEMAS = [
+    {"type": "function", "function": {"name": "record_hypothesis", "description": "Record a new hypothesis in the hypothesis graph.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}, "phase": {"type": "string"}, "parent_ordinal": {"type": "integer"}}, "required": ["title", "description"]}}},
+    {"type": "function", "function": {"name": "update_hypothesis_status", "description": "Update hypothesis status and verdict.", "parameters": {"type": "object", "properties": {"hypothesis_id": {"type": "string"}, "status": {"type": "string"}, "verdict": {"type": "string"}, "evidence": {"type": "string"}}, "required": ["hypothesis_id", "status"]}}},
+    {"type": "function", "function": {"name": "record_finding", "description": "Record a security finding.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]}, "target": {"type": "string"}, "description": {"type": "string"}, "remediation": {"type": "string"}}, "required": ["title", "severity", "description"]}}},
+    {"type": "function", "function": {"name": "record_note", "description": "Jot a note in the engagement notebook: a technique that worked, a dead-end to avoid, a todo, or an observation. Keep a running lab notebook like a real red-teamer does.", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "The note"}, "category": {"type": "string", "enum": ["technique", "dead-end", "todo", "observation"], "default": "observation"}}, "required": ["text"]}}},
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Agent loop (runs in a background thread per session)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Keep the request well under llama-server's context (now 32768). With max_tokens≤3072 for
+# generation, ~90k chars (~22k tokens) of input leaves a safe margin and avoids HTTP 400
+# "exceeds context size" — the error that was killing long autonomous runs.
+# Sized for llama-server -c 32768 (KV-quantized q8_0, fits 6GB: ~4.1GB VRAM). Input budget
+# leaves ~3072 tok for generation: 90000 chars ≈ 22k tok conversation + ~1k system/tools.
+MAX_INPUT_CHARS = 90000
+PER_MSG_CAP = 8000
+CTX_WINDOW = 32768
+
+
+def _fit_context(messages: list[dict]) -> list[dict]:
+    """Trim to fit the context window: hard-cap any single message, then drop the oldest
+    non-system messages until the total is under budget. The system message and the most
+    recent messages (including the current question/tool results) are always kept."""
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str) and len(c) > PER_MSG_CAP:
+            m["content"] = c[:PER_MSG_CAP] + "\n…[truncated]"
+    if not messages:
+        return messages
+    system, rest = messages[0], messages[1:]
+    base = len(system.get("content", "") or "")
+    total = base + sum(len(m.get("content", "") or "") for m in rest)
+    while rest and total > MAX_INPUT_CHARS:
+        dropped = rest.pop(0)
+        total -= len(dropped.get("content", "") or "")
+    return [system] + rest
+
+
+COMPACT_WHEN = 24   # fold once this many messages sit beyond the last summary point
+KEEP_RECENT = 10    # always keep this many most-recent messages verbatim
+
+
+def _maybe_compact(session: Session):
+    """Auto-compact: when a session grows long, summarize the older turns into one
+    condensed note so the context window stays small. Only this session's own messages
+    are ever folded — nothing from other chats is mixed in."""
+    if _llm is None:
+        return
+    pending = len(session.messages) - session.summary_upto
+    if pending <= COMPACT_WHEN:
+        return
+    fold_end = len(session.messages) - KEEP_RECENT
+    to_fold = session.messages[session.summary_upto:fold_end]
+    if not to_fold:
+        return
+    parts = []
+    if session.summary:
+        parts.append("Existing summary:\n" + session.summary)
+    for m in to_fold:
+        tn = (m.get("extra") or {}).get("tool_name") or m.get("tool_name")
+        label = m.get("role", "") + (f"/{tn}" if tn else "")
+        parts.append(f"[{label}] {(m.get('content') or '')[:800]}")
+    convo = "\n".join(parts)[:12000]
+    prompt = [
+        {"role": "system", "content":
+            "Compress this penetration-testing session transcript into a concise, FACTUAL summary. "
+            "Keep: target(s), what was tried, concrete tool results/evidence, confirmed vs "
+            "unconfirmed findings, and open next steps. Invent nothing. Bullet points, under 250 words."},
+        {"role": "user", "content": convo},
+    ]
+    try:
+        with _LLM_LOCK:
+            resp = _llm.chat(prompt, stream=False, max_tokens=500, temperature=0.3)
+        summary = resp.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as e:
+        log.warning("compact failed: %s", e)
+        return
+    if summary:
+        session.summary = summary
+        session.summary_upto = fold_end
+        session.push({"type": "compacted", "folded": len(to_fold)})
+        log.info("compacted %d msgs for session %s", len(to_fold), session.session_id)
+
+
+# Mid-turn compaction: a single turn is now uncapped, so a long tool chain can balloon the
+# working message list beyond the context window. _fit_context would silently DROP the oldest
+# messages (losing evidence); instead, once the real prompt-token count crosses this fraction
+# of the window, summarize the middle of the in-flight turn and keep going — preserving facts.
+INTURN_COMPACT_FRACTION = 0.65
+INTURN_KEEP_TAIL = 6   # keep this many most-recent working messages verbatim
+
+
+def _compact_working_messages(messages: list[dict], session: Session) -> list[dict]:
+    """Fold the middle of an in-progress turn's working messages into a running summary.
+    Keeps messages[0] (system) and the last INTURN_KEEP_TAIL messages verbatim."""
+    if _llm is None or len(messages) <= INTURN_KEEP_TAIL + 2:
+        return messages
+    system = messages[0]
+    head = messages[1:len(messages) - INTURN_KEEP_TAIL]
+    tail = messages[len(messages) - INTURN_KEEP_TAIL:]
+    if not head:
+        return messages
+    convo = "\n".join(f"[{m.get('role', '')}] {(m.get('content') or '')[:800]}" for m in head)[:12000]
+    prompt = [
+        {"role": "system", "content":
+            "Compress this in-progress penetration-testing turn into a concise, FACTUAL summary. "
+            "Keep: target(s), requests sent, concrete responses/evidence, confirmed vs unconfirmed, "
+            "and the open next step. Invent nothing. Bullet points, under 180 words."},
+        {"role": "user", "content": convo},
+    ]
+    try:
+        with _LLM_LOCK:
+            resp = _llm.chat(prompt, stream=False, max_tokens=360, temperature=0.3)
+        summ = resp.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as e:
+        log.warning("mid-turn compact failed: %s", e)
+        return messages
+    if not summ:
+        return messages
+    session.push({"type": "compacted", "folded": len(head), "scope": "in-turn"})
+    log.info("mid-turn compacted %d working msgs for %s", len(head), session.session_id)
+    return [system, {"role": "user",
+                     "content": "Progress so far this turn (condensed to save context):\n" + summ}] + tail
+
+
+# ── Guided stage protocol ─────────────────────────────────────────────────────
+# Stages are operator-driven progress labels, NOT an auto-advancing pipeline. The agent
+# works within the current stage, then stops and reports; the OPERATOR decides what's next
+# (advance, redo, go back to an earlier stage, or request the full report).
+STAGES = ["RECON", "ANALYSIS", "VALIDATION", "REPORT"]
+_STAGE_OBJECTIVE = {
+    "RECON": "Enumerate the target: reachable endpoints, HTTP responses, headers, tech stack, "
+             "interesting paths/APIs. Map the attack surface — don't exploit yet.",
+    "ANALYSIS": "From what RECON actually observed, list candidate vulnerabilities, each tied to a "
+                "specific endpoint you saw. Use knowledge_search for the tech/endpoints found.",
+    "VALIDATION": "Prove or disprove the top candidates with real http_request calls. A candidate is "
+                  "CONFIRMED only if the response proves it. Call record_finding for each confirmed issue.",
+    "REPORT": "Write the full report from ONLY findings confirmed by tool evidence this engagement: "
+              "per finding — endpoint, request+response evidence, severity, remediation.",
+}
+
+
+def _stage_protocol(session: Session) -> str:
+    stage = session.stage if session.stage in STAGES else "RECON"
+    obj = _STAGE_OBJECTIVE[stage]
+    base = (
+        f"\n\nGUIDED PENTEST PROTOCOL — current stage: {stage}\n"
+        f"Objective of this stage: {obj}\n"
+        "Rules:\n"
+        "- Work toward THIS stage's objective using tools. Go as deep as the stage needs.\n"
+        "- When you have enough for this stage, STOP: give a concise summary of what you verified "
+        "(with evidence) and suggest concrete next steps, then WAIT for the operator.\n"
+        "- Do NOT advance to another stage on your own — the operator drives stage changes by chatting.\n"
+        "- The operator may send you back to an earlier stage (e.g. more recon, research a vuln). Follow that.\n"
+    )
+    if stage != "REPORT":
+        base += ("- Do NOT write a full report now. The full REPORT stage happens ONLY when the operator "
+                 "explicitly asks for it.\n")
+    return base
+
+
+# Operator phrases that move the stage (English + Thai), checked against a chat message.
+_STAGE_INTENT = [
+    (re.compile(r"\b(recon|reconnaiss\w*|enumerat\w*)\b|รีคอน|สำรวจ", re.I), "RECON"),
+    (re.compile(r"\banalys\w*\b|วิเคราะห์", re.I), "ANALYSIS"),
+    (re.compile(r"\b(validat\w*|exploit\w*|verif\w*|confirm\w*)\b|ยืนยัน|เจาะ", re.I), "VALIDATION"),
+    (re.compile(r"\b(report|write.?up|รายงาน)\b|เขียนรายงาน", re.I), "REPORT"),
+]
+
+
+def _detect_stage_intent(message: str) -> str | None:
+    """If the operator's message clearly names a stage to move to, return it; else None.
+    Only triggers on an explicit move cue so a passing mention doesn't hijack the stage."""
+    if not re.search(r"\b(go|move|back|next|start|now|do|let'?s|switch)\b|ไป|กลับ|ต่อ|เริ่ม|ขอ", message, re.I):
+        return None
+    for rx, stage in _STAGE_INTENT:
+        if rx.search(message):
+            return stage
+    return None
+
+
+def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = True):
+    """Single agent turn: build messages, call LLM (streaming), handle tool calls, loop.
+
+    emit_done=False lets the autonomous driver run many turns without flipping the
+    UI to "not running" between phases (it emits its own autonomous_* events instead).
+    """
+    if _llm is None:
+        session.push({"type": "task_error", "error": "No model loaded"})
+        return
+
+    # System message is kept byte-stable (prompt-cache friendly): engagement scope rarely
+    # changes within a session, and volatile RAG context is appended as the LAST message.
+    eng = _engagements.get(session.engagement_id)
+    system_content = DEFAULT_SYSTEM_PROMPT
+    if eng:
+        system_content += f"\n\nEngagement: {eng.engagement_id}\nIn-scope targets: {', '.join(eng.allow_targets)}"
+    if session.guided:
+        system_content += _stage_protocol(session)
+
+    messages = [{"role": "system", "content": system_content}]
+
+    # Auto-compact long sessions, then send the summary + only the recent turns.
+    _maybe_compact(session)
+    if session.summary:
+        messages.append({"role": "user",
+                         "content": "Session summary so far (condensed prior context):\n" + session.summary})
+    history = session.messages[session.summary_upto:]
+    if len(history) > 20:
+        history = history[-20:]
+    for m in history:
+        role = m["role"] if m["role"] in ("user", "assistant", "system") else "user"
+        messages.append({"role": role, "content": m["content"]})
+
+    # RAG augmentation goes LAST so the stable prefix above stays cacheable.
+    rag_results = _rag.search(user_content, top_k=2)
+    if rag_results:
+        rag_context = "Relevant knowledge-base excerpts (cite only if actually relevant):\n"
+        for r in rag_results:
+            rag_context += f"\n[{r['source']}] {r['title']} (relevance {r['score']})\n{r['text'][:400]}\n"
+        messages.append({"role": "user", "content": rag_context})
+
+    tools = TOOL_SCHEMAS[:]
+    if session.use_security_tools:
+        tools.extend(SECURITY_TOOL_SCHEMAS)
+
+    # No hard tool-round cap — the turn runs until the model stops calling tools (its natural
+    # finish) or hits a safety guard. Guards (not a task limit): an absolute runaway ceiling,
+    # and loop-detection that stops if the model repeats the exact same call 3× in a row.
+    RUNAWAY_CEILING = 60
+    tool_round = 0
+    nudges_used = 0
+    recent_sigs: list[str] = []
+    while True:
+        if session.stop_requested:
+            if emit_done:
+                session.push({"type": "task_done", "status": "stopped", "message": "Stopped by user"})
+            return
+        if tool_round >= RUNAWAY_CEILING:
+            session.append("system", f"[stopped: hit the {RUNAWAY_CEILING}-tool-call safety ceiling for "
+                                     f"one turn — send another message to continue]")
+            break
+
+        # Live steer: inject any operator notes queued since the last round so a running
+        # turn can be redirected without being stopped (non-blocking).
+        if session.pending_steers:
+            with session.lock:
+                steers, session.pending_steers = session.pending_steers, []
+            for s in steers:
+                messages.append({"role": "user", "content": f"[OPERATOR STEER] {s}"})
+                session.push({"type": "steer_applied", "text": s})
+
+        _LLM_LOCK.acquire()  # one generation at a time on the single-slot llama-server
+        stream = None
+        try:
+            stream = _llm.chat(_fit_context(messages), stream=True, max_tokens=3072,
+                               tools=tools, enable_thinking=session.thinking)
+        except Exception as e:
+            _LLM_LOCK.release()
+            session.push({"type": "task_error", "error": f"LLM error: {e}"})
+            return
+
+        collected_text = ""
+        collected_reasoning = ""
+        tool_call_buffer = ""
+        in_tool_call = False
+        in_think = False
+        stopped_mid_stream = False
+        stream_error = None
+        oai_tool_calls = {}  # index -> {name, arguments_str}
+
+        def _safe_iter(gen):
+            # The HTTP call runs while iterating (not at creation), so a 400/connection
+            # error surfaces HERE. Catch it so one bad turn can't crash the whole run.
+            nonlocal stream_error
+            try:
+                for c in gen:
+                    yield c
+            except Exception as e:
+                stream_error = e
+
+        for chunk in _safe_iter(stream):
+            if session.stop_requested:
+                stopped_mid_stream = True
+                break  # closing the generator closes the upstream HTTP connection
+
+            # Trailing usage chunk (stream_options.include_usage): choices is empty, but
+            # usage.prompt_tokens is the REAL context size llama-server saw this round.
+            usage = chunk.get("usage")
+            if usage and usage.get("prompt_tokens"):
+                session.last_prompt_tokens = int(usage["prompt_tokens"])
+                session.push({"type": "context", "prompt_tokens": session.last_prompt_tokens,
+                              "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                              "max": CTX_WINDOW})
+
+            choices = chunk.get("choices") or [{}]
+            delta = choices[0].get("delta", {})
+
+            # Thinking: llama.cpp surfaces <think> content as a separate reasoning_content
+            # field (reasoning-format deepseek) rather than inline in content.
+            rc = delta.get("reasoning_content")
+            if rc:
+                collected_reasoning += rc
+                session.push({"type": "reasoning_delta", "text": rc})
+
+            # OpenAI-format tool calls (delta.tool_calls)
+            for tc in delta.get("tool_calls", []):
+                idx = tc.get("index", 0)
+                if idx not in oai_tool_calls:
+                    oai_tool_calls[idx] = {"name": "", "arguments": ""}
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    oai_tool_calls[idx]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    oai_tool_calls[idx]["arguments"] += fn["arguments"]
+
+            content = delta.get("content", "")
+            if content:
+                if content.strip().startswith("<tool_call>") or in_tool_call:
+                    in_tool_call = True
+                    tool_call_buffer += content
+                    if "</tool_call>" in tool_call_buffer:
+                        in_tool_call = False
+                else:
+                    # Handle <think>...</think> blocks as reasoning
+                    buf = content
+                    while buf:
+                        if in_think:
+                            end_idx = buf.find("</think>")
+                            if end_idx != -1:
+                                collected_reasoning += buf[:end_idx]
+                                session.push({"type": "reasoning_delta", "text": buf[:end_idx]})
+                                buf = buf[end_idx + 8:]
+                                in_think = False
+                            else:
+                                collected_reasoning += buf
+                                session.push({"type": "reasoning_delta", "text": buf})
+                                buf = ""
+                        else:
+                            start_idx = buf.find("<think>")
+                            if start_idx != -1:
+                                before = buf[:start_idx]
+                                if before:
+                                    collected_text += before
+                                    session.push({"type": "assistant_delta", "text": before})
+                                buf = buf[start_idx + 7:]
+                                in_think = True
+                            else:
+                                collected_text += buf
+                                session.push({"type": "assistant_delta", "text": buf})
+                                buf = ""
+
+            # Don't break on finish_reason: the trailing usage chunk (include_usage) arrives
+            # AFTER it, so keep draining until the generator ends on [DONE].
+
+        # Generation done (or stopped) — free the llama slot before running tools / next round.
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
+        _LLM_LOCK.release()
+
+        if stream_error is not None:
+            # Surface what we have, then end this turn cleanly (autonomous moves to next phase).
+            log.warning("LLM stream error: %s", stream_error)
+            if collected_text.strip():
+                session.append("assistant", collected_text.strip())
+            if emit_done:
+                session.push({"type": "task_error", "error": f"LLM stream error: {stream_error}"})
+            else:
+                session.append("system", f"[phase turn ended: {stream_error}]")
+            return
+
+        if stopped_mid_stream or session.stop_requested:
+            if collected_text.strip():
+                session.append("assistant", collected_text.strip())
+            if emit_done:
+                session.push({"type": "task_done", "status": "stopped", "message": "Stopped by user"})
+            return
+
+        # Parse tool calls from collected text (some models use JSON blocks)
+        tool_calls = _extract_tool_calls(collected_text + tool_call_buffer)
+
+        # Also include OpenAI-format tool calls from delta.tool_calls
+        for idx in sorted(oai_tool_calls.keys()):
+            tc = oai_tool_calls[idx]
+            if tc["name"]:
+                try:
+                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                except json.JSONDecodeError:
+                    args = {"raw": tc["arguments"]}
+                tool_calls.append((tc["name"], args))
+        oai_tool_calls.clear()
+
+        if tool_calls:
+            # One assistant message carrying the tool calls, then ONE user message with all
+            # results — never an assistant/user pair per tool (that corrupts the chat template).
+            extra = {"tool_calls": [{"name": tc[0], "arguments": tc[1]} for tc in tool_calls]}
+            if collected_reasoning.strip():
+                extra["reasoning_content"] = collected_reasoning.strip()
+            session.append("assistant", collected_text.strip() or "(calling tools…)", extra=extra)
+            messages.append({"role": "assistant",
+                             "content": collected_text.strip() or "(calling tools…)"})
+
+            result_blocks = []
+            for tool_name, tool_args in tool_calls:
+                tool_args = _normalize_tool_args(tool_name, tool_args)
+                result = _run_tool(tool_name, tool_args, session)
+                result_text = _jsonify_result(result)
+                session.append("tool", result_text, extra={"tool_name": tool_name})
+                result_blocks.append(f"[{tool_name}] →\n{result_text}")
+            messages.append({"role": "user",
+                             "content": "Tool results:\n\n" + "\n\n".join(result_blocks)})
+            tool_round += 1
+            # Loop-detection: if the model fires the identical call 3× running, it's stuck
+            # (a 4B sometimes re-sends the same request forever) — stop and let it summarize.
+            sig = json.dumps(extra["tool_calls"], sort_keys=True, ensure_ascii=False)
+            recent_sigs.append(sig)
+            if len(recent_sigs) >= 3 and recent_sigs[-1] == recent_sigs[-2] == recent_sigs[-3]:
+                messages.append({"role": "user",
+                                 "content": "You have repeated the same tool call three times. "
+                                            "Stop repeating — summarize what you found and either try a "
+                                            "DIFFERENT request or give your final answer."})
+                recent_sigs.clear()
+            # Mid-turn compaction: fold the middle of this turn once the real prompt size
+            # crosses the threshold, so a long tool chain preserves evidence instead of
+            # having _fit_context silently drop the oldest messages.
+            if session.last_prompt_tokens > INTURN_COMPACT_FRACTION * CTX_WINDOW:
+                messages = _compact_working_messages(messages, session)
+            continue
+
+        # No tool calls — final response (or an empty answer to recover from).
+        if collected_text.strip():
+            extra = {}
+            if collected_reasoning.strip():
+                extra["reasoning_content"] = collected_reasoning.strip()
+            session.append("assistant", collected_text.strip(), extra=extra if extra else None)
+            break
+
+        # Model produced only <think> (common failure on small models): nudge for the answer.
+        # Nudges don't consume the round budget — an empty thinking round shouldn't end the turn.
+        if nudges_used < 3:
+            nudges_used += 1
+            messages.append({"role": "user",
+                             "content": "Now give your actual answer or call a tool. "
+                                        "Do not output only reasoning."})
+            continue
+        # Still no text after nudges. If the model actually did work this turn, force ONE
+        # non-streaming summary (no tools) so the turn is never a silent wall of tool calls
+        # with no message — the #1 "did a lot but said nothing" complaint.
+        if tool_round > 0:
+            try:
+                with _LLM_LOCK:
+                    resp = _llm.chat(
+                        _fit_context(messages + [{"role": "user",
+                            "content": "Summarize for the operator, in plain text, what you did and "
+                                       "found this turn — targets, payloads, status codes, tokens, and "
+                                       "which hypotheses/findings you confirmed. Do NOT call any tool."}]),
+                        stream=False, max_tokens=700, temperature=0.3)
+                txt = (resp.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            except Exception as e:
+                log.warning("final-summary generation failed: %s", e)
+                txt = ""
+            if txt:
+                session.append("assistant", txt)
+                break
+        # Give up gracefully: surface the reasoning so the turn is never silent.
+        if collected_reasoning.strip():
+            session.append("assistant", collected_reasoning.strip())
+        break
+
+    if emit_done:
+        session.push({"type": "task_done", "status": "ok", "message": "Turn complete"})
+
+
+# Canonical argument names, so a near-miss key still lands on the right field.
+_TOOL_ARG_ALIASES = {
+    "cmd": "command", "cmdline": "command", "shell": "command", "script": "command",
+    "file": "path", "filename": "path", "filepath": "path", "file_path": "path", "name": "path",
+    "text": "content", "data": "content", "body": "content", "file_content": "content",
+    "q": "query", "search": "query", "search_query": "query", "question": "query",
+}
+
+
+def _jsonify_result(result: dict, field_limit: int = 1200) -> str:
+    """Serialize a tool result to JSON that is ALWAYS valid.
+
+    Large output is capped at the FIELD level before dumping — never by slicing the
+    serialized string (that cut JSON mid-token and crashed the UI's JSON.parse)."""
+    capped = dict(result)
+    for k in ("output", "content", "error"):
+        v = capped.get(k)
+        if isinstance(v, str) and len(v) > field_limit:
+            capped[k] = v[:field_limit] + f"\n…[truncated {len(v) - field_limit} chars]"
+    return json.dumps(capped, indent=2, ensure_ascii=False)
+
+
+def _normalize_tool_args(name: str, args: Any) -> dict:
+    """Make a small model's nearly-right arguments usable (lesson: normalize, never guess).
+
+    Handles: stringified-JSON args, a bare scalar where a dict was expected, aliased keys,
+    stringified arrays/objects as values, top_k as a string, and list-valued string fields.
+    Only single-meaning fixes — ambiguous input is left for the tool to reject clearly.
+    """
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            args = parsed if isinstance(parsed, dict) else {"_value": parsed}
+        except (json.JSONDecodeError, TypeError):
+            # A lone string is almost always the command (run_command) or the query.
+            canonical = _TOOL_NAME_ALIASES.get(name, name)
+            key = "query" if canonical == "knowledge_search" else "command"
+            args = {key: args}
+    if not isinstance(args, dict):
+        return {}
+    # Recover from an upstream JSON parse that failed and stored the raw string.
+    if set(args.keys()) == {"raw"} and isinstance(args["raw"], str):
+        try:
+            recovered = json.loads(args["raw"])
+            if isinstance(recovered, dict):
+                args = recovered
+        except json.JSONDecodeError:
+            pass
+
+    out: dict = {}
+    for k, v in args.items():
+        key = _TOOL_ARG_ALIASES.get(str(k).lower(), k)
+        if isinstance(v, str) and v[:1] in ("[", "{"):  # stringified array/object → real one
+            try:
+                v = json.loads(v)
+            except json.JSONDecodeError:
+                pass
+        out[key] = v
+
+    if "top_k" in out:
+        try:
+            out["top_k"] = int(out["top_k"])
+        except (ValueError, TypeError):
+            out.pop("top_k", None)
+    # A string field that arrived as a list → join it back together.
+    for sk in ("command", "content"):
+        if isinstance(out.get(sk), list):
+            out[sk] = "\n".join(str(x) for x in out[sk])
+    for sk in ("path", "query", "title", "description"):
+        if isinstance(out.get(sk), list):
+            out[sk] = " ".join(str(x) for x in out[sk])
+    return out
+
+
+def _extract_tool_calls(text: str) -> list[tuple[str, dict]]:
+    """Extract tool calls from model output. Supports multiple formats:
+    - <tool_call>{"name": ..., "arguments": ...}</tool_call>
+    - ```json\n{"tool": ..., "args": ...}\n```
+    - Direct JSON blocks with function-like signatures
+    """
+    calls = []
+
+    # Format 1: <tool_call> tags
+    for m in re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.DOTALL):
+        try:
+            obj = json.loads(m.group(1))
+            name = obj.get("name", obj.get("function", ""))
+            args = obj.get("arguments", obj.get("args", obj.get("parameters", {})))
+            if isinstance(args, str):
+                args = json.loads(args)
+            if name:
+                calls.append((name, args))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    if calls:
+        return calls
+
+    # Format 2: Qwen/Llama tool-use format
+    for m in re.finditer(r'✿FUNCTION✿:\s*(\w+)\n✿ARGS✿:\s*(\{.*?\})', text, re.DOTALL):
+        try:
+            calls.append((m.group(1), json.loads(m.group(2))))
+        except json.JSONDecodeError:
+            continue
+
+    if calls:
+        return calls
+
+    # Format 3: JSON code blocks
+    for m in re.finditer(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL):
+        try:
+            obj = json.loads(m.group(1))
+            name = obj.get("tool", obj.get("name", obj.get("function", "")))
+            args = obj.get("args", obj.get("arguments", obj.get("parameters", {})))
+            if isinstance(args, str):
+                args = json.loads(args)
+            if name and isinstance(args, dict):
+                calls.append((name, args))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    return calls
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Guided mode — a single operator-gated turn (replaces the old 6-phase auto-pipeline).
+# The agent works within the current stage, reports, and stops; the operator drives what's
+# next by chatting. No auto-advance, no auto full-report. See _stage_protocol().
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _scope_urls_into_engagement(engagement_id: str, message: str):
+    """Add any URLs/hosts named in the operator's message to the engagement scope."""
+    eng = _engagements.get(engagement_id)
+    if not eng:
+        return
+    from urllib.parse import urlparse
+    for u in re.findall(r'https?://[^\s<>"\']+', message or ""):
+        host = urlparse(u).hostname or ""
+        if host and host not in eng.allow_targets:
+            eng.allow_targets.append(host)
+        if u not in eng.allow_targets:
+            eng.allow_targets.append(u)
+
+
+def _run_guided(session: Session, engagement_id: str, user_message: str = ""):
+    """Run ONE guided turn: the agent works the current stage, then stops and waits for the
+    operator. Stage is operator-driven — this never auto-advances through stages."""
+    session.engagement_id = engagement_id or session.engagement_id
+    session.guided = True
+    _scope_urls_into_engagement(session.engagement_id, user_message)
+    moved = _detect_stage_intent(user_message)
+    if moved:
+        session.stage = moved
+    session.push({"type": "stage", "stage": session.stage, "guided": True})
+    _run_agent_turn(session, user_message)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pydantic request models
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CreateSessionRequest(BaseModel):
+    profile: str = "safe"
+    use_security_tools: bool = False
+    engagement_id: str = "lab-default"
+    dangerous_local: bool = False
+    isolation_tier: str = "bubblewrap"
+    thinking: bool = False
+
+class MessageRequest(BaseModel):
+    content: str
+    guided: bool | None = None   # follow the staged pentest protocol for this turn
+    stage: str | None = None     # operator-set stage for this turn (overrides detection)
+
+class StageRequest(BaseModel):
+    stage: str
+
+class SteerRequest(BaseModel):
+    message: str
+
+class ApprovalResolveRequest(BaseModel):
+    approved: bool
+    resolved_by: str = "web-ui"
+
+class ConsultResolveRequest(BaseModel):
+    answer: str
+    resolved_by: str = "web-ui"
+
+class CreateEngagementRequest(BaseModel):
+    engagement_id: str
+    description: str = ""
+    allow_targets: list[str] = []
+    allowed_action_classes: list[str] = []
+    authorized_by: str = ""
+    valid_hours: float = 24.0
+
+class OperatorGraphActionRequest(BaseModel):
+    action: str
+    reason: str = ""
+    text: str = ""
+
+class AutonomousStartRequest(BaseModel):
+    engagement_id: str
+    profile: str = "web_api"
+    mode: str
+    user_message: str = ""
+
+class ReviewFindingRequest(BaseModel):
+    reviewed_by: str
+
+class NotebookResolveRequest(BaseModel):
+    action: str = "resolve"
+    reason: str = ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FastAPI app + all routes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+app = FastAPI(title="Oxpecker Dev Server", version=API_VERSION)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Health ──
+@app.get("/api/health")
+@app.get("/health")  # /health alias for the Electron shell's startup probe
+def health_check():
+    return {
+        "status": "ok",
+        "version": API_VERSION,
+        "sessions_active": len(_sessions),
+        "model_loaded": _llm is not None,
+        "rag_documents": _rag.count(),
+        "timestamp": time.time(),
+    }
+
+# ── Static / index ──
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+# ── Sessions ──
+@app.post("/api/sessions")
+def create_session(req: CreateSessionRequest):
+    sid = str(uuid.uuid4())[:12]
+    session = Session(
+        session_id=sid,
+        use_security_tools=req.use_security_tools,
+        engagement_id=req.engagement_id,
+        isolation_tier=req.isolation_tier,
+        profile=req.profile,
+        thinking=req.thinking,
+    )
+    _sessions[sid] = session
+    _persist()
+    return {
+        "session_id": sid, "workspace_root": str(DATA_DIR),
+        "profile": req.profile, "use_security_tools": req.use_security_tools,
+        "engagement_id": req.engagement_id,
+    }
+
+@app.get("/api/sessions")
+def list_sessions():
+    out = []
+    for sid, s in sorted(_sessions.items(), key=lambda x: x[1].created_at, reverse=True):
+        title = ""
+        for m in s.messages:
+            if m["role"] == "user":
+                title = m["content"][:80]
+                break
+        out.append({
+            "session_id": sid, "known_live": True,
+            "last_modified": s.messages[-1]["timestamp"] if s.messages else s.created_at,
+            "title": title, "message_count": len(s.messages),
+        })
+    return out
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    s = _sessions.pop(session_id, None)
+    _persist()
+    return {"deleted": s is not None}
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    return {
+        "session_id": session_id,
+        "thinking": s.thinking,
+        "stage": s.stage,
+        "guided": s.guided,
+        "last_prompt_tokens": s.last_prompt_tokens,
+        "messages": [{"role": m["role"], "content": m["content"], "message_id": m.get("message_id"),
+                      "reasoning_content": m.get("reasoning_content"),
+                      "tool_calls": m.get("tool_calls"), "tool_name": m.get("tool_name")}
+                     for m in s.messages],
+    }
+
+class ThinkingRequest(BaseModel):
+    thinking: bool
+
+@app.post("/api/sessions/{session_id}/thinking")
+def set_thinking(session_id: str, req: ThinkingRequest):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    s.thinking = req.thinking
+    _persist()
+    return {"thinking": s.thinking}
+
+# ── Messages ──
+@app.post("/api/sessions/{session_id}/messages")
+async def send_message(session_id: str, req: MessageRequest):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    with s.lock:
+        if s.running:
+            raise HTTPException(409, "a task is already running")
+        s.running = True
+        s.stop_requested = False
+
+    # Guided mode: follow the staged protocol. The operator drives stages — an explicit
+    # stage wins, else detect a move cue in the message (e.g. "go to validation" / "เจาะ").
+    if req.guided is not None:
+        s.guided = req.guided
+    if s.guided:
+        _scope_urls_into_engagement(s.engagement_id, req.content)
+        if req.stage and req.stage.upper() in STAGES:
+            s.stage = req.stage.upper()
+        else:
+            moved = _detect_stage_intent(req.content)
+            if moved:
+                s.stage = moved
+        s.push({"type": "stage", "stage": s.stage, "guided": True})
+
+    s.append("user", req.content)
+
+    def run():
+        try:
+            _run_agent_turn(s, req.content)
+        except Exception as e:
+            s.push({"type": "task_error", "error": f"{type(e).__name__}: {e}"})
+        finally:
+            with s.lock:
+                s.running = False
+            _persist()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"status": "started"}
+
+# ── Stage (operator-driven) ──
+@app.post("/api/sessions/{session_id}/stage")
+def set_stage(session_id: str, req: StageRequest):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    st = (req.stage or "").upper()
+    if st not in STAGES:
+        raise HTTPException(400, f"stage must be one of {STAGES}")
+    s.stage = st
+    s.guided = True
+    s.push({"type": "stage", "stage": s.stage, "guided": True})
+    _persist()
+    return {"stage": s.stage}
+
+# ── Steer ──
+@app.post("/api/sessions/{session_id}/steer")
+def steer_session(session_id: str, req: SteerRequest):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    s.append("system", f"[OPERATOR STEER] {req.message}")
+    # Queue for mid-run injection if a turn is in flight; if idle, start a turn so the
+    # steer is acted on immediately rather than sitting until the next message.
+    if s.running:
+        with s.lock:
+            s.pending_steers.append(req.message)
+    else:
+        with s.lock:
+            if not s.running:
+                s.running = True
+                s.stop_requested = False
+                started = True
+            else:
+                s.pending_steers.append(req.message)
+                started = False
+        if started:
+            def run(msg=req.message):
+                try:
+                    _run_agent_turn(s, msg)
+                except Exception as e:
+                    s.push({"type": "task_error", "error": f"{type(e).__name__}: {e}"})
+                finally:
+                    with s.lock:
+                        s.running = False
+                    _persist()
+            threading.Thread(target=run, daemon=True).start()
+    return {"status": "sent"}
+
+# ── SSE Events ──
+@app.get("/api/sessions/{session_id}/events")
+async def stream_events(session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+
+    async def event_stream():
+        while True:
+            try:
+                event = s.events.get_nowait()
+                yield f"data: {json.dumps(event)}\n\n"
+            except queue.Empty:
+                await asyncio.sleep(0.06)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+# ── WebSocket ──
+@app.websocket("/api/sessions/{session_id}/ws")
+async def websocket_events(websocket: WebSocket, session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        await websocket.close(code=4004, reason="session not found")
+        return
+    await websocket.accept()
+
+    async def send_events():
+        try:
+            while True:
+                try:
+                    event = s.events.get_nowait()
+                    await websocket.send_json(event)
+                except queue.Empty:
+                    await asyncio.sleep(0.06)
+        except Exception:
+            pass
+
+    task = asyncio.create_task(send_events())
+    try:
+        while True:
+            data = await websocket.receive_json()
+            t = data.get("type")
+            if t == "message":
+                content = data.get("content", "").strip()
+                if content:
+                    with s.lock:
+                        if s.running:
+                            await websocket.send_json({"type": "error", "error": "task already running"})
+                            continue
+                        s.running = True
+                    s.append("user", content)
+                    def run(c=content):
+                        try:
+                            _run_agent_turn(s, c)
+                        except Exception as e:
+                            s.push({"type": "task_error", "error": str(e)})
+                        finally:
+                            with s.lock:
+                                s.running = False
+                    threading.Thread(target=run, daemon=True).start()
+                    await websocket.send_json({"type": "ack", "action": "message"})
+            elif t == "steer":
+                msg = data.get("message", "").strip()
+                if msg:
+                    s.append("system", f"[OPERATOR STEER] {msg}")
+                    if s.running:
+                        with s.lock:
+                            s.pending_steers.append(msg)
+                    await websocket.send_json({"type": "ack", "action": "steer"})
+            elif t == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": time.time()})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        task.cancel()
+
+# ── Approvals ──
+@app.get("/api/approvals")
+def list_approvals(session_id: str | None = None):
+    return [
+        {"request_id": a.request_id, "session_id": a.session_id, "tool": a.tool,
+         "description": a.description, "command": a.command, "detail": a.detail, "prompt": a.prompt}
+        for a in _approvals.values()
+        if a.status == "pending" and (session_id is None or a.session_id == session_id)
+    ]
+
+@app.post("/api/approvals/{request_id}/resolve")
+def resolve_approval(request_id: str, req: ApprovalResolveRequest):
+    ar = _approvals.get(request_id)
+    if not ar:
+        raise HTTPException(404, "approval not found")
+    ar.approved = req.approved
+    ar.status = "approved" if req.approved else "declined"
+    ar.resolved_by = req.resolved_by
+    ar.event.set()
+    return {"status": ar.status, "request_id": request_id}
+
+# ── Consults ──
+@app.get("/api/consults")
+def list_consults(session_id: str | None = None):
+    return [
+        {"request_id": c.request_id, "session_id": c.session_id,
+         "question": c.question, "prompt": c.prompt}
+        for c in _consults.values()
+        if c.status == "pending" and (session_id is None or c.session_id == session_id)
+    ]
+
+@app.post("/api/consults/{request_id}/resolve")
+def resolve_consult(request_id: str, req: ConsultResolveRequest):
+    cr = _consults.get(request_id)
+    if not cr:
+        raise HTTPException(404, "consult not found")
+    cr.answer = req.answer
+    cr.status = "resolved"
+    cr.resolved_by = req.resolved_by
+    cr.event.set()
+    return {"status": "resolved", "request_id": request_id}
+
+# ── Engagements ──
+@app.post("/api/engagements")
+def create_engagement(req: CreateEngagementRequest):
+    now = time.time()
+    eng = Engagement(
+        engagement_id=req.engagement_id,
+        description=req.description,
+        allow_targets=req.allow_targets,
+        allowed_action_classes=req.allowed_action_classes,
+        authorized_by=req.authorized_by,
+        valid_until=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + req.valid_hours * 3600)),
+    )
+    _engagements[req.engagement_id] = eng
+    _persist()
+    return {"engagement_id": req.engagement_id, "engagement_dir": str(DATA_DIR / req.engagement_id)}
+
+@app.get("/api/engagements")
+def list_engagements():
+    return [e.to_dict() for e in _engagements.values()]
+
+# ── Hypothesis Graph ──
+def _scope_keys(path_id: str) -> list[str]:
+    """Graph/notebook/findings are stored per-SESSION. A path id is either a session_id
+    (that one session's view) or an engagement_id (aggregate across its sessions, plus any
+    legacy data that was stored under the engagement id before the per-session split)."""
+    if path_id in _sessions:
+        return [path_id]
+    keys = [sid for sid, s in _sessions.items() if s.engagement_id == path_id]
+    if path_id in _graphs or path_id in _notebooks or path_id in _findings:
+        keys.append(path_id)
+    return keys
+
+@app.get("/api/engagements/{engagement_id}/hypothesis-graph")
+def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
+    nodes, edges = [], []
+    for k in _scope_keys(engagement_id):
+        nodes += _graphs.get(k, [])
+        edges += _graph_edges.get(k, [])
+    if not nodes:
+        return {"exists": False, "nodes": [], "edges": [], "graph_state": None}
+    filtered = nodes if not phase else [n for n in nodes if n.phase == phase]
+    return {
+        "exists": True,
+        "nodes": [n.to_summary() for n in filtered],
+        "edges": edges,
+        "graph_state": {"current_phase": phase or ""},
+    }
+
+@app.get("/api/engagements/{engagement_id}/hypothesis-graph/nodes/{ordinal}")
+def hypothesis_graph_node(engagement_id: str, ordinal: int):
+    for k in _scope_keys(engagement_id):
+        for n in _graphs.get(k, []):
+            if n.ordinal == ordinal:
+                return n.to_detail()
+    raise HTTPException(404, f"node {ordinal} not found")
+
+@app.post("/api/engagements/{engagement_id}/hypothesis-graph/nodes/{ordinal}/operator-action")
+def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraphActionRequest):
+    node = None
+    for k in _scope_keys(engagement_id):
+        for n in _graphs.get(k, []):
+            if n.ordinal == ordinal:
+                node = n
+                break
+        if node:
+            break
+    if not node:
+        raise HTTPException(404, f"node {ordinal} not found")
+    if req.action == "park":
+        if not req.reason.strip():
+            raise HTTPException(400, "parking requires a reason")
+        node.status = "parked"
+        return {"ok": True, "status": "parked"}
+    elif req.action == "reopen":
+        node.status = "open"
+        return {"ok": True, "status": "open"}
+    elif req.action == "note":
+        if not req.text.strip():
+            raise HTTPException(400, "note needs text")
+        node.notes.append(req.text.strip())
+        return {"ok": True, "notes_count": len(node.notes)}
+    raise HTTPException(400, f"unknown action {req.action!r}")
+
+# ── Notebook ──
+@app.get("/api/engagements/{engagement_id}/notebook")
+def notebook_overview(engagement_id: str):
+    notes = []
+    for k in _scope_keys(engagement_id):
+        notes += _notebooks.get(k, [])
+    if not notes:
+        return {"exists": False, "notes": [], "counts": {}, "version": 0}
+    counts = Counter(n.category for n in notes)
+    return {
+        "exists": True,
+        "notes": [n.to_dict() for n in notes],
+        "counts": dict(counts),
+        "version": len(notes),
+    }
+
+@app.post("/api/engagements/{engagement_id}/notebook/notes/{ordinal}/resolve")
+def notebook_resolve(engagement_id: str, ordinal: int, req: NotebookResolveRequest):
+    notes = []
+    for k in _scope_keys(engagement_id):
+        notes += _notebooks.get(k, [])
+    for n in notes:
+        if n.ordinal == ordinal:
+            if req.action == "resolve":
+                n.resolved = True
+            elif req.action == "reopen":
+                n.resolved = False
+            return {"ok": True, "resolved": n.resolved}
+    raise HTTPException(404, f"note {ordinal} not found")
+
+# ── Technique KB ──
+@app.get("/api/technique-kb")
+def technique_kb():
+    return {"techniques": _technique_kb, "count": len(_technique_kb)}
+
+@app.delete("/api/technique-kb/{ordinal}")
+def technique_kb_forget(ordinal: int):
+    if 0 <= ordinal < len(_technique_kb):
+        _technique_kb.pop(ordinal)
+        return {"deleted": True}
+    return {"deleted": False}
+
+# ── Findings ──
+@app.get("/api/engagements/{engagement_id}/findings")
+def list_findings(engagement_id: str):
+    findings = []
+    for k in _scope_keys(engagement_id):
+        findings += _findings.get(k, [])
+    reviewed_count = sum(1 for f in findings if f.reviewed_by)
+    return {
+        "findings": [f.to_dict() for f in findings],
+        "count": len(findings),
+        "reviewed_count": reviewed_count,
+    }
+
+@app.delete("/api/engagements/{engagement_id}/findings/{finding_id}")
+def delete_finding(engagement_id: str, finding_id: str):
+    for k in _scope_keys(engagement_id):
+        fs = _findings.get(k, [])
+        if any(f.finding_id == finding_id for f in fs):
+            _findings[k] = [f for f in fs if f.finding_id != finding_id]
+            _persist()
+            return {"deleted": True}
+    return {"deleted": False}
+
+@app.post("/api/engagements/{engagement_id}/findings/{finding_id}/review")
+def review_finding(engagement_id: str, finding_id: str, req: ReviewFindingRequest):
+    for k in _scope_keys(engagement_id):
+        for f in _findings.get(k, []):
+            if f.finding_id == finding_id:
+                f.reviewed_by = req.reviewed_by
+                _persist()
+                return f.to_dict()
+    raise HTTPException(404, f"finding {finding_id!r} not found")
+
+# ── Guided run (back-compat path for the old "autonomous/start" endpoint) ──
+# No longer a 6-phase auto-pipeline: it runs ONE guided turn and stops for the operator.
+# The UI now drives guided mode through the normal /messages endpoint (guided=True).
+@app.post("/api/sessions/{session_id}/autonomous/start")
+def start_autonomous(session_id: str, req: AutonomousStartRequest):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    with s.lock:
+        if s.running:
+            raise HTTPException(409, "a task is already running")
+        s.running = True
+        s.autonomous_mode = req.mode
+        s.stop_requested = False
+
+    if req.user_message:
+        s.append("user", req.user_message)
+
+    def run():
+        try:
+            _run_guided(s, req.engagement_id, req.user_message)
+        except Exception as e:
+            s.push({"type": "task_error", "error": str(e)})
+        finally:
+            with s.lock:
+                s.running = False
+            _persist()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"status": "started", "mode": req.mode, "engagement_id": req.engagement_id}
+
+@app.get("/api/sessions/{session_id}/autonomous/status")
+def autonomous_status(session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    return {"active": s.autonomous_active, "mode": s.autonomous_mode}
+
+@app.post("/api/sessions/{session_id}/autonomous/stop")
+def stop_autonomous(session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    with s.lock:
+        s.autonomous_active = False
+        s.stop_requested = True
+    return {"status": "stop_requested"}
+
+# ── Static files ──
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Startup
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    global _llm, _rag
+
+    parser = argparse.ArgumentParser(description="Oxpecker Dev Server")
+    parser.add_argument("--llama-url", type=str, default="http://127.0.0.1:8080",
+                        help="llama-server URL (default: http://127.0.0.1:8080)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Bind address")
+    parser.add_argument("--port", type=int, default=7777, help="Port")
+    parser.add_argument("--rag-dir", type=str, default=None,
+                        help="Directory with RAG corpus files (.txt/.md/.jsonl) — TF-IDF, small corpora only")
+    parser.add_argument("--rag-meta", type=str, default=None,
+                        help="Path to a SMALL meta.jsonl to TF-IDF (large indexes use --vector-index instead)")
+    parser.add_argument("--vector-index", type=str, default=None,
+                        help="Path to vectors.npy (dense RAG, memory-mapped). Defaults to knowledge_rag/index.")
+    parser.add_argument("--vector-meta", type=str, default=None,
+                        help="Path to meta.jsonl paired with --vector-index")
+    parser.add_argument("--embed-url", type=str, default="http://127.0.0.1:8091",
+                        help="nomic-embed llama-server URL for query embedding (default :8091)")
+    parser.add_argument("--no-vector-rag", action="store_true",
+                        help="Disable dense RAG even if an index is present")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+
+    # Create data directory
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Restore persisted sessions/engagements/findings from a previous run
+    _load_state()
+
+    # Connect to llama-server
+    _llm = LLMClient(server_url=args.llama_url)
+
+    # ── RAG ──
+    # Prefer the dense vector index (memory-mapped) when present. The TF-IDF path stays
+    # for small corpora only — never TF-IDF the 1GB knowledge_rag meta.jsonl (it OOMs).
+    kr_dir = Path(__file__).resolve().parent.parent / "knowledge_rag" / "index"
+    vec_path = Path(args.vector_index) if args.vector_index else kr_dir / "vectors.npy"
+    vmeta_path = Path(args.vector_meta) if args.vector_meta else kr_dir / "meta.jsonl"
+
+    loaded = False
+    if not args.no_vector_rag and vec_path.exists() and vmeta_path.exists():
+        embed_ok = False
+        try:
+            with urllib.request.urlopen(f"{args.embed_url.rstrip('/')}/health", timeout=3) as r:
+                embed_ok = r.status == 200
+        except Exception as e:
+            log.warning("Embedding server %s not reachable: %s", args.embed_url, e)
+        if embed_ok:
+            try:
+                log.info("Loading dense RAG (mmap): %s", vec_path)
+                _rag = VectorRAG(vec_path, vmeta_path, args.embed_url)
+                log.info("RAG: %d chunks (dense, memory-mapped)", _rag.count())
+                loaded = True
+            except Exception as e:
+                log.warning("Dense RAG load failed (%s) — falling back", e)
+        else:
+            log.warning("Dense index present but embedding server down — start it with:\n"
+                        "  llama-server -m knowledge_rag/models/nomic-embed-text-v1.5.f16.gguf "
+                        "--embedding --port 8091 -ngl 0")
+
+    if not loaded:
+        rag_count = 0
+        if args.rag_meta:
+            meta_path = Path(args.rag_meta)
+            size_mb = meta_path.stat().st_size / 1e6 if meta_path.exists() else 0
+            if size_mb > 20:
+                log.warning("--rag-meta is %.0fMB — too large for in-memory TF-IDF; "
+                            "use --vector-index instead. Skipping.", size_mb)
+            else:
+                log.info("Loading RAG (TF-IDF) from meta.jsonl: %s", meta_path)
+                rag_count = _rag.index_from_existing_meta(meta_path)
+        elif args.rag_dir:
+            log.info("Indexing RAG corpus (TF-IDF) from: %s", args.rag_dir)
+            rag_count = _rag.index_directory(Path(args.rag_dir))
+        elif RAG_CORPUS_DIR.exists():
+            log.info("Indexing RAG corpus (TF-IDF) from default: %s", RAG_CORPUS_DIR)
+            rag_count = _rag.index_directory(RAG_CORPUS_DIR)
+        log.info("RAG: %d documents indexed (TF-IDF)", rag_count)
+
+    # Start server
+    import uvicorn
+    log.info("Starting Oxpecker dev server on http://%s:%d", args.host, args.port)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

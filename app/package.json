@@ -1,0 +1,48 @@
+{
+  "name": "oxpecker",
+  "version": "0.1.5",
+  "description": "Self-hosted AI penetration-testing agent — desktop shell",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "release": "electron-builder --win --publish always"
+  },
+  "author": "laplacian-n",
+  "license": "UNLICENSED",
+  "private": true,
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "com.oxpecker.app",
+    "productName": "Oxpecker",
+    "asar": false,
+    "directories": { "buildResources": "build", "output": "dist" },
+    "files": [
+      "electron/**/*",
+      "build/icon.png",
+      "agent/web/dev_server.py",
+      "agent/web/static/**/*"
+    ],
+    "extraMetadata": { "main": "electron/main.js" },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "artifactName": "Oxpecker-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Oxpecker-Setup-${version}.${ext}"
+    },
+    "publish": [
+      { "provider": "github", "owner": "laplacian-n", "repo": "Oxpecker" }
+    ]
+  }
+}

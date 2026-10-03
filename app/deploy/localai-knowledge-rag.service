@@ -1,0 +1,22 @@
+[Unit]
+Description=localAI knowledge-RAG embedding server (nomic-embed-text-v1.5, CPU-only)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nicotine/localAI
+Environment=CUDA_VISIBLE_DEVICES=
+ExecStart=/home/nicotine/llama.cpp-kimi/build/bin/llama-server \
+  -m /home/nicotine/localAI/agent/knowledge_rag/models/nomic-embed-text-v1.5.f16.gguf \
+  --embedding --pooling mean -ngl 0 -c 2048 -b 2048 -ub 2048 \
+  --host 127.0.0.1 --port 8091
+Restart=on-failure
+RestartSec=3
+# CUDA_VISIBLE_DEVICES="" is load-bearing, not cosmetic: llama.cpp's CUDA backend probes the
+# device even with -ngl 0 and crashes with "CUDA error: out of memory" on a GPU that's already
+# fully claimed by the main decision model (this box: 16 GB card, ~58 MB free) — hiding the
+# device entirely is the only way that's actually reliable. Loopback-only by design; this is an
+# internal-only service the agent loop calls, never exposed.
+
+[Install]
+WantedBy=default.target

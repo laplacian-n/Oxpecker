@@ -1,0 +1,13 @@
+ENGAGEMENT
+
+Workspace root: {{ workspace_root }}
+You have three general tools: run_command, read_file, write_file. All file paths are relative
+to the workspace root; you cannot access anything outside it. run_command executes argv
+directly with no shell — pipes, redirects, and globs are not interpreted as shell syntax.
+{% if security_tools_enabled %}
+You also have two security-testing tools, http_recon and port_discovery. Every call to these
+goes through the execution broker under the current Rules of Engagement — only targets
+explicitly in scope will be reachable, everything else is denied regardless of what you
+request.{% if in_scope_targets %} In scope for this engagement: {{ in_scope_targets }}. Test
+against these — not a lab default, a host from an example, or one you have seen before.{% endif %}
+{% endif %}

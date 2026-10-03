@@ -8,6 +8,19 @@ Oxpecker is a self-hosted penetration testing agent built on [Qwen3-32B](https:/
 
 ---
 
+## Desktop Application (`app/`)
+
+The [`app/`](app/) directory contains the **runnable, self-hosted desktop version** of Oxpecker — a packaged Electron application that drives a **local model** (Qwen 4B via llama.cpp, CUDA) end-to-end on a single machine, with a built-in web UI, a live hypothesis graph, a notebook, a findings tracker, and a memory-mapped 547K-chunk RAG. It is the practical, installable counterpart to the research pipeline below: the training work produces the model; `app/` is where the agent is actually operated against authorized lab targets.
+
+- **Backend** — FastAPI agent server (`app/agent/web/dev_server.py`): scope/RoE enforcement, a destructive-command denylist, structured HTTP tooling, auto-compaction, and **per-session** hypothesis graph / notebook / findings.
+- **Desktop shell** — Electron + electron-builder with GitHub auto-update (`app/electron/`); one-click installer, no manual dependency setup.
+- **MCP servers** — a dev/debug MCP and a control MCP for driving the live agent (`app/.mcp.json`).
+- **Install** — download the latest `Oxpecker-Setup-*.exe` from [Releases](../../releases), or run from source per [`app/README.md`](app/README.md).
+
+Safety is enforced the same way as the research design intends — an allowlisted engagement scope that the agent hard-refuses to step outside of, a destructive-command block, and sandboxed/isolated execution — so the app only ever acts against targets the operator has explicitly authorized.
+
+---
+
 ## Preliminary Results
 
 Evaluated on [AutoPenBench](https://github.com/lucagioacchini/auto-pen-bench) (33 tasks across web, network, and privilege escalation categories):
@@ -141,10 +154,14 @@ Oxpecker/
 ├── safety/                 # Safety components
 │   ├── injection_guard.py # Injection detection module
 │   └── roe.json           # Rules of Engagement template
-└── docs/                   # Documentation
-    ├── ARCHITECTURE.md    # System architecture details
-    ├── TRAINING_DATA.md   # Dataset breakdown and curriculum
-    └── EVALUATION.md      # Benchmarks and evaluation plan
+├── docs/                   # Documentation
+│   ├── ARCHITECTURE.md    # System architecture details
+│   ├── TRAINING_DATA.md   # Dataset breakdown and curriculum
+│   └── EVALUATION.md      # Benchmarks and evaluation plan
+└── app/                    # Runnable self-hosted desktop app (Electron + FastAPI + local 4B)
+    ├── agent/web/         # dev_server.py (agent backend) + single-file web UI
+    ├── electron/          # desktop shell + auto-update config
+    └── ...                # MCP servers, build assets, docs
 ```
 
 ---

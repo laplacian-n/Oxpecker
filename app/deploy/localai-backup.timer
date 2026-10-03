@@ -1,0 +1,12 @@
+[Unit]
+Description=Run localai-backup.service daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+# If the machine was off at the scheduled time, run once shortly after boot instead of skipping
+# the day entirely (Persistent=true) rather than adding a separate OnBootSec= — the two together
+# would double-run right after a boot that lands near the daily slot.
+
+[Install]
+WantedBy=timers.target

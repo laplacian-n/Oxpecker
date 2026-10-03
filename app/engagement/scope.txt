@@ -1,0 +1,7 @@
+# Allowlist — host/CIDR per line, one entry per line. Default-deny: anything not listed here
+# is out of scope. Comments start with #. Checked AFTER deny.txt (deny always wins).
+#
+# Local lab targets only (Juice Shop, DVWA, Metasploitable — all Docker, bound to loopback).
+127.0.0.1/32
+::1/128
+localhost

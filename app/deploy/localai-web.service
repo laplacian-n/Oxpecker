@@ -1,0 +1,17 @@
+[Unit]
+Description=localAI web UI (agent.web.server, run via uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nicotine/localAI
+ExecStart=/home/nicotine/localAI/.venv/bin/python -m agent.run_web_ui
+Restart=on-failure
+RestartSec=3
+# Loopback-only by design (config.WEB_UI_HOST=127.0.0.1) — this unit only keeps the process
+# alive across crashes/reboots for a single-operator local tool, it doesn't add network exposure.
+# llama-server is a separate dependency this doesn't manage: the web UI starts fine without it,
+# individual model calls just fail until it's up.
+
+[Install]
+WantedBy=default.target
