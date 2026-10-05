@@ -42,6 +42,9 @@ Roughly 28K lines of Python and 55 test modules live under `app/agent/`. That di
 maintained agent runtime; see the note in [Repository Structure](#repository-structure) about the
 top-level `agent/` snapshot.
 
+Planned work on the agent's security-tool layer — which tools are adopted, why, and the design
+rules they must follow — is recorded in [docs/TOOLING_ROADMAP.md](docs/TOOLING_ROADMAP.md).
+
 ---
 
 ## Desktop Application (`app/`)
