@@ -46,6 +46,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from ..engagement import intake as _intake
+from ..security_tools import port_discovery as _port_discovery
 from . import scope as _scope
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -814,6 +815,16 @@ _DESTRUCTIVE_RE = re.compile("|".join(_DESTRUCTIVE_PATTERNS), re.IGNORECASE | re
 # An HTTP fetch via the shell (Invoke-WebRequest / Invoke-RestMethod / curl / wget against an
 # http(s) URL) → redirect to the http_request tool. Plain TCP probes (Test-NetConnection,
 # netstat, nslookup) are left alone.
+# Port/host scanning via the shell is not refused because scanning is wrong — it is the job —
+# but because a shell scan answers to nothing: no scope check, no blast-radius cap, no kill
+# switch, no record of what was probed. port_discovery enforces all four. Steering the model
+# there is also cheaper for it than fighting nmap's output format.
+_SCAN_IN_CMD_RE = re.compile(
+    r"\b(?:nmap|masscan|rustscan|zmap|unicornscan|hping3?|nc|ncat|netcat)\b"
+    r"|Test-NetConnection|New-Object\s+System\.Net\.Sockets",
+    re.IGNORECASE,
+)
+
 _HTTP_IN_CMD_RE = re.compile(
     r"(?:invoke-webrequest|invoke-restmethod|\biwr\b|\bcurl\b|\bwget\b).*?https?://|https?://\S+.*?(?:invoke-webrequest|invoke-restmethod)",
     re.IGNORECASE | re.DOTALL,
@@ -854,6 +865,8 @@ _TOOL_NAME_ALIASES = {
     "write": "write_file", "create_file": "write_file", "writefile": "write_file", "save_file": "write_file",
     "search": "knowledge_search", "kb_search": "knowledge_search", "search_knowledge": "knowledge_search",
     "knowledge": "knowledge_search", "knowledgebase": "knowledge_search",
+    "nmap": "port_discovery", "scan": "port_discovery", "port_scan": "port_discovery",
+    "portscan": "port_discovery", "scan_ports": "port_discovery",
     "http": "http_request", "request": "http_request", "fetch": "http_request",
     "curl": "http_request", "http_get": "http_request", "http_post": "http_request",
     "web_request": "http_request", "httprequest": "http_request",
@@ -874,6 +887,14 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         # Deterministically steer HTTP fetches to http_request: a small model keeps reaching
         # for Invoke-WebRequest/curl and then either loses to quote-escaping or hallucinates a
         # response from echoed output. http_request returns the REAL status+body instead.
+        if _SCAN_IN_CMD_RE.search(cmd):
+            return {"ok": False, "error": (
+                "Do not scan with run_command. Use the port_discovery tool instead: "
+                "{\"host\":\"<host>\", \"ports\":[22,80,443,3000]}. It checks the host "
+                "against the engagement scope, connects to the validated IP (so the target "
+                "cannot be swapped by DNS mid-scan), caps the ports per call, and honours the "
+                "kill switch — none of which a shell scan does."
+            )}
         if _HTTP_IN_CMD_RE.search(cmd):
             return {"ok": False, "error": "Do not fetch HTTP with run_command. Use the http_request "
                                           "tool instead: {\"url\":\"<full url incl. path>\", "
@@ -1092,11 +1113,46 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
                                   refs=args.get("refs", []) or []))
         return {"ok": True, "note_ordinal": ordinal}
 
+    elif name == "port_discovery":
+        # Delegates to the same security_tools implementation the CLI uses, with a Policy built
+        # from this session's engagement. That brings four things the web runtime had no way to
+        # do: the scope check, a cap on ports per call, probing the validated IP rather than
+        # re-resolving the hostname mid-scan, and the kill switch.
+        host = str(args.get("host") or "").strip()
+        ports = args.get("ports") or []
+        if not host:
+            return {"ok": False, "error": "host is required"}
+        if isinstance(ports, (str, int)):
+            ports = [ports]
+        try:
+            ports = [int(p) for p in ports]
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"ports must be integers, got {args.get('ports')!r}"}
+        if not ports:
+            return {"ok": False, "error": "at least one port is required"}
+
+        eng = _engagements.get(session.engagement_id)
+        # Reuse the same gate http_request goes through, so a missing, empty or expired
+        # engagement denies here for the same reason and with the same wording.
+        pre = _scope.check_url(f"http://{host}/", eng)
+        if not pre.allowed:
+            return pre.as_tool_error()
+        try:
+            return _port_discovery.run(host, ports, _scope.policy_from_engagement(eng))
+        except PermissionError as e:
+            return {"ok": False, "error": f"out of scope: {e}. This scan was NOT run.",
+                    "scope_rule": "not_in_scope"}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except OSError as e:
+            return {"ok": False, "error": f"scan failed: {e}"}
+
     return {"ok": False, "error": f"unknown tool: {name}"}
 
 
 # Tool schemas exposed to the model
 TOOL_SCHEMAS = [
+    _port_discovery.SCHEMA,
     {"type": "function", "function": {"name": "run_command", "description": "Execute a shell command in the sandboxed workspace.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The command to execute"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "http_request", "description": "Send an HTTP request to an in-scope target and get back status, headers, and body. PREFER this over run_command for any web testing — send SQLi/XSS/auth payloads as structured fields (no shell quote-escaping). For Juice Shop login use POST http://HOST:3000/rest/user/login with a JSON body {\"email\":\"...\",\"password\":\"...\"}.", "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Full URL incl. path and query string"}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"], "default": "GET"}, "headers": {"type": "object", "description": "Request headers as key/value pairs"}, "body": {"description": "Request body — a JSON object (sent as application/json) or a raw string"}}, "required": ["url"]}}},
     {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to read"}}, "required": ["path"]}}},

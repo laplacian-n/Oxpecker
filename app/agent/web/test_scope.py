@@ -135,6 +135,22 @@ def main() -> int:
             d = scope.check_url(bad, Eng(allow_targets=["target.example.com"]))
             check(f"unparseable url {bad!r} denies", not d.allowed, f"rule={d.rule!r}")
 
+        print("\n== cloud metadata is denied regardless of the operator's allowlist ==")
+        # Deny is evaluated before allow, so these cannot be re-permitted by widening scope.
+        # An agent talked into fetching IMDS hands back cloud credentials, and SSRF-to-metadata
+        # is a finding a pentest agent will reach for on its own.
+        for allowlist in (["169.254.169.254"], ["169.254.0.0/16"], ["0.0.0.0/0"]):
+            for target in ("169.254.169.254", "169.254.170.2"):
+                d = scope.check_url(f"http://{target}/latest/meta-data/",
+                                    Eng(allow_targets=allowlist))
+                check(f"{target} denied even with {allowlist} allowlisted",
+                      not d.allowed and d.rule.startswith("deny."),
+                      f"allowed={d.allowed} rule={d.rule!r}")
+        check("the base deny list is not empty",
+              len(scope.BASE_DENY_NETWORKS) >= 2, str(scope.BASE_DENY_NETWORKS))
+        check("an ordinary target is unaffected by the deny list",
+              scope.check_url("http://127.0.0.1:3000/", Eng(allow_targets=["127.0.0.1"])).allowed)
+
         print("\n== the refusal text tells the model not to fabricate a result ==")
         err = scope.check_url("http://evil.example.com/",
                               Eng(allow_targets=["target.example.com"])).as_tool_error()

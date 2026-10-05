@@ -82,6 +82,23 @@ def _parse_valid_until(value: str) -> float | None:
         return None
 
 
+# Denied for every engagement, mirroring the base deny.txt that
+# `engagement/intake.create_engagement()` writes for CLI-created engagements. The link-local
+# metadata addresses are the ones that matter: an agent persuaded to fetch them hands back cloud
+# credentials, and SSRF-to-IMDS is a standard finding a pentest agent will stumble into on its
+# own. The web runtime had no deny list at all, so these were reachable whenever the operator's
+# allowlist happened to admit them.
+#
+# Deny is evaluated before allow by `scope_check.validate_target`, so these cannot be
+# re-permitted by adding them to an engagement's targets. That is the intended behaviour: a
+# hard deny is not an operator preference.
+BASE_DENY_NETWORKS = (
+    "169.254.169.254/32",   # AWS/GCP/Azure/OpenStack instance metadata
+    "fd00:ec2::254/128",    # AWS IMDSv6
+    "169.254.170.2/32",     # ECS task metadata
+)
+
+
 @dataclass
 class ScopeDecision:
     allowed: bool
@@ -110,18 +127,21 @@ class ScopeDecision:
 def policy_from_engagement(eng, *, now: float | None = None) -> Policy:
     """Build the broker's `Policy` from the web runtime's in-memory `Engagement`.
 
-    The deny lists are empty: the web `Engagement` has no deny field, and inventing default deny
-    rules here would be a policy decision disguised as a translation. Worth adding as a real
-    field later — deny-wins is the more useful half of the matcher and it is currently unused.
+    The deny list is `BASE_DENY_NETWORKS` only. The web `Engagement` has no deny field of its
+    own, so per-engagement deny entries are not yet expressible here — worth adding, since
+    deny-wins is the more useful half of the matcher. The base entries are not an invented
+    policy: they are the same ones `intake.create_engagement()` writes into every CLI
+    engagement's deny.txt.
     """
     networks, hostnames = _classify_targets(getattr(eng, "allow_targets", []))
     valid_until = _parse_valid_until(getattr(eng, "valid_until", "") or "")
+    deny_networks = [ipaddress.ip_network(n) for n in BASE_DENY_NETWORKS]
     return Policy(
         engagement_id=getattr(eng, "engagement_id", ""),
         allowed_action_classes=set(getattr(eng, "allowed_action_classes", []) or []),
         allow_networks=networks,
         allow_hostnames=hostnames,
-        deny_networks=[],
+        deny_networks=deny_networks,
         deny_hostnames=set(),
         policy_version="web-engagement/in-memory",
         valid_until=valid_until if valid_until is not None else float("inf"),
