@@ -298,6 +298,11 @@ it is work that can be done on local hardware now, before compute is available.
 
 ## 7. Related outstanding work, not covered here
 
+- **Runtime safety parity for the desktop app** — `dev_server.py` does not sandbox command
+  execution, write an audit log, or route through the broker, and its scope check fails open on
+  an empty allowlist. Every adapter planned here would land in that runtime, so the parity work
+  comes first. Finding and plan: [OBSERVABILITY_PLAN.md](OBSERVABILITY_PLAN.md).
+
 - **Training-data decontamination** — specified in `docs/TRAINING_DATA.md`, no implementation.
   Until it runs, the AutoPenBench result is uncontrolled for train/test overlap. CPU-only work,
   so it is also doable before compute arrives, and it is what makes the existing number

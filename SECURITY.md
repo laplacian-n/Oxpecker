@@ -20,14 +20,37 @@ authorized to test. Unauthorized access to computer systems is illegal in most j
 
 ## Safety controls built in
 
-Oxpecker enforces safety architecturally, not by relying on a model to refuse:
+> ### ⚠ These controls are NOT all active in the desktop app
+>
+> The controls below are implemented and tested in the research runtime (`agent/`, driven by
+> `agent/main.py`). An audit found that the **desktop application** — the FastAPI backend at
+> `app/agent/web/dev_server.py`, which is what the installer runs — does not use most of them.
+> Do not rely on them when operating the desktop app. See
+> [docs/OBSERVABILITY_PLAN.md](docs/OBSERVABILITY_PLAN.md) for the full finding and the fix plan.
+>
+> | Control | `agent/` research runtime | desktop app |
+> |---|---|---|
+> | Scope / RoE enforcement | enforced via the broker | **nominal only** — fails open on an empty allowlist, widens itself from any URL in an operator message, and matches hosts by substring |
+> | Destructive-command denylist | — | **active** |
+> | Sandboxed execution | bubblewrap + seccomp + rlimits | **not active** — commands run via `subprocess.run(..., shell=True)` on the host |
+> | Audit logging | hash-chained audit log + encrypted evidence store | **not active** |
+> | Broker mediation (taint, rate limit, approval queue) | active | **not active** |
+>
+> Until this is fixed, treat the desktop app as running model-chosen commands on your machine
+> with only a destructive-command regex in the way. Run it on a disposable machine or VM, not on
+> a host you care about.
+
+Oxpecker is designed to enforce safety architecturally, not by relying on a model to refuse:
 
 - **Scope / RoE enforcement** — every request is checked against an allowlisted engagement scope;
-  out-of-scope targets are hard-refused. The default engagement ships empty / localhost-only.
+  out-of-scope targets are hard-refused. *(Holds in `agent/`; see the notice above for the
+  desktop app.)*
 - **Destructive-command denylist** — clearly destructive host commands are blocked outright.
-- **Sandboxed / isolated execution** — the agent is intended to run in an isolated environment with
-  no path to production systems.
-- **Audit logging** — actions, observations, and decisions are logged for review.
+  *(Active in both runtimes.)*
+- **Sandboxed / isolated execution** — kernel-enforced namespace isolation with a seccomp
+  profile and resource limits. *(Linux only, and `agent/` only — see the notice above.)*
+- **Audit logging** — actions, observations, and decisions are logged for review. *(`agent/`
+  only — see the notice above.)*
 
 These controls reduce casual misuse; they are not a substitute for the operator's own legal
 authorization and judgment.

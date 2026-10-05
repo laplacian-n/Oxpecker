@@ -22,8 +22,9 @@ inherits its status from here.
 | Component | Status | Where |
 |-----------|--------|-------|
 | Agent runtime (ReAct loop, sessions, budget, audit log) | **Implemented** | `app/agent/loop.py`, `app/agent/main.py` |
-| Execution broker (policy, scope check, taint, kill switch, approval queue) | **Implemented** | `app/agent/broker/` |
-| Sandboxed execution (bubblewrap tiers + seccomp profile) | **Implemented** | `app/agent/sandbox/` |
+| Audit log + evidence store in the **desktop app** | **Not wired** — `dev_server.py` imports no audit, evidence or broker module | — |
+| Execution broker (policy, scope check, taint, kill switch, approval queue) | **Implemented, wired into `agent/` only** — the desktop app does **not** route through it | `app/agent/broker/` |
+| Sandboxed execution (bubblewrap tiers + seccomp profile) | **Implemented as a module, wired into `agent/` only** — the desktop app does **not** use it; Linux-only | `app/agent/sandbox/` |
 | Evidence store (HMAC-chained), findings + SARIF export | **Implemented** | `app/agent/evidence/`, `app/agent/findings/` |
 | Hypothesis graph, notebook, engagement/RoE store | **Implemented** | `app/agent/hypothesis_graph/`, `app/agent/notebook/`, `app/agent/engagement/` |
 | Injection guard | **Implemented** | `app/agent/injection_guard.py` |
@@ -51,12 +52,27 @@ rules they must follow — is recorded in [docs/TOOLING_ROADMAP.md](docs/TOOLING
 
 The [`app/`](app/) directory contains the **runnable, self-hosted desktop version** of Oxpecker — a packaged Electron application that drives a **local model** (Qwen 4B via llama.cpp, CUDA) end-to-end on a single machine, with a built-in web UI, a live hypothesis graph, a notebook, a findings tracker, and a memory-mapped 547K-chunk RAG. It is the practical, installable counterpart to the research pipeline below: the training work produces the model; `app/` is where the agent is actually operated against authorized lab targets.
 
-- **Backend** — FastAPI agent server (`app/agent/web/dev_server.py`): scope/RoE enforcement, a destructive-command denylist, structured HTTP tooling, auto-compaction, and **per-session** hypothesis graph / notebook / findings.
+- **Backend** — FastAPI agent server (`app/agent/web/dev_server.py`): a destructive-command denylist, structured HTTP tooling, auto-compaction, and **per-session** hypothesis graph / notebook / findings. Its scope check is **nominal only** and it does **not** sandbox command execution or write an audit log — see the warning below.
 - **Desktop shell** — Electron + electron-builder with GitHub auto-update (`app/electron/`); one-click installer, no manual dependency setup.
 - **MCP servers** — a dev/debug MCP and a control MCP for driving the live agent (`app/.mcp.json`).
 - **Install** — download the latest `Oxpecker-Setup-*.exe` from [Releases](../../releases), or run from source per [`app/README.md`](app/README.md).
 
-Safety is enforced the same way as the research design intends — an allowlisted engagement scope that the agent hard-refuses to step outside of, a destructive-command block, and sandboxed/isolated execution — so the app only ever acts against targets the operator has explicitly authorized.
+> ### ⚠ The desktop app does not currently have the safety controls described below
+>
+> An audit of `dev_server.py` found that the app enforces a destructive-command denylist, but
+> **does not** sandbox command execution (it calls `subprocess.run(..., shell=True)` on the
+> host), **does not** write an audit log, and **does not** route tool calls through the broker.
+> Its scope check is nominal: it fails open when the allowlist is empty, appends any URL found
+> in an operator message to the allowlist automatically, and compares hosts by substring. The
+> `isolation_tier` field reports `"bubblewrap"` while nothing reads it at execution time.
+>
+> The controls are real in the research runtime (`agent/`, via `agent/main.py`). Bringing the
+> app to parity is the current work; the finding and the plan are in
+> [docs/OBSERVABILITY_PLAN.md](docs/OBSERVABILITY_PLAN.md).
+>
+> **Run the desktop app on a disposable machine or VM until this lands.**
+
+The intended design — which `agent/` implements — enforces safety architecturally: an allowlisted engagement scope the agent hard-refuses to step outside of, a destructive-command block, and sandboxed/isolated execution, so the agent only ever acts against targets the operator has explicitly authorized.
 
 > **Configuration:** `app/electron/config.json` is a **template** with placeholder paths. Copy it to `app/electron/config.local.json` (gitignored, never shipped) and point it at your own `llama-server`, model, and RAG index.
 
@@ -66,7 +82,7 @@ Safety is enforced the same way as the research design intends — an allowliste
 
 Oxpecker is **dual-use, research/educational software**. Use it **only against systems you own or are explicitly authorized to test** — self-hosted labs (OWASP Juice Shop, DVWA), CTF / boot2root VMs (VulnHub, HTB), and local containers on `localhost` / private networks. **Never** point it at production systems, third-party services, or any host you are not authorized to test; unauthorized access is illegal in most jurisdictions.
 
-- The agent **hard-enforces an allowlisted scope** and refuses out-of-scope targets; the default engagement ships empty / localhost-only.
+- The agent is **designed to hard-enforce an allowlisted scope** and refuse out-of-scope targets. This holds in `agent/`; in the desktop app it currently does not — see the warning above. Note that an *empty* allowlist in the desktop app means unrestricted, not localhost-only.
 - The **fine-tuned model and RAG knowledge base are gated** — released by request only via Hugging Face (institutional/identity verification), not bundled in this repository.
 - See **[SECURITY.md](SECURITY.md)** for the full responsible-use policy and how to report a vulnerability in Oxpecker itself.
 
