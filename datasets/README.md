@@ -11,6 +11,15 @@ Curated cybersecurity dataset for fine-tuning LLMs on penetration testing tasks.
 | Eval (full) | 6,447 | ~33 MB | Full evaluation set (not included) |
 | Eval (sample) | 100 | ~566 KB | Representative sample included in this repo |
 
+Only the two sample files are verifiable from this repository; the full-split row counts describe
+a private artifact. Note also that [`docs/TRAINING_DATA.md`](../docs/TRAINING_DATA.md) gives
+123,447 train / 6,498 eval for its per-component breakdown — 31 and 51 rows above the figures
+here. That discrepancy has not been traced, and both are reproduced rather than harmonised.
+
+**No decontamination against evaluation benchmarks has been applied to this data yet.** The
+intended pipeline is specified in `docs/TRAINING_DATA.md`, but it is not implemented, so any
+benchmark result obtained with this corpus is uncontrolled for train/test overlap.
+
 ## Format
 
 Each line is a JSON object in chat-completion format:

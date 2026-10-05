@@ -35,7 +35,10 @@ Every command executes inside a bubblewrap sandbox providing kernel-level isolat
 
 ## RAG Knowledge Base
 
-The system augments the model with a Retrieval-Augmented Generation knowledge base containing 547,118 chunks from over 15 sources:
+The retrieval layer (`app/agent/knowledge_rag/`) is implemented and tested. The index it reads is
+**not bundled in this repository** — it is gated alongside the model weights, and
+`build_index.py` / `build_index_gpu.py` are provided so it can be rebuilt from its sources. The
+chunk counts below describe that built index, which is 547,118 chunks from over 15 sources:
 
 | Source | Chunks |
 |--------|--------|

@@ -31,7 +31,9 @@ inherits its status from here.
 | AutoPenBench adapter + one committed benchmark run | **Implemented** | `evaluation/` |
 | **GRPO reinforcement learning stage** | **Not implemented** — designed only | — |
 | **Dense/milestone reward function for RL** | **Not implemented** — milestone counters are logged by the eval adapter but not wired to any reward | — |
+| **Training-data decontamination** | **Not implemented** — 5 stages specified in `docs/TRAINING_DATA.md`, no code, no overlap statistics. This qualifies the benchmark result (see [Training Data](#training-data)) | — |
 | **Safety red-team evaluation** | **Not run** — thresholds in `docs/EVALUATION.md` are targets, not results | — |
+| **Ablations, seed repeats, forgetting + RAG evaluation** | **Not run** — all planned in `docs/EVALUATION.md` | — |
 
 Roughly 28K lines of Python and 55 test modules live under `app/agent/`. That directory is the
 maintained agent runtime; see the note in [Repository Structure](#repository-structure) about the
@@ -152,7 +154,7 @@ The agent uses a ReAct-style loop to plan and execute penetration testing steps:
 - Base model: Qwen3-32B
 - Method: LoRA (r=128, α=256) with DoRA, rsLoRA, and PiSSA initialization
 - Target modules: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
-- Data: 123,416 curated examples across reconnaissance, exploitation, privilege escalation, and reporting
+- Data: ~123.4K curated examples across reconnaissance, exploitation, privilege escalation, and reporting (gated; not in this repository)
 - Hardware: 1× H100 80GB with DeepSpeed ZeRO-3
 
 **Phase 2 — Reinforcement Learning (GRPO) — PLANNED, NOT IMPLEMENTED**
@@ -207,9 +209,18 @@ The agent is augmented with a 547K-chunk retrieval knowledge base covering vulne
 
 ### Training Data
 
-123,447 curated examples across four categories: external security QA (52.7K), custom pentest QA (27K), code SFT (20.9K), and agentic multi-turn conversations (22.8K). Training uses a 4-phase curriculum (simple → complex) in epoch 1, then fully shuffled in epoch 2. A multi-stage decontamination pipeline ensures isolation from evaluation benchmarks.
+~123.4K curated examples across four categories: external security QA (52.7K), custom pentest QA (27K), code SFT (20.9K), and agentic multi-turn conversations (22.8K). Training uses a 4-phase curriculum (simple → complex) in epoch 1, then fully shuffled in epoch 2.
 
-See [docs/TRAINING_DATA.md](docs/TRAINING_DATA.md) for dataset breakdown, curriculum design, and decontamination details.
+> **Decontamination is specified but not implemented, and this qualifies the benchmark number.**
+> A 5-stage decontamination pipeline is designed (see below), but **no decontamination code
+> exists in this repository and no overlap statistics have been produced.** Since the corpus
+> draws on HackTheBox / TryHackMe / VulnHub writeups and AutoPenBench is built from comparable
+> machines, the 8/33 result above is **not controlled for train/test contamination.** Treat it
+> accordingly until that pass is run and reported.
+
+See [docs/TRAINING_DATA.md](docs/TRAINING_DATA.md) for the dataset breakdown, curriculum design,
+and the decontamination specification — including a 31-row discrepancy between the component
+table there and the dataset card that has not been reconciled.
 
 ---
 
