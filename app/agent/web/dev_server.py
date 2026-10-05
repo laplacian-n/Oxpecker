@@ -44,6 +44,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+
+from ..engagement import intake as _intake
+from . import scope as _scope
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -100,10 +103,14 @@ SQLi/XSS/auth payloads. PowerShell quote-escaping wastes turns and corrupts payl
 - FIRST MOVE on a web target: call http_request GET on the operator's EXACT url (the
   http://host:port/ you were given) before anything else. Do NOT warm up with Test-NetConnection,
   Invoke-WebRequest, ping, or netstat — they tell you nothing useful about a remote web app.
-- TARGET LOCK: the operator's target and the "In-scope targets" list below are authoritative and
-  ARE in scope. NEVER switch to localhost / 127.0.0.1, and NEVER claim the given target is out of
-  scope. If a request fails, retry http_request against the SAME host (try http vs https, or a
-  different path) — never change the host or wander to the local machine.
+- TARGET LOCK: work the operator's target and the "In-scope targets" list below. NEVER switch to
+  localhost / 127.0.0.1 and never wander to the local machine. If a request fails, retry
+  http_request against the SAME host (try http vs https, or a different path) rather than
+  changing the host.
+- SCOPE IS ENFORCED, not advisory. A tool result saying "out of scope" means the request was
+  never sent. Do not retry it, do not try a variation of the host to get around it, and never
+  describe a response you did not receive. Report the refusal to the operator and say which host
+  needs authorising — only the operator can add a target to the engagement.
 - Do NOT use netstat / Test-NetConnection / Get-NetTCPConnection / Get-Process to investigate a
   web target — those show YOUR machine, not the remote server, and are a dead-end loop.
 For OWASP Juice Shop the real login API is POST /rest/user/login with JSON
@@ -573,6 +580,9 @@ class Engagement:
     engagement_id: str
     description: str = ""
     allow_targets: list[str] = field(default_factory=list)
+    # Hosts the operator has mentioned but not authorised. Never consulted by the scope check —
+    # see _scope_urls_into_engagement.
+    proposed_targets: list[str] = field(default_factory=list)
     allowed_action_classes: list[str] = field(default_factory=list)
     authorized_by: str = ""
     valid_until: str = ""
@@ -583,6 +593,7 @@ class Engagement:
             "engagement_id": self.engagement_id,
             "description": self.description,
             "allow_targets": self.allow_targets,
+            "proposed_targets": self.proposed_targets,
             "allowed_action_classes": self.allowed_action_classes,
             "valid_until": self.valid_until,
         }
@@ -725,7 +736,8 @@ def _persist():
             ],
             "engagements": [
                 {"engagement_id": e.engagement_id, "description": e.description,
-                 "allow_targets": e.allow_targets, "allowed_action_classes": e.allowed_action_classes,
+                 "allow_targets": e.allow_targets, "proposed_targets": e.proposed_targets,
+                 "allowed_action_classes": e.allowed_action_classes,
                  "authorized_by": e.authorized_by, "valid_until": e.valid_until, "created_at": e.created_at}
                 for e in list(_engagements.values())
             ],
@@ -942,14 +954,16 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             body = args.get("data")
         if body is None:
             body = args.get("content")
-        from urllib.parse import urlparse
-        host = (urlparse(url).hostname or "").lower()
-        eng = _engagements.get(session.engagement_id)
-        if eng and eng.allow_targets and host:
-            allowed = any(host == str(t).lower() or host in str(t).lower() for t in eng.allow_targets)
-            if not allowed:
-                return {"ok": False, "error": f"out of scope: host {host!r} is not in engagement "
-                                              f"targets {eng.allow_targets}. Add it to the engagement first."}
+        # Scope is decided by agent/web/scope.py, which delegates to the broker's own matcher
+        # (broker/scope_check.validate_target). The check that used to live inline here did
+        # `host in str(t).lower()` — substring matching in the permissive direction, so
+        # `evil.example.com` passed whenever `notevil.example.com` was in scope — and skipped
+        # itself entirely when allow_targets was empty, which `create_engagement` allowed by
+        # default. See scope.py's docstring for the full list of what was wrong with it.
+        decision = _scope.check_url(url, _engagements.get(session.engagement_id))
+        if not decision.allowed:
+            return decision.as_tool_error()
+        host = decision.host
         data = None
         if body is not None:
             if isinstance(body, (dict, list)):
@@ -1700,17 +1714,25 @@ def _extract_tool_calls(text: str) -> list[tuple[str, dict]]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _scope_urls_into_engagement(engagement_id: str, message: str):
-    """Add any URLs/hosts named in the operator's message to the engagement scope."""
+    """Record hosts named in an operator message as *proposed*, never as authorised.
+
+    This used to append them straight into `allow_targets`, which made mentioning a URL in
+    conversation equivalent to authorising it — and an operator pastes URLs as context all the
+    time, out of a report, a ticket or a log excerpt. There is no way to tell those apart from
+    "please test this", so the grant has to be a deliberate act in the engagement, not a
+    side-effect of text.
+
+    The names are still worth keeping: the UI can offer them as one-click additions, and a scope
+    refusal can point at the host the operator just mentioned. They grant nothing on their own.
+    """
     eng = _engagements.get(engagement_id)
     if not eng:
         return
     from urllib.parse import urlparse
     for u in re.findall(r'https?://[^\s<>"\']+', message or ""):
-        host = urlparse(u).hostname or ""
-        if host and host not in eng.allow_targets:
-            eng.allow_targets.append(host)
-        if u not in eng.allow_targets:
-            eng.allow_targets.append(u)
+        host = (urlparse(u).hostname or "").lower()
+        if host and host not in eng.allow_targets and host not in eng.proposed_targets:
+            eng.proposed_targets.append(host)
 
 
 def _run_guided(session: Session, engagement_id: str, user_message: str = ""):
@@ -2097,6 +2119,27 @@ def resolve_consult(request_id: str, req: ConsultResolveRequest):
 # ── Engagements ──
 @app.post("/api/engagements")
 def create_engagement(req: CreateEngagementRequest):
+    # Validated server-side against the same rules agent/engagement/intake.py applies on the CLI
+    # side. This endpoint previously accepted anything, and `allow_targets` defaults to `[]`, so
+    # an engagement with no targets at all could be created through the API — which, before the
+    # scope fix, meant an engagement that permitted every host. The UI already assumed this was
+    # rejected (see web/test_frontend.py's validation test, "intake.py rejects an engagement with
+    # none"); only the server did not.
+    errors: list[str] = []
+    if not req.allow_targets:
+        errors.append(
+            "allow_targets must have at least one entry — an engagement with no targets "
+            "authorises nothing and cannot be used"
+        )
+    for target in req.allow_targets:
+        _intake._validate_scope_line(target, errors, "allow_targets")
+    if not req.authorized_by.strip():
+        errors.append("authorized_by is required — record who authorised this engagement")
+    if req.valid_hours <= 0:
+        errors.append("valid_hours must be greater than zero")
+    if errors:
+        raise HTTPException(400, "; ".join(errors))
+
     now = time.time()
     eng = Engagement(
         engagement_id=req.engagement_id,
