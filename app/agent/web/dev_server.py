@@ -46,6 +46,8 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
+from .. import audit_log as _audit_log
+from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..sandbox import availability as _isolation
 from ..security_tools import port_discovery as _port_discovery
@@ -1009,19 +1011,25 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             return {"ok": False, "error": f"execution failed: {e}"}
 
         # Flatten to the shape this tool has always returned, and state the tier that actually
-        # ran rather than the one the session advertises.
+        # ran rather than the one the session advertises. A command stopped by preflight never
+        # reached the executor, so no tier applies to it — reporting the requested tier there
+        # would claim an isolated execution that did not happen, which is the same confusion
+        # `effective_isolation_tier` exists to remove.
+        blocked = bool(result.get("blocked"))
+        ran_under = result.get("isolation_tier") or (None if blocked else tier)
+        session.effective_isolation_tier = ran_under
         out = ((result.get("stdout") or "") + (result.get("stderr") or ""))[:1500]
         return {
             "ok": bool(result.get("ok")) and not result.get("blocked"),
             "exit_code": result.get("exit_code"),
             "output": out,
             "error": result.get("error"),
-            "blocked": result.get("blocked", False),
+            "blocked": blocked,
             "timed_out": result.get("timed_out", False),
             "killed_reason": result.get("killed_reason"),
             "output_capped": result.get("output_capped", False),
             "duration_ms": result.get("duration_ms"),
-            "isolation_tier": result.get("isolation_tier", tier),
+            "isolation_tier": ran_under,
             "isolation_detail": tier_reason,
             "sandbox_profile_digest": result.get("sandbox_profile_digest"),
         }
@@ -1251,6 +1259,93 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
     return {"ok": False, "error": f"unknown tool: {name}"}
 
 
+_audit_logs: dict[str, _audit_log.AuditLog] = {}
+
+
+def _audit_for(session_id: str) -> _audit_log.AuditLog:
+    """One AuditLog per session, matching Broker._audit_for. Writes land in config.AUDIT_DIR
+    beside the CLI's, so `python3 -m agent.main --verify-audit <session_id>` verifies a web
+    session's chain too — the web runtime having no audit trail at all was the gap this closes,
+    and a trail only the web UI can read would be half a fix."""
+    log_obj = _audit_logs.get(session_id)
+    if log_obj is None:
+        log_obj = _audit_logs[session_id] = _audit_log.AuditLog(session_id)
+    return log_obj
+
+
+def _scope_decision_of(result: dict) -> str:
+    """What the gate decided, in the one string the audit schema has for it."""
+    if not isinstance(result, dict):
+        return "n/a"
+    if rule := result.get("scope_rule"):
+        return f"denied:{rule}"
+    if result.get("blocked"):
+        return "denied:preflight"
+    for key in ("validated_ip", "host"):
+        if result.get(key):
+            return f"allowed:{key}={result[key]}"
+    return "allowed" if result.get("ok") else "n/a"
+
+
+def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: int,
+                      action_rationale: str) -> tuple[dict, str]:
+    """Execute a tool and record it. Returns (result, text ready to enter context).
+
+    Every tool call goes through here because _run_tool has exactly one call site — so the audit
+    trail cannot be bypassed by a tool forgetting to write one, and adding a tool cannot
+    accidentally opt out of it.
+
+    Two things happen here that did not happen anywhere in the web runtime before: the call is
+    recorded in the hash-chained audit log, and the output is screened for prompt injection and
+    wrapped as data before the model sees it. injection_guard was already in this package,
+    unused on this path.
+    """
+    canonical = _TOOL_NAME_ALIASES.get(name, name)
+    started = time.monotonic()
+    try:
+        result = _run_tool(name, args, session)
+    except Exception as e:  # a tool raising must still be recorded, not swallowed
+        log.exception("tool %r raised", canonical)
+        result = {"ok": False, "error": f"tool raised {type(e).__name__}: {e}"}
+    latency_ms = (time.monotonic() - started) * 1000
+
+    raw_text = _jsonify_result(result)
+    wrapped, scan = _injection_guard.wrap_and_flag(raw_text)
+
+    audit_args = dict(args)
+    if canonical != name:
+        # Keep the spelling the model used: 27 aliases reach these tools, and "the model asked
+        # for nmap" is a different fact from "port_discovery ran".
+        audit_args["_requested_tool_name"] = name
+    try:
+        _audit_for(session.session_id).record(
+            turn_index=turn_index,
+            tool_name=canonical,
+            action_rationale=(action_rationale or "")[:300],
+            arguments=audit_args,
+            raw_output=raw_text,
+            sanitized_output=wrapped,
+            scope_decision=_scope_decision_of(result),
+            approval_identity=None,  # the approval queue is not wired into this runtime yet
+            prompt_tokens=session.last_prompt_tokens or None,
+            completion_tokens=None,  # not reported per tool call by this runtime
+            latency_ms=latency_ms,
+            exit_code=result.get("exit_code") if isinstance(result, dict) else None,
+            injection_flagged=scan.matched,
+            isolation_tier=(result.get("isolation_tier") if isinstance(result, dict) else None),
+        )
+    except Exception as e:
+        # Never fail the turn on an audit error, but never let one pass unnoticed either: a
+        # silently missing entry is indistinguishable from an action that never happened.
+        log.error("AUDIT WRITE FAILED for %s/%s: %s", session.session_id, canonical, e)
+        session.push({"type": "audit_error", "tool": canonical, "error": str(e)})
+
+    if scan.matched:
+        session.push({"type": "injection_flagged", "tool": canonical,
+                      "verdict": scan.verdict, "reasons": scan.reasons})
+    return result, wrapped
+
+
 # Tool schemas exposed to the model
 TOOL_SCHEMAS = [
     _port_discovery.SCHEMA,
@@ -1458,7 +1553,10 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
     # System message is kept byte-stable (prompt-cache friendly): engagement scope rarely
     # changes within a session, and volatile RAG context is appended as the LAST message.
     eng = _engagements.get(session.engagement_id)
-    system_content = DEFAULT_SYSTEM_PROMPT
+    # Tool output is wrapped in quarantine markers before it enters context (see
+    # _audited_run_tool). The addendum is what makes those markers mean something to the model
+    # instead of being unexplained noise in the middle of a result.
+    system_content = DEFAULT_SYSTEM_PROMPT + "\n\n" + _injection_guard.SYSTEM_INSTRUCTION_ADDENDUM
     if eng:
         system_content += f"\n\nEngagement: {eng.engagement_id}\nIn-scope targets: {', '.join(eng.allow_targets)}"
     if session.guided:
@@ -1672,8 +1770,11 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
             result_blocks = []
             for tool_name, tool_args in tool_calls:
                 tool_args = _normalize_tool_args(tool_name, tool_args)
-                result = _run_tool(tool_name, tool_args, session)
-                result_text = _jsonify_result(result)
+                result, result_text = _audited_run_tool(
+                    tool_name, tool_args, session,
+                    turn_index=tool_round,
+                    action_rationale=collected_text.strip(),
+                )
                 session.append("tool", result_text, extra={"tool_name": tool_name})
                 result_blocks.append(f"[{tool_name}] →\n{result_text}")
             messages.append({"role": "user",

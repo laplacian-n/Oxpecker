@@ -83,6 +83,7 @@ class AuditLog:
         exit_code: int | None,
         injection_flagged: bool,
         prompt_version: str | None = None,
+        isolation_tier: str | None = None,
     ) -> dict:
         # Re-sync from disk on every write, not just __init__: a separate process (e.g. the
         # Phase-3 security-tools MCP subprocess, which does its own broker-mediated audit
@@ -112,6 +113,12 @@ class AuditLog:
             "exit_code": exit_code,
             "injection_flagged": injection_flagged,
             "prompt_version": prompt_version,
+            # The tier the action ACTUALLY executed under, where one applies (local command
+            # execution). None for actions with no isolation dimension, such as an HTTP request
+            # or an in-memory note. Recorded because "which sandbox ran this" is not
+            # reconstructable after the fact, and a session's requested tier is not evidence of
+            # what happened — see agent/sandbox/availability.py.
+            "isolation_tier": isolation_tier,
             "prev_hash": self._prev_hash,
         }
         entry_hash = hashlib.sha256(
