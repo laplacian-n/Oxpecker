@@ -18,19 +18,33 @@ import hashlib
 import json
 import logging
 import os
-import resource
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import seccomp_profile
+from .availability import (  # re-exported: availability.py owns the tier names, so a
+    TIER_BUBBLEWRAP,         # Windows-side caller and this module cannot disagree on spelling
+    TIER_DIRECT,
+    TIER_MICROVM,
+    IsolationUnavailableError,
+    probe,
+    resolve_tier,
+)
+
+# `resource` is Unix-only. It is used in exactly one place — `_set_rlimits()`, the preexec_fn for
+# the bubblewrap tier — which cannot be reached on a platform that has no bubblewrap anyway. Left
+# unguarded it made this whole module unimportable on Windows, which meant a Windows caller could
+# not even ask "is isolation available here?" without an ImportError. Guarding it keeps the
+# question answerable; `_set_rlimits()` refuses explicitly rather than failing at attribute
+# access, so a path that somehow reaches it still fails loudly instead of running uncapped.
+try:
+    import resource
+except ImportError:  # pragma: no cover — exercised only on non-Unix hosts
+    resource = None
 
 log = logging.getLogger("agent.sandbox.executor")
-
-TIER_DIRECT = "direct"
-TIER_BUBBLEWRAP = "bubblewrap"
-TIER_MICROVM = "microvm"
 
 
 @dataclass
@@ -59,6 +73,12 @@ class DirectExecutor:
     """Phase 1's original tier: scrubbed env, no shell, no namespace isolation."""
 
     tier = TIER_DIRECT
+
+    @classmethod
+    def available(cls, deep: bool = False) -> tuple[bool, str]:
+        """(can this tier run here, why). Delegates to availability.probe so there is one
+        answer, not one per call site."""
+        return probe(cls.tier, deep=deep)
 
     def run(
         self, argv: list[str], cwd: Path, workspace_root: Path, timeout: float
@@ -111,6 +131,11 @@ BWRAP_FSIZE_LIMIT_BYTES = 50 * 1024 * 1024  # 50MB max single-file write, caps d
 
 
 def _set_rlimits() -> None:
+    if resource is None:  # pragma: no cover — non-Unix hosts never reach the bwrap tier
+        raise RuntimeError(
+            "resource limits are unavailable on this platform (no `resource` module); "
+            "refusing to run uncapped"
+        )
     resource.setrlimit(resource.RLIMIT_AS, (BWRAP_MEM_LIMIT_BYTES, BWRAP_MEM_LIMIT_BYTES))
     resource.setrlimit(resource.RLIMIT_CPU, (BWRAP_CPU_LIMIT_S, BWRAP_CPU_LIMIT_S))
     resource.setrlimit(resource.RLIMIT_NOFILE, (BWRAP_NOFILE_LIMIT, BWRAP_NOFILE_LIMIT))
@@ -182,6 +207,12 @@ class BubblewrapExecutor:
     """
 
     tier = TIER_BUBBLEWRAP
+
+    @classmethod
+    def available(cls, deep: bool = False) -> tuple[bool, str]:
+        """(can this tier run here, why). Delegates to availability.probe so there is one
+        answer, not one per call site."""
+        return probe(cls.tier, deep=deep)
 
     @staticmethod
     def build_argv(
@@ -305,6 +336,12 @@ class MicroVMExecutor:
     silently degrade to a weaker tier while claiming this name."""
 
     tier = TIER_MICROVM
+
+    @classmethod
+    def available(cls, deep: bool = False) -> tuple[bool, str]:
+        """(can this tier run here, why). Delegates to availability.probe so there is one
+        answer, not one per call site."""
+        return probe(cls.tier, deep=deep)
 
     def run(self, argv: list[str], cwd: Path, workspace_root: Path, timeout: float) -> ExecResult:
         raise NotImplementedError(
