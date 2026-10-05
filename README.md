@@ -22,12 +22,14 @@ inherits its status from here.
 | Component | Status | Where |
 |-----------|--------|-------|
 | Agent runtime (ReAct loop, sessions, budget, audit log) | **Implemented** | `app/agent/loop.py`, `app/agent/main.py` |
-| Audit log + evidence store in the **desktop app** | **Not wired** — `dev_server.py` imports no audit, evidence or broker module | — |
-| Execution broker (policy, scope check, taint, kill switch, approval queue) | **Implemented, wired into `agent/` only** — the desktop app does **not** route through it | `app/agent/broker/` |
-| Sandboxed execution (bubblewrap tiers + seccomp profile) | **Implemented as a module, wired into `agent/` only** — the desktop app does **not** use it; Linux-only | `app/agent/sandbox/` |
+| Audit log + evidence store in the **desktop app** | **Implemented** — every tool call recorded at a single chokepoint; broker-mediated calls also store full output in the encrypted evidence store | `app/agent/web/dev_server.py` |
+| Debug trace (prompts, model output, RAG scores, compaction deltas) | **Implemented** — separate from the audit log; unredacted, on by default, `OXPECKER_DEBUG_TRACE=0` disables | `app/agent/web/debug_trace.py` |
+| Trace reader (one correlated timeline per session) | **Implemented** | `app/agent/web/trace_cli.py` |
+| Execution broker (policy, scope check, taint, kill switch, approval queue) | **Implemented**, and the desktop app's outward-facing tools route through it. Approval is refused rather than awaited there, and session taint is not yet marked — see [the plan's §8](docs/OBSERVABILITY_PLAN.md) | `app/agent/broker/` |
+| Sandboxed execution (bubblewrap tiers + seccomp profile) | **Implemented** and wired into both runtimes, failing closed when the requested tier is unavailable. **Linux only** — `run_command` refuses on other platforms rather than running unsandboxed | `app/agent/sandbox/` |
 | Evidence store (HMAC-chained), findings + SARIF export | **Implemented** | `app/agent/evidence/`, `app/agent/findings/` |
 | Hypothesis graph, notebook, engagement/RoE store | **Implemented** | `app/agent/hypothesis_graph/`, `app/agent/notebook/`, `app/agent/engagement/` |
-| Injection guard | **Implemented** | `app/agent/injection_guard.py` |
+| Injection guard | **Implemented** in both runtimes — tool output is screened and wrapped as data before the model sees it | `app/agent/injection_guard.py` |
 | Knowledge RAG retrieval layer | **Implemented** (index not bundled — gated) | `app/agent/knowledge_rag/` |
 | Web UI + FastAPI server, Electron shell | **Implemented** | `app/agent/web/`, `app/electron/` |
 | Four-layer eval harness (deterministic / model-tool / reasoning / milestone) | **Implemented** | `app/agent/eval/` |
@@ -39,7 +41,12 @@ inherits its status from here.
 | **Safety red-team evaluation** | **Not run** — thresholds in `docs/EVALUATION.md` are targets, not results | — |
 | **Ablations, seed repeats, forgetting + RAG evaluation** | **Not run** — all planned in `docs/EVALUATION.md` | — |
 
-Roughly 28K lines of Python and 55 test modules live under `app/agent/`. That directory is the
+Runtime safety parity between the two runtimes, and the logging that exposed the gap, is
+recorded in [docs/OBSERVABILITY_PLAN.md](docs/OBSERVABILITY_PLAN.md) — including the two pieces
+deliberately left outstanding (a Windows isolation tier, and session taint marking paired with a
+web approval endpoint).
+
+Roughly 28K lines of Python and 60 test modules live under `app/agent/`. That directory is the
 maintained agent runtime; see the note in [Repository Structure](#repository-structure) about the
 top-level `agent/` snapshot.
 

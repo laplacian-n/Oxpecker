@@ -4,11 +4,19 @@ Logging and audit for the agent, and the runtime gap that investigating it uncov
 Companion to [TOOLING_ROADMAP.md](TOOLING_ROADMAP.md); the tool adapters planned there must
 land on the audited path described here, not beside it.
 
-Status of everything below: **planned**, except where stated as already existing.
+> **Status: all seven steps are implemented.** This document is kept as the record of what was
+> wrong and why each fix took the shape it did — the findings in §1 are history, not current
+> behaviour. The [README's Implementation Status table](../README.md#implementation-status) is
+> the authoritative statement of what exists; §8 lists what is still outstanding.
 
 ---
 
-## 1. The finding that reframes this work
+## 1. The finding that reframed this work — FIXED, recorded as history
+
+Everything in this section describes the state **before** the work in §4 landed. It is kept
+because the shape of the fixes only makes sense against it, and because a project whose headline
+claim is its safety architecture should keep the record of having got that wrong once.
+
 
 The question was "add detailed debug logging". Inspection showed good logging already exists —
 in the runtime that is not the one being shipped.
@@ -314,3 +322,30 @@ that rejection sampling and expert iteration need. Collecting successful traject
 on requires exactly this record. Logging detailed enough to debug is logging detailed enough to
 train on, so Steps 5 and 6 are not overhead against the RL goal; they are a prerequisite for it,
 and they run on local hardware.
+
+---
+
+## 8. Outstanding after this work
+
+Two pieces were deliberately left, both because landing half of each would be worse than
+landing neither.
+
+**Session taint marking + a web approval endpoint.** The broker escalates to human approval when
+a session has recently processed suspicious content, and `SAFE_WHILE_TAINTED` is
+`{"passive_recon"}` with a 5-minute window. The web runtime now detects injection and records
+it, but does not mark taint — because it has no endpoint through which an operator could
+approve, so marking it would leave the agent limited to passive recon for five minutes with no
+recourse. The marking and the endpoint are one change.
+
+**A Windows isolation tier.** `run_command` refuses on non-Linux rather than running
+unsandboxed: the tiers are bubblewrap namespaces plus seccomp, and `tools/run_command.py`
+resolves binaries against a hardcoded Unix PATH. The installer targets Windows, so this is a
+real capability gap there, not a theoretical one. WSL2 is the most promising answer — the
+pentest tooling is Linux-native anyway — and needs a tier plus a detection path. Until it
+lands, say plainly which platforms have enforced isolation.
+
+Smaller, noted in passing: `_powershell_body` in `dev_server.py` is now unused, kept pending
+that Windows tier; the web `Engagement` has no deny-list field of its own, so per-engagement
+deny entries are not yet expressible (only the base cloud-metadata denials apply); and
+`agent.web.test_frontend` skips all 14 of its tests without a reachable llama-server and lab
+container, so the UI side of the engagement-validation change is unexercised.

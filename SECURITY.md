@@ -20,37 +20,41 @@ authorized to test. Unauthorized access to computer systems is illegal in most j
 
 ## Safety controls built in
 
-> ### ⚠ These controls are NOT all active in the desktop app
+> ### Per-runtime status, and what is still missing
 >
-> The controls below are implemented and tested in the research runtime (`agent/`, driven by
-> `agent/main.py`). An audit found that the **desktop application** — the FastAPI backend at
-> `app/agent/web/dev_server.py`, which is what the installer runs — does not use most of them.
-> Do not rely on them when operating the desktop app. See
-> [docs/OBSERVABILITY_PLAN.md](docs/OBSERVABILITY_PLAN.md) for the full finding and the fix plan.
+> An earlier audit found the desktop application — the FastAPI backend at
+> `app/agent/web/dev_server.py`, which is what the installer runs — did not use most of the
+> controls below, while this file claimed it did. That has been fixed; the table records where
+> each control stands now, including the gaps that remain. The finding and the work are in
+> [docs/OBSERVABILITY_PLAN.md](docs/OBSERVABILITY_PLAN.md).
 >
 > | Control | `agent/` research runtime | desktop app |
 > |---|---|---|
-> | Scope / RoE enforcement | enforced via the broker | **nominal only** — fails open on an empty allowlist, widens itself from any URL in an operator message, and matches hosts by substring |
+> | Scope / RoE enforcement | enforced via the broker | **active** — the same matcher, exact host and CIDR comparison, deny evaluated before allow, denying on an empty or expired engagement |
 > | Destructive-command denylist | — | **active** |
-> | Sandboxed execution | bubblewrap + seccomp + rlimits | **not active** — commands run via `subprocess.run(..., shell=True)` on the host |
-> | Audit logging | hash-chained audit log + encrypted evidence store | **not active** |
-> | Broker mediation (taint, rate limit, approval queue) | active | **not active** |
+> | Sandboxed execution | bubblewrap + seccomp + rlimits | **active on Linux**; on other platforms `run_command` refuses rather than running unsandboxed |
+> | Audit logging | hash-chained audit log + encrypted evidence store | **active** — every tool call, plus a separate debug trace and a reader (`agent.web.trace_cli`) |
+> | Broker mediation (RoE class gate, rate limit, kill switch, evidence) | active | **active** for the outward-facing tools; `run_command` is gated by the sandbox instead, by design |
+> | Injection screening of tool output | active | **active** |
+> | Human approval of escalated actions | interactive prompt | **not active** — refused rather than awaited, since there is no endpoint to ask through. Session taint is therefore not marked either; the two are one piece of outstanding work |
 >
-> Until this is fixed, treat the desktop app as running model-chosen commands on your machine
-> with only a destructive-command regex in the way. Run it on a disposable machine or VM, not on
-> a host you care about.
+> **This is still dual-use software that runs model-chosen commands.** The isolation is real on
+> Linux and absent elsewhere, and no sandbox is a substitute for running it somewhere you can
+> afford to lose. Prefer a disposable machine or VM.
 
-Oxpecker is designed to enforce safety architecturally, not by relying on a model to refuse:
+Oxpecker enforces safety architecturally, not by relying on a model to refuse:
 
 - **Scope / RoE enforcement** — every request is checked against an allowlisted engagement scope;
-  out-of-scope targets are hard-refused. *(Holds in `agent/`; see the notice above for the
-  desktop app.)*
+  out-of-scope targets are hard-refused. An empty allowlist permits nothing, and cloud
+  instance-metadata addresses are denied regardless of what an engagement lists.
 - **Destructive-command denylist** — clearly destructive host commands are blocked outright.
-  *(Active in both runtimes.)*
 - **Sandboxed / isolated execution** — kernel-enforced namespace isolation with a seccomp
-  profile and resource limits. *(Linux only, and `agent/` only — see the notice above.)*
-- **Audit logging** — actions, observations, and decisions are logged for review. *(`agent/`
-  only — see the notice above.)*
+  profile and resource limits. *(Linux only; elsewhere local command execution is refused
+  rather than downgraded.)*
+- **Audit logging** — every action, observation and decision is recorded in a hash-chained log,
+  with full output in an encrypted evidence store. Verify a session's chain with
+  `python3 -m agent.main --verify-audit <session_id>`, or read it back with
+  `python3 -m agent.web.trace_cli <session_id>`.
 
 These controls reduce casual misuse; they are not a substitute for the operator's own legal
 authorization and judgment.
