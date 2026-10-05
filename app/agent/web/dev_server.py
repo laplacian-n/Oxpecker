@@ -1123,13 +1123,6 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         if not query:
             return {"ok": False, "error": "empty query"}
         results = _rag.search(query, top_k=args.get("top_k", 5))
-        # Chunk identity and score per hit. Without them, "why did it believe that" cannot be
-        # traced back to a bad retrieval — the model's own account of what it read is not
-        # evidence of what was retrieved.
-        _debug.for_session(session.session_id).retrieval(
-            turn_index=None, query=query,
-            results=results if isinstance(results, list) else (results or {}).get("results", []),
-        )
         return {"ok": True, "results": results, "count": len(results)}
 
     elif name == "record_hypothesis":
@@ -1349,6 +1342,19 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
         # silently missing entry is indistinguishable from an action that never happened.
         log.error("AUDIT WRITE FAILED for %s/%s: %s", session.session_id, canonical, e)
         session.push({"type": "audit_error", "tool": canonical, "error": str(e)})
+
+    # Chunk identity and score per hit, recorded here rather than inside the knowledge_search
+    # branch so it gets the turn index — and so every form of tracing lives at this one
+    # chokepoint, like the audit write.  The model's own account of what it read is not
+    # evidence of what was retrieved.
+    if canonical == "knowledge_search" and isinstance(result, dict):
+        hits = result.get("results")
+        if isinstance(hits, dict):
+            hits = hits.get("results")
+        if isinstance(hits, list):
+            _debug.for_session(session.session_id).retrieval(
+                turn_index=turn_index, query=str(args.get("query", "")), results=hits,
+            )
 
     # The audit entry is redacted and capped at 2000 characters; this keeps the whole result,
     # carrying the audit entry_id so the two records line up.
