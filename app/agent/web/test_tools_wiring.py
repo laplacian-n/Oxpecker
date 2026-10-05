@@ -95,6 +95,90 @@ def main() -> int:
           "lab-default" in a.get("error", "") and "lab-default" in b.get("error", ""),
           f"{a.get('error','')[:70]} | {b.get('error','')[:70]}")
 
+    print("\n== run_command fails closed when the requested isolation is unavailable ==")
+    import platform
+    from ..sandbox import availability as av
+    bw_ok, _ = av.probe("bubblewrap")
+    s = d.Session(session_id="iso1", engagement_id="lab-default", isolation_tier="bubblewrap")
+    r = d._run_tool("run_command", {"argv": ["pwd"]}, s)
+    if platform.system() != "Linux":
+        check("non-Linux refuses run_command rather than running unsandboxed",
+              r.get("ok") is False and "Linux-only" in r.get("error", ""), str(r)[:150])
+    elif not bw_ok:
+        check("an unavailable tier refuses instead of downgrading",
+              r.get("ok") is False, str(r)[:150])
+        check("the refusal states the command did not run",
+              "NOT run" in r.get("error", ""), str(r)[:170])
+        check("no tier is reported for a command that never ran",
+              s.effective_isolation_tier is None, str(s.effective_isolation_tier))
+    else:
+        check("an available tier runs and reports itself",
+              r.get("ok") is True and r.get("isolation_tier") == "bubblewrap", str(r)[:150])
+        check("the session records what actually ran",
+              s.effective_isolation_tier == "bubblewrap", str(s.effective_isolation_tier))
+
+    if platform.system() == "Linux":
+        print("\n== 'direct' is the operator's explicit opt-out, and is reported as such ==")
+        sd = d.Session(session_id="iso2", engagement_id="lab-default", isolation_tier="direct")
+        r = d._run_tool("run_command", {"argv": ["echo", "marker-9f3a"]}, sd)
+        check("direct runs", r.get("ok") is True, str(r)[:140])
+        check("output is returned", "marker-9f3a" in r.get("output", ""), str(r.get("output"))[:80])
+        check("the tier reported is the one that ran, not the default",
+              r.get("isolation_tier") == "direct", str(r.get("isolation_tier")))
+        check("the session's effective tier matches", sd.effective_isolation_tier == "direct",
+              str(sd.effective_isolation_tier))
+
+        print("\n== there is no shell, and the refusal explains what to do instead ==")
+        for cmd in ("grep x f | wc -l", "a && b", "cat f > out", "echo $(id)", "ls; pwd",
+                    "echo `id`", "a || b"):
+            r = d._run_tool("run_command", {"command": cmd}, sd)
+            check(f"refused: {cmd!r}",
+                  r.get("ok") is False and "no shell" in r.get("error", ""), str(r)[:120])
+        r = d._run_tool("run_command", {"command": "grep x f | wc -l"}, sd)
+        check("the refusal suggests a concrete alternative",
+              "python3" in r.get("error", ""), r.get("error", "")[:150])
+
+        print("\n== screening applies to argv, not only to the command string ==")
+        # argv became an accepted input form; the destructive/scan/http regexes read a string.
+        # If they only saw args["command"], argv would bypass every one of them.
+        for argv, label in ((["rm", "-rf", "/"], "destructive"),
+                            (["nmap", "-sV", "127.0.0.1"], "scan"),
+                            (["curl", "http://127.0.0.1:3000/"], "http fetch")):
+            r = d._run_tool("run_command", {"argv": argv}, sd)
+            check(f"{label} refused when passed as argv", r.get("ok") is False, str(r)[:110])
+
+        print("\n== the CLI preflight now applies to the web runtime ==")
+        for argv, why in ((["sudo", "id"], "blocked binary"),
+                          (["ssh", "host"], "blocked binary"),
+                          (["cat", "/root/.ssh/id_rsa"], "credential path")):
+            r = d._run_tool("run_command", {"argv": argv}, sd)
+            check(f"{why}: {argv[0]!r} refused", r.get("ok") is False, str(r)[:110])
+
+        print("\n== allowlisted local work still works, and quoting is handled for the model ==")
+        for argv in (["pwd"], ["python3", "-c", "print(6*7)"]):
+            r = d._run_tool("run_command", {"argv": argv}, sd)
+            check(f"{argv} runs", r.get("ok") is True, str(r)[:110])
+        r = d._run_tool("run_command", {"command": 'echo "two words"'}, sd)
+        check("shlex handles quoted arguments so the model need not",
+              "two words" in r.get("output", ""), str(r.get("output"))[:60])
+        r = d._run_tool("run_command", {}, sd)
+        check("an empty call is refused with guidance, not a bare error",
+              r.get("ok") is False and "argv" in r.get("error", ""), str(r)[:120])
+
+    print("\n== the API reports what isolation actually happened, not what was requested ==")
+    d._sessions["iso3"] = s3 = d.Session(session_id="iso3", engagement_id="lab-default",
+                                         isolation_tier="bubblewrap")
+    g = d.get_session("iso3")
+    check("the requested tier is reported", g.get("isolation_tier") == "bubblewrap")
+    check("no effective tier before anything has run",
+          g.get("effective_isolation_tier") is None, str(g.get("effective_isolation_tier")))
+    check("the host's real capability is reported alongside it",
+          isinstance(g.get("isolation"), dict) and "kernel_isolation_available" in g["isolation"],
+          str(g.get("isolation"))[:90])
+    check("the capability report agrees with the probe",
+          g["isolation"]["tiers"]["bubblewrap"]["available"] == bw_ok,
+          f"api={g['isolation']['tiers']['bubblewrap']['available']} probe={bw_ok}")
+
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:
         print("FAILED:", FAIL)

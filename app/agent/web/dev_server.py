@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import platform
+import shlex
 import queue
 import re
 import textwrap
@@ -46,7 +47,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from ..engagement import intake as _intake
+from ..sandbox import availability as _isolation
 from ..security_tools import port_discovery as _port_discovery
+from ..tools import run_command as _run_command
 from . import scope as _scope
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -547,6 +550,11 @@ class Session:
     use_security_tools: bool = False
     engagement_id: str = "lab-default"
     isolation_tier: str = "bubblewrap"
+    # What the last run_command actually executed under. `isolation_tier` above is the
+    # operator's REQUEST; this is the outcome. They can differ, and this is None when a command
+    # was refused because the requested tier was unavailable. Reported separately so the API
+    # never implies isolation that did not happen.
+    effective_isolation_tier: str | None = None
     profile: str = "safe"
     autonomous_active: bool = False
     autonomous_mode: str = ""
@@ -729,7 +737,8 @@ def _persist():
             "sessions": [
                 {"session_id": s.session_id, "messages": s.messages, "created_at": s.created_at,
                  "use_security_tools": s.use_security_tools, "engagement_id": s.engagement_id,
-                 "isolation_tier": s.isolation_tier, "profile": s.profile,
+                 "isolation_tier": s.isolation_tier,
+                 "effective_isolation_tier": s.effective_isolation_tier, "profile": s.profile,
                  "autonomous_mode": s.autonomous_mode, "thinking": s.thinking,
                  "stage": s.stage, "guided": s.guided,
                  "summary": s.summary, "summary_upto": s.summary_upto}
@@ -776,7 +785,9 @@ def _load_state():
         s = Session(
             session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
             engagement_id=sd.get("engagement_id", "lab-default"),
-            isolation_tier=sd.get("isolation_tier", "bubblewrap"), profile=sd.get("profile", "safe"),
+            isolation_tier=sd.get("isolation_tier", "bubblewrap"),
+            effective_isolation_tier=sd.get("effective_isolation_tier"),
+            profile=sd.get("profile", "safe"),
             created_at=sd.get("created_at", time.time()),
         )
         s.messages = sd.get("messages", [])
@@ -843,6 +854,49 @@ _PS_CMDLET_RE = re.compile(
 )
 
 
+# Shell constructs the sandbox cannot honour. There is no shell inside it — the executor runs an
+# argv vector directly — so these would reach the program as literal text and the model would be
+# left reading a result that silently did not do what it asked. Refusing with the reason costs
+# one turn; a silently wrong result costs the whole line of reasoning.
+_SHELL_FEATURE_RE = re.compile(r"\|\||&&|[|;&<>]|\$\(|`")
+
+
+class _ShellFeatureError(ValueError):
+    pass
+
+
+def _parse_argv(args: dict) -> list[str]:
+    """Accept either `argv` (a list, preferred) or `command` (a string, split with shlex).
+
+    The sandboxed executor takes an argv vector and never invokes a shell, which is what keeps
+    `preflight()`'s check on argv[0] meaningful: with `sh -c "<string>"` the real binary hides
+    inside the string and the blocked-binary list stops applying.
+    """
+    argv = args.get("argv")
+    if isinstance(argv, list) and argv:
+        return [str(a) for a in argv]
+
+    cmd = str(args.get("command") or args.get("cmd") or "").strip()
+    if not cmd:
+        raise _ShellFeatureError('empty command — pass argv:["ls","-la"] or command:"ls -la"')
+
+    if match := _SHELL_FEATURE_RE.search(cmd):
+        raise _ShellFeatureError(
+            f"{match.group(0)!r} is a shell construct and there is no shell in the sandbox, so "
+            "this was NOT run. Run one program per call and combine the results yourself: "
+            "instead of 'grep x f | wc -l', call grep and count what comes back. For a pipeline "
+            'you genuinely need, pass it to python3 as one argument: '
+            'argv:["python3","-c","<script>"].'
+        )
+    try:
+        parsed = shlex.split(cmd)
+    except ValueError as e:
+        raise _ShellFeatureError(f"could not parse the command ({e}) — check the quoting") from e
+    if not parsed:
+        raise _ShellFeatureError("the command parsed to nothing")
+    return parsed
+
+
 def _powershell_body(cmd: str) -> str | None:
     """If cmd wraps a PowerShell script (`powershell -Command "..."`), return the inner
     script; if it's a bare PowerShell cmdlet pipeline, return it as-is; else None (use cmd.exe)."""
@@ -877,9 +931,16 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
     """Execute a tool call. Returns the tool result dict."""
     name = _TOOL_NAME_ALIASES.get(name, name)
     if name == "run_command":
-        cmd = args.get("command", "")
-        if not cmd:
-            return {"ok": False, "error": "empty command"}
+        # Parse first, then screen the RESOLVED argv. The screening regexes below used to read
+        # `args["command"]` directly; once `argv` became an accepted input form that left a
+        # bypass, because argv:["rm","-rf","/"] never passed through the string they inspect.
+        # Joining the parsed argv means both input forms are screened identically.
+        try:
+            argv = _parse_argv(args)
+        except _ShellFeatureError as e:
+            return {"ok": False, "error": str(e)}
+        cmd = " ".join(argv)
+
         if _DESTRUCTIVE_RE.search(cmd):
             return {"ok": False, "error": "blocked: this looks like a destructive host command "
                                           "(format/shutdown/recursive-delete/etc.) and was NOT run. "
@@ -900,30 +961,70 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
                                           "tool instead: {\"url\":\"<full url incl. path>\", "
                                           "\"method\":\"GET|POST\", \"headers\":{...}, \"body\":{...}}. "
                                           "It returns the real status, headers, and body — no shell quoting."}
-        import subprocess
-        # On Windows, route PowerShell through list-args (shell=False) so a pipe inside
-        # `powershell -Command "... | Select-String ..."` isn't eaten by cmd.exe.
-        if platform.system() == "Windows":
-            body = _powershell_body(cmd)
-            if body is not None:
-                run_args, use_shell = ["powershell", "-NoProfile", "-NonInteractive",
-                                       "-Command", body], False
-            else:
-                run_args, use_shell = cmd, True  # dir/netstat/ping/&& → cmd.exe
-        else:
-            run_args, use_shell = cmd, True
+        # Executed through agent/tools/run_command.py — the same path the CLI uses — so this
+        # inherits its blocked-binary preflight, credential-path refusal, workspace confinement
+        # and output capping, and runs inside the isolation tier the operator selected. It used
+        # to be `subprocess.run(cmd, shell=True)` on the host with only the destructive-command
+        # regex in front of it, while `session.isolation_tier` reported "bubblewrap" to the API
+        # and was read by nothing.
+        if platform.system() != "Linux":
+            return {"ok": False, "error": (
+                f"run_command is unavailable on {platform.system() or 'this platform'}: the "
+                "isolation tiers are Linux-only (bubblewrap namespaces + seccomp), and the "
+                "command runner resolves binaries against a Unix PATH. Running commands "
+                "unsandboxed on the host is not offered as a fallback. The network tools "
+                "(http_request, port_discovery) work on every platform and cover web and "
+                "service testing; local command execution needs a Linux host or WSL2."
+            )}
+        requested_tier = getattr(session, "isolation_tier", "bubblewrap") or "bubblewrap"
         try:
-            result = subprocess.run(
-                run_args, shell=use_shell, capture_output=True, text=True, timeout=20,
-                cwd=str(DATA_DIR),
+            # Selecting "direct" IS the operator's explicit opt-out, so no fallback flag is
+            # needed: resolve_tier returns direct when direct was asked for, and raises when a
+            # stronger tier was asked for and cannot run. It never silently downgrades.
+            tier, tier_reason = _isolation.resolve_tier(requested_tier)
+        except _isolation.IsolationUnavailableError as e:
+            session.effective_isolation_tier = None
+            return {"ok": False, "error": (
+                f"{e} This command was NOT run. The operator can install bubblewrap, or select "
+                f"the 'direct' isolation tier for this session to accept running without "
+                f"kernel isolation."
+            )}
+        except ValueError as e:
+            return {"ok": False, "error": f"invalid isolation tier {requested_tier!r}: {e}"}
+
+        session.effective_isolation_tier = tier
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _run_command.run(
+                argv, workspace_root=DATA_DIR, isolation_tier=tier, dangerous_local=False,
             )
-            output = result.stdout + result.stderr
-            return {"ok": True, "exit_code": result.returncode, "output": output[:1500]}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "command timed out (20s) — likely a slow port scan; "
-                                          "prefer a single HTTP request against the target URL"}
+        except FileNotFoundError as e:
+            # The availability probe is static; a tier can still fail at exec time.
+            session.effective_isolation_tier = None
+            return {"ok": False, "error": (
+                f"the {tier!r} isolation tier failed at execution ({e}), so the command was NOT "
+                "run. This host reported the tier as available but could not use it."
+            )}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": f"execution failed: {e}"}
+
+        # Flatten to the shape this tool has always returned, and state the tier that actually
+        # ran rather than the one the session advertises.
+        out = ((result.get("stdout") or "") + (result.get("stderr") or ""))[:1500]
+        return {
+            "ok": bool(result.get("ok")) and not result.get("blocked"),
+            "exit_code": result.get("exit_code"),
+            "output": out,
+            "error": result.get("error"),
+            "blocked": result.get("blocked", False),
+            "timed_out": result.get("timed_out", False),
+            "killed_reason": result.get("killed_reason"),
+            "output_capped": result.get("output_capped", False),
+            "duration_ms": result.get("duration_ms"),
+            "isolation_tier": result.get("isolation_tier", tier),
+            "isolation_detail": tier_reason,
+            "sandbox_profile_digest": result.get("sandbox_profile_digest"),
+        }
 
     elif name == "read_file":
         path = args.get("path", "")
@@ -1153,7 +1254,7 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 # Tool schemas exposed to the model
 TOOL_SCHEMAS = [
     _port_discovery.SCHEMA,
-    {"type": "function", "function": {"name": "run_command", "description": "Execute a shell command in the sandboxed workspace.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The command to execute"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "run_command", "description": "Run ONE local program inside the isolation sandbox. There is no shell: pipes, redirects, &&, ; and $( ) are refused — run one program per call and combine results yourself, or pass a pipeline to python3 -c. The sandbox has NO network, so use http_request and port_discovery for anything involving a target. Linux only.", "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}, "description": "Program and arguments, e.g. [\"grep\",\"-rn\",\"password\",\"notes.txt\"]. Preferred — no quoting to get wrong."}, "command": {"type": "string", "description": "Alternative to argv: a single command line, split on whitespace honouring quotes. Shell constructs are refused."}}}}},
     {"type": "function", "function": {"name": "http_request", "description": "Send an HTTP request to an in-scope target and get back status, headers, and body. PREFER this over run_command for any web testing — send SQLi/XSS/auth payloads as structured fields (no shell quote-escaping). For Juice Shop login use POST http://HOST:3000/rest/user/login with a JSON body {\"email\":\"...\",\"password\":\"...\"}.", "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Full URL incl. path and query string"}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"], "default": "GET"}, "headers": {"type": "object", "description": "Request headers as key/value pairs"}, "body": {"description": "Request body — a JSON object (sent as application/json) or a raw string"}}, "required": ["url"]}}},
     {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to read"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Write content to a file in the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to write"}, "content": {"type": "string", "description": "File content"}}, "required": ["path", "content"]}}},
@@ -1946,6 +2047,15 @@ def get_session(session_id: str):
         "stage": s.stage,
         "guided": s.guided,
         "last_prompt_tokens": s.last_prompt_tokens,
+        # `isolation_tier` is what the session ASKED for; `effective_isolation_tier` is what the
+        # last run_command actually executed under (None if none has run, or if one was refused
+        # because the requested tier was unavailable). `isolation` describes what this host can
+        # really do. Reported separately and from the live probe so the UI cannot show a tier
+        # nothing enforced — which is exactly what `isolation_tier` alone did while no code read
+        # it at execution time.
+        "isolation_tier": s.isolation_tier,
+        "effective_isolation_tier": s.effective_isolation_tier,
+        "isolation": _isolation.describe_host(),
         "messages": [{"role": m["role"], "content": m["content"], "message_id": m.get("message_id"),
                       "reasoning_content": m.get("reasoning_content"),
                       "tool_calls": m.get("tool_calls"), "tool_name": m.get("tool_name")}
