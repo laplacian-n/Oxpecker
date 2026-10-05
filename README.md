@@ -1,10 +1,41 @@
 # Oxpecker
 
-**Domain-adapted LLM for automated penetration testing via SFT + Reinforcement Learning**
+**Domain-adapted LLM for automated penetration testing: LoRA SFT plus a broker-mediated agent runtime and a verifiable lab environment**
 
-Oxpecker is a self-hosted penetration testing agent built on [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B), trained through a two-stage pipeline: supervised fine-tuning (LoRA) on 123K+ curated cybersecurity examples, followed by reinforcement learning (GRPO) on isolated vulnerable environments.
+Oxpecker is a self-hosted penetration testing agent built on [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B). The trained model comes from supervised fine-tuning (LoRA) on 123K+ curated cybersecurity examples. Around it sits an agent runtime whose distinguishing feature is that safety is enforced *architecturally* — an execution broker, an allowlisted engagement scope, and kernel-level sandboxing — rather than by relying on the model to refuse.
 
-> **Status:** Active research — SFT training in progress. Model weights will be released under gated access on HuggingFace upon publication.
+A reinforcement-learning stage (GRPO on isolated vulnerable environments) is the **planned** next phase. It is designed but **not implemented** — see [Implementation Status](#implementation-status) below.
+
+> **Status:** Active research. SFT has produced an early checkpoint with a committed benchmark run; the RL stage has not started. Model weights will be released under gated access on HuggingFace upon publication.
+
+---
+
+## Implementation Status
+
+What is built and running, versus what is designed but not yet written. This table is the
+authoritative claim list for the repository; anything described elsewhere in this README
+inherits its status from here.
+
+| Component | Status | Where |
+|-----------|--------|-------|
+| Agent runtime (ReAct loop, sessions, budget, audit log) | **Implemented** | `app/agent/loop.py`, `app/agent/main.py` |
+| Execution broker (policy, scope check, taint, kill switch, approval queue) | **Implemented** | `app/agent/broker/` |
+| Sandboxed execution (bubblewrap tiers + seccomp profile) | **Implemented** | `app/agent/sandbox/` |
+| Evidence store (HMAC-chained), findings + SARIF export | **Implemented** | `app/agent/evidence/`, `app/agent/findings/` |
+| Hypothesis graph, notebook, engagement/RoE store | **Implemented** | `app/agent/hypothesis_graph/`, `app/agent/notebook/`, `app/agent/engagement/` |
+| Injection guard | **Implemented** | `app/agent/injection_guard.py` |
+| Knowledge RAG retrieval layer | **Implemented** (index not bundled — gated) | `app/agent/knowledge_rag/` |
+| Web UI + FastAPI server, Electron shell | **Implemented** | `app/agent/web/`, `app/electron/` |
+| Four-layer eval harness (deterministic / model-tool / reasoning / milestone) | **Implemented** | `app/agent/eval/` |
+| LoRA SFT training pipeline (DeepSpeed ZeRO-3) | **Implemented** | `training/train_sft.py` |
+| AutoPenBench adapter + one committed benchmark run | **Implemented** | `evaluation/` |
+| **GRPO reinforcement learning stage** | **Not implemented** — designed only | — |
+| **Dense/milestone reward function for RL** | **Not implemented** — milestone counters are logged by the eval adapter but not wired to any reward | — |
+| **Safety red-team evaluation** | **Not run** — thresholds in `docs/EVALUATION.md` are targets, not results | — |
+
+Roughly 28K lines of Python and 55 test modules live under `app/agent/`. That directory is the
+maintained agent runtime; see the note in [Repository Structure](#repository-structure) about the
+top-level `agent/` snapshot.
 
 ---
 
@@ -39,15 +70,28 @@ This software is provided for research and education **as-is, without warranty**
 
 Evaluated on [AutoPenBench](https://github.com/lucagioacchini/auto-pen-bench) (33 tasks across web, network, and privilege escalation categories):
 
-| Model | Tasks Solved | Score |
-|-------|-------------|-------|
-| Qwen3-32B (base) | 0 / 33 | 0.0% |
-| **Oxpecker (early SFT)** | **8 / 33** | **24.2%** |
-| xOffense (GPT-4o, SOTA) | 24 / 33 | 72.7% |
+| Model | Tasks Solved | Score | Run artifact |
+|-------|-------------|-------|--------------|
+| Qwen3-32B (base) | 0 / 33 | 0.0% | not committed |
+| **Oxpecker (early SFT)** | **8 / 33** | **24.2%** | [`run_20260912_230749.json`](evaluation/results/run_20260912_230749.json) |
+| xOffense (GPT-4o, SOTA) | 24 / 33 | 72.7% | reported by its authors |
 
-The early fine-tuned model was trained on an older, smaller dataset (v2). Current training uses v4 data (123K examples, 612 MB) with improved coverage and quality. Loss curves show continued decrease with no plateau, indicating significant room for improvement.
+**Read these numbers with the following caveats.**
 
-Results are from a single run. The 24.2% score should be interpreted as a proof-of-concept demonstrating that domain-specific fine-tuning produces measurable capability gain from a zero baseline, not as a stable benchmark claim.
+- **5 of the 33 tasks errored** before producing a verdict (harness/environment failures, not
+  model failures). The committed run therefore contains 28 completed attempts, 8 of which
+  captured the flag. Scoring them as 24.2% counts the 5 errors as failures, which is the
+  conservative reading; on completed tasks alone it is 8/28. The raw per-task records,
+  including the errors, are in the run artifact.
+- **Only the Oxpecker row has a committed artifact.** The base-model 0/33 figure is from an
+  earlier run whose result file is not in this repository, and the xOffense figure is taken
+  from its authors' reporting, not reproduced here. The three rows are therefore not a
+  controlled head-to-head.
+- **Single run, no seeds, no confidence interval.** Treat 24.2% as a proof of concept that
+  domain-specific fine-tuning moves the model off a zero baseline — not as a stable benchmark
+  claim, and not as a ranking against xOffense.
+- The checkpoint evaluated here was trained on an older, smaller dataset (v2). Current training
+  uses v4 data (123K examples, 612 MB). Loss curves show continued decrease with no plateau.
 
 ---
 
@@ -59,9 +103,16 @@ Results are from a single run. The 24.2% score should be interpreted as a proof-
 | PentestAgent | GPT-4 | Multi-agent prompt | — | None | Moderate |
 | VulnBot | GPT-4 | Multi-agent collab | — | None | Moderate |
 | xOffense | Qwen3-32B | LoRA SFT | Undisclosed | None | 72.72% |
-| **Oxpecker** | **Qwen3-32B** | **LoRA SFT + RL** | **123K rows** | **Broker + Sandbox** | **TBD** |
+| **Oxpecker** | **Qwen3-32B** | **LoRA SFT** (RL planned) | **123K rows** | **Broker + Sandbox** | **24.2%** (early SFT, single run) |
 
-See [docs/EVALUATION.md](docs/EVALUATION.md) for detailed comparison and evaluation plan.
+Scores for the first three systems are as reported by their respective authors and were not
+reproduced here. The Safety column is the one axis on which Oxpecker's contribution is
+load-bearing: the broker, scope enforcement, and sandbox are implemented and tested, whereas
+the comparison systems document no architectural enforcement layer.
+
+See [docs/EVALUATION.md](docs/EVALUATION.md) for the detailed comparison and the evaluation
+plan. Note that the safety thresholds in that document are **targets for work not yet run**,
+not measured results.
 
 ---
 
@@ -75,13 +126,15 @@ See [docs/EVALUATION.md](docs/EVALUATION.md) for detailed comparison and evaluat
 │   Loop      │   Pipeline    │  Framework    │
 ├─────────────┼───────────────┼───────────────┤
 │ • ReAct     │ • LoRA SFT    │ • AutoPenBench│
-│ • Scope     │   (Qwen3-32B) │ • AI-Pentest- │
-│   enforce   │ • GRPO RL     │   Benchmark   │
-│ • Budget    │ • DeepSpeed   │ • Safety eval │
-│   control   │   ZeRO-3     │               │
-│ • Injection │               │               │
-│   guard     │               │               │
+│ • Broker /  │   (Qwen3-32B) │ • 4-layer     │
+│   scope     │ • DeepSpeed   │   harness     │
+│ • Sandbox   │   ZeRO-3      │               │
+│ • Budget    │               │               │
+│ • Injection ├───────────────┼───────────────┤
+│   guard     │ ? GRPO RL     │ ? Safety eval │
+│             │   (planned)   │   (planned)   │
 └─────────────┴───────────────┴───────────────┘
+   •  implemented      ?  planned, not written
 ```
 
 ### Agent
@@ -102,27 +155,46 @@ The agent uses a ReAct-style loop to plan and execute penetration testing steps:
 - Data: 123,416 curated examples across reconnaissance, exploitation, privilege escalation, and reporting
 - Hardware: 1× H100 80GB with DeepSpeed ZeRO-3
 
-**Phase 2 — Reinforcement Learning (GRPO)**
+**Phase 2 — Reinforcement Learning (GRPO) — PLANNED, NOT IMPLEMENTED**
+
+No RL code exists in this repository yet. The design below is a specification for future work,
+recorded here so the intended reward structure is reviewable; do not read it as a description of
+something that has been trained or measured.
+
 - Algorithm: Group Relative Policy Optimization
-- Training environments: VulnHub VMs, OWASP Juice Shop, DVWA, custom Docker scenarios
-- Reward: milestone-based (+0.2 host discovery, +0.3 initial access, +0.5 privilege escalation)
-- Environments are completely disjoint from evaluation benchmarks
+- Training environments: VulnHub VMs, OWASP Juice Shop, DVWA, custom Docker scenarios — to be
+  kept disjoint from the evaluation benchmarks
+- Intended reward: milestone-based (+0.2 host discovery, +0.3 initial access, +0.5 privilege
+  escalation). The milestone counters the AutoPenBench adapter already logs
+  (`total_cmd_milestones`, `total_stg_milestones`) are the intended starting point for turning
+  this into a dense signal, but they are currently recorded for analysis only and are not
+  wired to any reward function.
+- Open prerequisite: a mechanically-verified milestone checker. Rewarding on the model's own
+  account of what it achieved would be reward-hackable, so this stage is blocked on a verifier
+  that confirms state changes (actual uid, actual file read, actual service reached) out of
+  band rather than trusting the transcript.
 
 ### Safety Architecture
 
 Safety is enforced architecturally, not by model-layer refusal:
 
-1. **Scope/RoE enforcement** — hard boundary on allowed targets and operations
-2. **Sandboxed execution** — agent runs in isolated environments with no access to production systems
-3. **Gated weight release** — model weights require institutional affiliation for access
-4. **Injection detection** — monitors target output for prompt injection attempts
-5. **Red-team evaluation** — quantitative safety testing (≥99% out-of-scope blocking, ≥90% injection detection)
+1. **Scope/RoE enforcement** — hard boundary on allowed targets and operations *(implemented,
+   with a committed policy-bypass test suite)*
+2. **Sandboxed execution** — bubblewrap isolation tier with a seccomp profile; no network device
+   exists inside the sandbox *(implemented, with a committed isolation test suite)*
+3. **Injection detection** — monitors target output for prompt injection attempts, with
+   quarantine *(implemented)*
+4. **Gated weight release** — model weights require institutional affiliation for access
+   *(policy, enforced at release time)*
+5. **Red-team evaluation** — quantitative safety testing. **Not yet run.** The figures in
+   `docs/EVALUATION.md` (≥99% out-of-scope blocking, ≥90% injection detection) are the
+   acceptance targets this evaluation is being designed against, **not measured results.**
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full details on the Broker, sandbox, prompt architecture, and pipeline orchestrator.
 
 ### RAG Knowledge Base
 
-The agent is augmented with a 547K-chunk retrieval knowledge base covering vulnerability intelligence, exploit techniques, and pentesting guides:
+The agent is augmented with a 547K-chunk retrieval knowledge base covering vulnerability intelligence, exploit techniques, and pentesting guides. The retrieval layer (`app/agent/knowledge_rag/`) is implemented and tested; **the built index itself is not in this repository** — it is gated alongside the model weights, and the builder scripts (`build_index.py`, `build_index_gpu.py`) are provided so the index can be reconstructed from its sources.
 
 | Source | Chunks |
 |--------|--------|
@@ -143,9 +215,17 @@ See [docs/TRAINING_DATA.md](docs/TRAINING_DATA.md) for dataset breakdown, curric
 
 ## Repository Structure
 
+> **Which agent directory is the real one.** The maintained agent runtime is
+> **[`app/agent/`](app/agent/)** (~28K lines, 55 test modules). The top-level `agent/` directory
+> is an earlier, partial snapshot of it: it is kept for reference but **does not import on its
+> own**, because its modules reference packages (`agent.evidence`, `agent.engagement`,
+> `agent.loop_control`, `agent.prompts`, `agent.tools`) that exist only under `app/agent/`.
+> Run and read `app/agent/`; the tree below marks the snapshot accordingly.
+
 ```
 Oxpecker/
-├── agent/                  # Agent runtime
+├── agent/                  # ⚠ partial snapshot — does NOT import standalone;
+│   │                       #   use app/agent/ instead
 │   ├── main.py            # Entry point
 │   ├── loop.py            # ReAct agent loop
 │   ├── config.py          # Configuration
@@ -172,10 +252,18 @@ Oxpecker/
 │   ├── ARCHITECTURE.md    # System architecture details
 │   ├── TRAINING_DATA.md   # Dataset breakdown and curriculum
 │   └── EVALUATION.md      # Benchmarks and evaluation plan
-└── app/                    # Runnable self-hosted desktop app (Electron + FastAPI + local 4B)
-    ├── agent/web/         # dev_server.py (agent backend) + single-file web UI
-    ├── electron/          # desktop shell + auto-update config
-    └── ...                # MCP servers, build assets, docs
+└── app/                    # ★ Maintained runtime + desktop app (Electron + FastAPI + local 4B)
+    ├── agent/             #   the real agent runtime (~28K LOC, 55 test modules)
+    │   ├── broker/        #   execution broker: policy, scope, taint, kill switch
+    │   ├── sandbox/       #   bubblewrap tiers + seccomp profile
+    │   ├── evidence/      #   HMAC-chained evidence store
+    │   ├── findings/      #   findings model + SARIF export
+    │   ├── hypothesis_graph/
+    │   ├── knowledge_rag/ #   retrieval layer (index not bundled — gated)
+    │   ├── eval/          #   four-layer evaluation harness
+    │   └── web/           #   dev_server.py (agent backend) + single-file web UI
+    ├── electron/          #   desktop shell + auto-update config
+    └── ...                #   MCP servers, build assets, docs
 ```
 
 ---
@@ -184,31 +272,57 @@ Oxpecker/
 
 ### Training
 
+LoRA SFT on Qwen3-32B. `--train_data` and `--eval_data` are required; the base model is
+downloaded from Hugging Face unless `--model_path` points at a local copy. Available presets are
+`standard`, `aggressive` (default), `max`, and `stage2`.
+
 ```bash
-# LoRA SFT on Qwen3-32B (requires 1× H100 80GB)
+# Smoke test against the bundled 1,000-example sample
 python training/train_sft.py \
-  --model_name Qwen/Qwen3-32B \
-  --dataset_path datasets/sample_train.jsonl \
+  --preset aggressive \
+  --train_data datasets/sample_train.jsonl \
+  --eval_data datasets/sample_eval.jsonl \
   --output_dir output/sft \
-  --preset qwen3-32b-lora
+  --max_seq_len 4096
 ```
+
+The bundled samples exist so the pipeline can be exercised end to end; they are not the 123K
+training set, which is gated alongside the weights.
 
 ### Evaluation
 
+Requires a working [auto-pen-bench](https://github.com/lucagioacchini/auto-pen-bench) setup and
+a served model.
+
 ```bash
-# Run AutoPenBench evaluation (requires auto-pen-bench setup)
-# See: https://github.com/lucagioacchini/auto-pen-bench
-python evaluation/localai_agent.py
+# A single task
+python evaluation/localai_agent.py --level in-vitro --category access_control --vm 0
+
+# The full in-vitro suite (this is what the committed run artifact came from)
+python evaluation/localai_agent.py --level in-vitro --all --max-steps 40
 ```
 
-### Agent (requires trained model)
+### Agent
+
+Run the maintained runtime under `app/`. Targets come from the engagement's Rules of Engagement
+(`engagement/roe.json`), not from a command-line flag — this is deliberate, so scope cannot be
+widened ad hoc per invocation. Bootstrap an engagement first, then start a session:
 
 ```bash
+cd app
+
+# Inspect / create the engagement whose RoE defines the allowed scope
+python -m agent.engagement.cli --help
+
+# Start a session: security tools on, kernel-isolated execution tier
 python -m agent.main \
-  --target 192.168.1.100 \
-  --roe safety/roe.json \
-  --max-steps 40
+  --engagement-id lab-default \
+  --security-tools \
+  --isolation-tier bubblewrap
 ```
+
+Run `python -m agent.main --help` for the full flag set (profiles, MCP tool mode, shared memory
+service, audit verification, kill switch).
 
 ---
 
@@ -226,7 +340,7 @@ python -m agent.main \
 
 ```bibtex
 @misc{oxpecker2026,
-  title={Oxpecker: Domain-Adapted LLM for Automated Penetration Testing via SFT and Reinforcement Learning},
+  title={Oxpecker: A Broker-Mediated Agent Runtime and Domain-Adapted LLM for Automated Penetration Testing},
   author={laplacian-n},
   year={2026},
   howpublished={\url{https://github.com/laplacian-n/Oxpecker}}
