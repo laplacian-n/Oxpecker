@@ -52,6 +52,7 @@ from ..engagement import intake as _intake
 from ..sandbox import availability as _isolation
 from ..security_tools import port_discovery as _port_discovery
 from ..tools import run_command as _run_command
+from . import debug_trace as _debug
 from . import scope as _scope
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -1122,6 +1123,13 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         if not query:
             return {"ok": False, "error": "empty query"}
         results = _rag.search(query, top_k=args.get("top_k", 5))
+        # Chunk identity and score per hit. Without them, "why did it believe that" cannot be
+        # traced back to a bad retrieval — the model's own account of what it read is not
+        # evidence of what was retrieved.
+        _debug.for_session(session.session_id).retrieval(
+            turn_index=None, query=query,
+            results=results if isinstance(results, list) else (results or {}).get("results", []),
+        )
         return {"ok": True, "results": results, "count": len(results)}
 
     elif name == "record_hypothesis":
@@ -1312,13 +1320,14 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
     raw_text = _jsonify_result(result)
     wrapped, scan = _injection_guard.wrap_and_flag(raw_text)
 
+    audit_entry_id = None
     audit_args = dict(args)
     if canonical != name:
         # Keep the spelling the model used: 27 aliases reach these tools, and "the model asked
         # for nmap" is a different fact from "port_discovery ran".
         audit_args["_requested_tool_name"] = name
     try:
-        _audit_for(session.session_id).record(
+        entry = _audit_for(session.session_id).record(
             turn_index=turn_index,
             tool_name=canonical,
             action_rationale=(action_rationale or "")[:300],
@@ -1334,11 +1343,20 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
             injection_flagged=scan.matched,
             isolation_tier=(result.get("isolation_tier") if isinstance(result, dict) else None),
         )
+        audit_entry_id = entry.get("entry_id")
     except Exception as e:
         # Never fail the turn on an audit error, but never let one pass unnoticed either: a
         # silently missing entry is indistinguishable from an action that never happened.
         log.error("AUDIT WRITE FAILED for %s/%s: %s", session.session_id, canonical, e)
         session.push({"type": "audit_error", "tool": canonical, "error": str(e)})
+
+    # The audit entry is redacted and capped at 2000 characters; this keeps the whole result,
+    # carrying the audit entry_id so the two records line up.
+    _debug.for_session(session.session_id).tool(
+        turn_index=turn_index, tool_name=canonical, requested_name=name,
+        arguments=args, result=result, audit_entry_id=audit_entry_id,
+        latency_ms=latency_ms, injection_verdict=scan.verdict,
+    )
 
     if scan.matched:
         session.push({"type": "injection_flagged", "tool": canonical,
@@ -1437,6 +1455,19 @@ def _maybe_compact(session: Session):
         log.warning("compact failed: %s", e)
         return
     if summary:
+        # Record what is about to be removed BEFORE removing it. This logged only a count,
+        # so "why did the agent forget what it found at step 5" could not be answered — the
+        # folded messages are gone from context and the summary that replaced them was
+        # overwritten by the next compaction.
+        _debug.for_session(session.session_id).compaction(
+            scope="session",
+            folded_messages=[{**m, "_index": session.summary_upto + i}
+                             for i, m in enumerate(to_fold)],
+            summary=summary,
+            summary_upto=fold_end,
+            kept=KEEP_RECENT,
+            prompt_tokens=session.last_prompt_tokens or None,
+        )
         session.summary = summary
         session.summary_upto = fold_end
         session.push({"type": "compacted", "folded": len(to_fold)})
@@ -1478,6 +1509,13 @@ def _compact_working_messages(messages: list[dict], session: Session) -> list[di
         return messages
     if not summ:
         return messages
+    _debug.for_session(session.session_id).compaction(
+        scope="in_turn",
+        folded_messages=[{**m, "_index": i + 1} for i, m in enumerate(head)],
+        summary=summ,
+        kept=INTURN_KEEP_TAIL,
+        prompt_tokens=session.last_prompt_tokens or None,
+    )
     session.push({"type": "compacted", "folded": len(head), "scope": "in-turn"})
     log.info("mid-turn compacted %d working msgs for %s", len(head), session.session_id)
     return [system, {"role": "user",
