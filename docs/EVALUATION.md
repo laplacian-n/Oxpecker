@@ -1,8 +1,9 @@
 # Evaluation Plan
 
 > **This document is a plan, not a results report.** With one exception, nothing below has been
-> run. The only evaluation actually executed to date is a single AutoPenBench in-vitro run of an
-> early SFT checkpoint — 8 of 33 tasks solved, 5 tasks errored before producing a verdict —
+> run. The only evaluation actually executed to date is a single AutoPenBench in-vitro run of a
+> **partial** SFT checkpoint (roughly half a day of training on an incomplete corpus, stopped
+> early) — 8 of 33 tasks solved, 5 tasks errored before producing a verdict —
 > committed at [`evaluation/results/run_20260912_230749.json`](../evaluation/results/run_20260912_230749.json).
 > Every table of metrics, threshold, seed count, and ablation in this document describes work
 > that is **designed but not yet performed**. Numbers in "Success Criteria" and "Target" columns

@@ -6,7 +6,10 @@ Oxpecker is a self-hosted penetration testing agent built on [Qwen3-32B](https:/
 
 A reinforcement-learning stage (GRPO on isolated vulnerable environments) is the **planned** next phase. It is designed but **not implemented** — see [Implementation Status](#implementation-status) below.
 
-> **Status:** Active research. SFT has produced an early checkpoint with a committed benchmark run; the RL stage has not started. Model weights will be released under gated access on HuggingFace upon publication.
+> **Status:** Active research, incomplete. The 32B pipeline has one partial SFT checkpoint — about
+> half a day of training on an incomplete corpus, stopped early — which is what the benchmark run
+> below measures; the full-corpus run is pending compute, and the RL stage has not started. Model
+> weights will be released under gated access on HuggingFace upon publication.
 
 ---
 
@@ -75,7 +78,7 @@ Evaluated on [AutoPenBench](https://github.com/lucagioacchini/auto-pen-bench) (3
 | Model | Tasks Solved | Score | Run artifact |
 |-------|-------------|-------|--------------|
 | Qwen3-32B (base) | 0 / 33 | 0.0% | not committed |
-| **Oxpecker (early SFT)** | **8 / 33** | **24.2%** | [`run_20260912_230749.json`](evaluation/results/run_20260912_230749.json) |
+| **Oxpecker (partial SFT, ~0.5 day, incomplete corpus)** | **8 / 33** | **24.2%** | [`run_20260912_230749.json`](evaluation/results/run_20260912_230749.json) |
 | xOffense (GPT-4o, SOTA) | 24 / 33 | 72.7% | reported by its authors |
 
 **Read these numbers with the following caveats.**
@@ -92,8 +95,14 @@ Evaluated on [AutoPenBench](https://github.com/lucagioacchini/auto-pen-bench) (3
 - **Single run, no seeds, no confidence interval.** Treat 24.2% as a proof of concept that
   domain-specific fine-tuning moves the model off a zero baseline — not as a stable benchmark
   claim, and not as a ranking against xOffense.
-- The checkpoint evaluated here was trained on an older, smaller dataset (v2). Current training
-  uses v4 data (123K examples, 612 MB). Loss curves show continued decrease with no plateau.
+- **The evaluated checkpoint is a partial run, not a finished model.** It is roughly half a day
+  of LoRA SFT on the incomplete v2 corpus, stopped early rather than trained to convergence —
+  loss was still decreasing with no plateau when it was halted. The headline reading of this
+  table is therefore not "the method reaches 24.2%" but "half a day of SFT on incomplete data
+  moved a 0% baseline to 24.2%, with the run never taken to completion."
+- **No 32B training is in progress at the time of writing.** The full v4 corpus (123K examples,
+  612 MB) has been assembled but has not been trained on; that run is pending compute. Any
+  statement about what v4 does to performance would be a prediction, not a result.
 
 ---
 
@@ -105,7 +114,7 @@ Evaluated on [AutoPenBench](https://github.com/lucagioacchini/auto-pen-bench) (3
 | PentestAgent | GPT-4 | Multi-agent prompt | — | None | Moderate |
 | VulnBot | GPT-4 | Multi-agent collab | — | None | Moderate |
 | xOffense | Qwen3-32B | LoRA SFT | Undisclosed | None | 72.72% |
-| **Oxpecker** | **Qwen3-32B** | **LoRA SFT** (RL planned) | **123K rows** | **Broker + Sandbox** | **24.2%** (early SFT, single run) |
+| **Oxpecker** | **Qwen3-32B** | **LoRA SFT** (RL planned) | **~123K rows** | **Broker + Sandbox** | **24.2%** (partial SFT, single run) |
 
 Scores for the first three systems are as reported by their respective authors and were not
 reproduced here. The Safety column is the one axis on which Oxpecker's contribution is
