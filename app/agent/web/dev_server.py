@@ -47,6 +47,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from .. import audit_log as _audit_log
+from ..broker import broker as _broker_mod
+from ..broker.contracts import ActionRequest as _ActionRequest
 from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..sandbox import availability as _isolation
@@ -700,7 +702,12 @@ class Finding:
 _sessions: dict[str, Session] = {}
 _engagements: dict[str, Engagement] = {"lab-default": Engagement(
     engagement_id="lab-default", description="Local lab environment",
-    allow_targets=["127.0.0.1", "localhost"], allowed_action_classes=["passive_recon", "active_recon"],
+    allow_targets=["127.0.0.1", "localhost"],
+    # These are enforced now, and must be names the broker knows (broker.TOOL_ACTION_CLASS).
+    # The previous value included "active_recon", which is not one — it was free text that
+    # nothing validated and nothing checked, so it neither permitted nor denied anything.
+    allowed_action_classes=["passive_recon", "active_web_request", "active_scan_light",
+                            "knowledge_search"],
     authorized_by="operator",
 )}
 _approvals: dict[str, ApprovalRequest] = {}
@@ -1260,6 +1267,125 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
     return {"ok": False, "error": f"unknown tool: {name}"}
 
 
+# Tools that touch anything outside this process go through the broker. run_command does not:
+# local execution is gated by the sandbox and its preflight (see the isolation work), and
+# run_command is deliberately absent from broker.TOOL_ACTION_CLASS. read/write_file and the
+# record_* tools stay local and in-memory.
+_BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search"}
+
+
+class _AlreadyAudited(Exception):
+    """Control-flow marker: the broker already wrote this action's audit entry."""
+
+    def __init__(self, digest):
+        super().__init__(digest)
+        self.digest = digest
+
+_brokers: dict[str, _broker_mod.Broker] = {}
+
+
+def _deny_approval(prompt: str) -> bool:
+    """Approval is refused rather than awaited.
+
+    Broker's default confirm_fn reads stdin, which would hang a FastAPI worker, and
+    use_approval_queue=True would block it waiting for an out-of-band resolution that this
+    runtime has no endpoint to provide yet. Denying is the fail-closed answer and cannot hang
+    the server; the denial reaches the operator with the broker's own reason attached.
+
+    Nothing among the three mediated tools requires approval today (REQUIRES_APPROVAL is empty
+    and none is the insecure-TLS case), so this is a guard against a future change rather than a
+    live path. Wiring real approval means a web endpoint plus session taint marking, which
+    belong together — marking taint without somewhere to approve would leave the agent limited
+    to passive recon for the 5-minute taint window with no operator recourse.
+    """
+    log.warning("broker requested approval and this runtime cannot ask: denying — %s", prompt)
+    return False
+
+
+def _broker_for(engagement_id: str) -> _broker_mod.Broker:
+    broker = _brokers.get(engagement_id)
+    if broker is None:
+        broker = _brokers[engagement_id] = _broker_mod.Broker(
+            # Read through on every dispatch, so an engagement edited mid-session takes effect
+            # on the next call rather than being captured once at construction.
+            policy_loader=lambda eid=engagement_id: _scope.policy_from_engagement(
+                _engagements.get(eid)
+            ),
+            confirm_fn=_deny_approval,
+            use_approval_queue=False,
+        )
+    return broker
+
+
+def _dispatch_via_broker(canonical: str, args: dict, session: Session, *, turn_index: int,
+                         action_rationale: str, audit_args: dict) -> tuple[dict, dict]:
+    """Run a tool through the broker. Returns (tool-result dict, broker metadata).
+
+    The broker adds, on top of the scope check the tool already does: the RoE action-class
+    gate, the kill switch, the per-action-class rate limit, taint escalation, the encrypted
+    evidence store holding the full untruncated output, an audit entry whose content digest
+    cross-references that evidence, and idempotent replay.
+    """
+    request = _ActionRequest(
+        tool=canonical,
+        # audit_args carries the alias annotation; the executor strips it before the tool sees
+        # it, so the trail keeps "the model asked for nmap" without the tool receiving an
+        # argument it never declared.
+        arguments=audit_args,
+        session_id=session.session_id,
+        device_id="web-ui",
+        engagement_id=session.engagement_id,
+        turn_index=turn_index,
+        action_rationale=action_rationale[:300],
+    )
+    def execute(policy, arguments):
+        tool_args = {k: v for k, v in arguments.items() if not k.startswith("_requested_")}
+        out = _run_tool(canonical, tool_args, session)
+        # port_discovery raises PermissionError on an out-of-scope target, which the broker
+        # records as a denial. dev_server's http_request returns a refusal dict instead, and the
+        # broker would then record status "succeeded" with policy_rule "n/a" for a request that
+        # was refused — the audit trail would say the call went through. Translate it so a
+        # refusal is recorded as one however the tool chose to report it.
+        if isinstance(out, dict) and out.get("ok") is False and out.get("scope_rule"):
+            raise PermissionError(out.get("error") or out["scope_rule"])
+        return out
+
+    response = _broker_for(session.engagement_id).dispatch(request, execute)
+    meta = {
+        "broker_status": response.status,
+        "policy_rule": response.policy_rule,
+        "audit_record_digest": response.audit_record_digest,
+        "audit_entry_id": response.audit_entry_id,
+        "evidence_digest": response.evidence_digest,
+        "duration_ms": response.duration_ms,
+    }
+    if response.status == "succeeded":
+        # The broker strips _policy_rule and _exit_metadata off the raw result into the response,
+        # so put the rule back where the tool's own callers expect it.
+        out = dict(response.output) if isinstance(response.output, dict) else {
+            "ok": True, "output": response.output}
+        out.setdefault("_policy_rule", response.policy_rule)
+        return out, meta
+
+    # Not every non-success is a policy block, and conflating them would tell the model the
+    # wrong thing: "denied"/"needs_approval" mean the call never happened, while
+    # "timed_out"/"failed" mean it was attempted and did not complete. A model told its request
+    # was blocked when it actually timed out will go looking for permission instead of retrying.
+    if response.status in ("denied", "needs_approval", "budget_exhausted", "cancelled"):
+        return {
+            "ok": False,
+            "error": f"blocked by the execution broker ({response.policy_rule}): "
+                     f"{response.detail or response.status}. This call was NOT made.",
+            "scope_rule": response.policy_rule,
+        }, meta
+    return {
+        "ok": False,
+        "error": f"the call was attempted and did not complete ({response.status}): "
+                 f"{response.detail or 'no detail'}",
+        "broker_status": response.status,
+    }, meta
+
+
 _audit_logs: dict[str, _audit_log.AuditLog] = {}
 
 
@@ -1302,9 +1428,23 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
     unused on this path.
     """
     canonical = _TOOL_NAME_ALIASES.get(name, name)
+    audit_args = dict(args)
+    if canonical != name:
+        # Keep the spelling the model used: 27 aliases reach these tools, and "the model asked
+        # for nmap" is a different fact from "port_discovery ran".
+        audit_args["_requested_tool_name"] = name
     started = time.monotonic()
+    broker_meta: dict = {}
     try:
-        result = _run_tool(name, args, session)
+        if canonical in _BROKER_MEDIATED:
+            # The broker writes its own audit entry and evidence record in _finalize, so the
+            # local write below is skipped for these — one action, one entry.
+            result, broker_meta = _dispatch_via_broker(
+                canonical, args, session, turn_index=turn_index,
+                action_rationale=action_rationale or "", audit_args=audit_args,
+            )
+        else:
+            result = _run_tool(name, args, session)
     except Exception as e:  # a tool raising must still be recorded, not swallowed
         log.exception("tool %r raised", canonical)
         result = {"ok": False, "error": f"tool raised {type(e).__name__}: {e}"}
@@ -1314,12 +1454,16 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
     wrapped, scan = _injection_guard.wrap_and_flag(raw_text)
 
     audit_entry_id = None
-    audit_args = dict(args)
-    if canonical != name:
-        # Keep the spelling the model used: 27 aliases reach these tools, and "the model asked
-        # for nmap" is a different fact from "port_discovery ran".
-        audit_args["_requested_tool_name"] = name
     try:
+        if broker_meta:
+            # Already recorded by Broker._finalize, with the evidence digest cross-referenced
+            # against the audit entry's content digest. Writing a second entry here would make
+            # the trail say an action happened twice.
+            #
+            # Correlate on the entry id, not the chain hash. audit_record_digest is the chain
+            # link; entry_id is what the entry is keyed by, and so what another record has to
+            # point at. Storing the hash here left the trace reader joining nothing.
+            raise _AlreadyAudited(broker_meta.get("audit_entry_id"))
         entry = _audit_for(session.session_id).record(
             turn_index=turn_index,
             tool_name=canonical,
@@ -1337,6 +1481,8 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
             isolation_tier=(result.get("isolation_tier") if isinstance(result, dict) else None),
         )
         audit_entry_id = entry.get("entry_id")
+    except _AlreadyAudited as already:
+        audit_entry_id = already.digest
     except Exception as e:
         # Never fail the turn on an audit error, but never let one pass unnoticed either: a
         # silently missing entry is indistinguishable from an action that never happened.
@@ -1363,6 +1509,10 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
         arguments=args, result=result, audit_entry_id=audit_entry_id,
         latency_ms=latency_ms, injection_verdict=scan.verdict,
     )
+    if broker_meta:
+        _debug.for_session(session.session_id).record(
+            "broker", turn_index=turn_index, tool_name=canonical, **broker_meta,
+        )
 
     if scan.matched:
         session.push({"type": "injection_flagged", "tool": canonical,
@@ -2448,6 +2598,14 @@ def create_engagement(req: CreateEngagementRequest):
         errors.append("authorized_by is required — record who authorised this engagement")
     if req.valid_hours <= 0:
         errors.append("valid_hours must be greater than zero")
+    known = set(_broker_mod.TOOL_ACTION_CLASS.values()) | {"http_recon_insecure"}
+    for cls in req.allowed_action_classes:
+        if cls not in known:
+            errors.append(
+                f"allowed_action_classes entry {cls!r} is not a known action class "
+                f"(choose from {sorted(known)}) — an unknown name permits nothing, and before "
+                "the RoE check was enforced it silently did nothing at all"
+            )
     if errors:
         raise HTTPException(400, "; ".join(errors))
 

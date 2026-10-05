@@ -83,6 +83,10 @@ HTTP_RECON_MAX_REDIRECTS = 5
 HTTP_RECON_MAX_BODY_BYTES = 20_000
 ACTION_CLASS_COOLDOWN_S = {
     "passive_recon": 1.0,
+    # http_request sends payloads, so a tighter cooldown than active_scan_light would let a
+    # model hammer a login endpoint; looser than this and interactive web testing stops being
+    # usable. Two seconds is the same budget a connect-scan gets.
+    "active_web_request": 2.0,
     "active_scan_light": 2.0,
     "knowledge_search": 2.0,
     "knowledge_fetch": 2.0,

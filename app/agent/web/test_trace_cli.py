@@ -90,7 +90,13 @@ def main() -> int:
         text = buf.getvalue()
         check("the alias the model used is shown", "model asked for 'nmap'" in text)
         check("the tool that actually ran is shown", "port_discovery" in text)
-        check("a refusal is shown as denied", "denied:not_in_scope" in text)
+        # Which layer names the rule is an implementation detail and moved once already: the
+        # tool's own check said "not_in_scope", and now the broker classifies the same refusal
+        # as "scope_check". The property worth holding is that a refusal reads as denied with a
+        # scope reason, not the exact spelling.
+        check("a refusal is shown as denied",
+              "denied:" in text and ("scope" in text or "not_in_scope" in text),
+              [l for l in text.splitlines() if "denied" in l][:2])
         check("the isolation tier is shown for a local command", "tier=direct" in text)
         check("the compaction summary is shown", "port 3000 open" in text)
         check("the operator is warned the trace is unredacted", "unredacted" in text.lower())

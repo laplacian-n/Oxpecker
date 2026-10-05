@@ -39,6 +39,11 @@ RUNTIME_IDENTITY = socket.gethostname()
 # (agent/broker/taint.py), so both correctly escalate to approval once a session is tainted.
 TOOL_ACTION_CLASS = {
     "http_recon": "passive_recon",
+    # Its own class rather than folded into passive_recon: http_recon issues GET only and is
+    # read-only by construction, while http_request carries arbitrary methods and bodies — it is
+    # how a payload reaches a target. An RoE that permits passive reconnaissance has not thereby
+    # permitted sending one.
+    "http_request": "active_web_request",
     "port_discovery": "active_scan_light",
     "knowledge_search": "knowledge_search",
     "knowledge_fetch": "knowledge_fetch",
@@ -74,8 +79,16 @@ class Broker:
         idempotency_cache_path: Path = config.IDEMPOTENCY_CACHE_PATH,
         approval_queue: ApprovalQueue | None = None,
         use_approval_queue: bool = False,
+        policy_loader: Callable[[], policy_mod.Policy] | None = None,
     ):
         self.engagement_dir = engagement_dir
+        # Where the policy comes from. The default reads roe.json/scope.txt/deny.txt from
+        # `engagement_dir`, which is how every CLI caller works. A caller that holds its
+        # engagement somewhere other than on disk — the web runtime keeps them in memory —
+        # supplies its own loader instead of being forced to materialise files it does not
+        # otherwise need. It is only a source: every gate below is applied identically either
+        # way, and a loader that raises PolicyError still fails closed.
+        self._policy_loader = policy_loader or (lambda: policy_mod.load_policy(self.engagement_dir))
         self.confirm_fn = confirm_fn or (lambda prompt: input(prompt).strip().lower() == "y")
         self.kill_switch = KillSwitch()
         self._last_action_at: dict[tuple[str, str], float] = {}  # (session_id, class) -> ts
@@ -125,9 +138,15 @@ class Broker:
         response.evidence_digest = evidence_digest
 
         entry = self._audit_for(request.session_id).record(
-            turn_index=0,
+            turn_index=request.turn_index,
             tool_name=request.tool,
-            action_rationale=f"broker dispatch: {response.status} ({response.policy_rule})",
+            # The caller's reason when it has one — the model's own account of why it acted is
+            # the part a reader actually needs, and the broker's verdict is already recorded in
+            # scope_decision below, so nothing is lost by preferring it.
+            action_rationale=(
+                request.action_rationale
+                or f"broker dispatch: {response.status} ({response.policy_rule})"
+            ),
             arguments=request.arguments,
             raw_output=raw_output_str,  # audit_log.py itself caps the stored excerpt to 2000
             sanitized_output=response.detail[:2000],
@@ -140,6 +159,7 @@ class Broker:
             injection_flagged=False,
         )
         response.audit_record_digest = entry["entry_hash"]
+        response.audit_entry_id = entry["entry_id"]
         # By construction, both digests are sha256 of the same raw_output bytes — a genuine
         # cross-reference a reader can verify independently, not just a matching-by-convention.
         assert entry["content_digest"] == evidence_digest, "audit/evidence digest mismatch"
@@ -182,9 +202,11 @@ class Broker:
             return deny(f"kill switch engaged: {status.get('reason', '')}", "kill_switch")
 
         try:
-            policy = policy_mod.load_policy(self.engagement_dir)
+            policy = self._policy_loader()
         except policy_mod.PolicyError as e:
             return deny(f"policy load failed, failing closed: {e}", "policy_error")
+        except Exception as e:  # a custom loader must not be able to bypass the gate by raising
+            return deny(f"policy loader failed, failing closed: {e}", "policy_error")
 
         action_class = _action_class_for(request)
         if action_class is None:
