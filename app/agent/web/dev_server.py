@@ -48,8 +48,10 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from .. import audit_log as _audit_log
+from .. import config as _config
 from ..broker import broker as _broker_mod
 from ..broker.contracts import ActionRequest as _ActionRequest
+from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..sandbox import availability as _isolation
@@ -598,6 +600,10 @@ class Engagement:
     # Hosts the operator has mentioned but not authorised. Never consulted by the scope check —
     # see _scope_urls_into_engagement.
     proposed_targets: list[str] = field(default_factory=list)
+    # Hosts/networks excluded even when an allow entry would admit them. Evaluated before the
+    # allowlist by scope_check.validate_target, so a deny always wins — which is what makes
+    # "this /24 except the domain controller" expressible at all.
+    deny_targets: list[str] = field(default_factory=list)
     allowed_action_classes: list[str] = field(default_factory=list)
     authorized_by: str = ""
     valid_until: str = ""
@@ -609,6 +615,7 @@ class Engagement:
             "description": self.description,
             "allow_targets": self.allow_targets,
             "proposed_targets": self.proposed_targets,
+            "deny_targets": self.deny_targets,
             "allowed_action_classes": self.allowed_action_classes,
             "valid_until": self.valid_until,
         }
@@ -758,6 +765,7 @@ def _persist():
             "engagements": [
                 {"engagement_id": e.engagement_id, "description": e.description,
                  "allow_targets": e.allow_targets, "proposed_targets": e.proposed_targets,
+                 "deny_targets": e.deny_targets,
                  "allowed_action_classes": e.allowed_action_classes,
                  "authorized_by": e.authorized_by, "valid_until": e.valid_until, "created_at": e.created_at}
                 for e in list(_engagements.values())
@@ -852,19 +860,6 @@ _HTTP_IN_CMD_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# ── PowerShell routing: run PS via list-args (shell=False) so pipes/quotes inside a
-# `powershell -Command "... | Select-String ..."` don't get mangled by cmd.exe.
-_PS_WRAPPER_RE = re.compile(
-    r"^\s*(?:powershell|pwsh)(?:\.exe)?\b(?:\s+-[^\s]+)*?\s+-(?:Command|c)\s+(?P<body>.*)$",
-    re.IGNORECASE | re.DOTALL,
-)
-_PS_CMDLET_RE = re.compile(
-    r"\b(?:Invoke|Get|Set|Test|Select|New|Remove|Start|Stop|ConvertTo|ConvertFrom|"
-    r"Out|Where|ForEach|Measure|Resolve|Format|Add|Clear|Export|Import)-\w+",
-    re.IGNORECASE,
-)
-
-
 # Shell constructs the sandbox cannot honour. There is no shell inside it — the executor runs an
 # argv vector directly — so these would reach the program as literal text and the model would be
 # left reading a result that silently did not do what it asked. Refusing with the reason costs
@@ -935,20 +930,6 @@ def _parse_argv(args: dict) -> list[str]:
     if not parsed:
         raise _ShellFeatureError("the command parsed to nothing")
     return parsed
-
-
-def _powershell_body(cmd: str) -> str | None:
-    """If cmd wraps a PowerShell script (`powershell -Command "..."`), return the inner
-    script; if it's a bare PowerShell cmdlet pipeline, return it as-is; else None (use cmd.exe)."""
-    m = _PS_WRAPPER_RE.match(cmd)
-    if m:
-        body = m.group("body").strip()
-        if len(body) >= 2 and body[0] in "\"'" and body[-1] == body[0]:
-            body = body[1:-1]
-        return body
-    if _PS_CMDLET_RE.search(cmd):   # bare cmdlet pipeline, no wrapper
-        return cmd.strip()
-    return None
 
 
 # A small model often picks a near-miss tool name — accept the obvious synonyms.
@@ -1308,6 +1289,17 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 # record_* tools stay local and in-memory.
 _BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search"}
 
+# Output that matches an injection pattern taints the session — except from the local knowledge
+# index, which mirrors loop.py's INJECTION_SCAN_EXEMPT_TOOLS ("security_reference_search" is the
+# CLI's name for the same tool). That corpus is HackTricks, ExploitDB and GTFOBins: text *about*
+# prompt injection, full of the patterns the scanner looks for, and not attacker-controlled. Left
+# in, a single knowledge_search for "prompt injection" would taint the session and gate the next
+# real action behind an approval the operator cannot interpret. The output is still scanned and
+# still wrapped and still flagged in the UI — what is withheld is the session-wide escalation.
+# read_file is deliberately NOT exempt: the workspace holds whatever the agent saved from a
+# target, which is exactly attacker-controlled.
+_TAINT_EXEMPT_TOOLS = {"knowledge_search"}
+
 
 class _AlreadyAudited(Exception):
     """Control-flow marker: the broker already wrote this action's audit entry."""
@@ -1319,22 +1311,98 @@ class _AlreadyAudited(Exception):
 _brokers: dict[str, _broker_mod.Broker] = {}
 
 
-def _deny_approval(prompt: str) -> bool:
-    """Approval is refused rather than awaited.
+# The broker's confirm_fn is handed a prompt string and nothing else, and a Broker is shared by
+# every session on one engagement — so the session an approval belongs to has to travel some
+# other way. Each turn runs on its own thread (see the threading.Thread sites below) and a
+# dispatch is synchronous within it, so a thread-local is both sufficient and exactly scoped:
+# two sessions waiting on approval at once cannot be shown each other's prompt.
+_dispatch_ctx = threading.local()
 
-    Broker's default confirm_fn reads stdin, which would hang a FastAPI worker, and
-    use_approval_queue=True would block it waiting for an out-of-band resolution that this
-    runtime has no endpoint to provide yet. Denying is the fail-closed answer and cannot hang
-    the server; the denial reaches the operator with the broker's own reason attached.
+# Resolved entries are kept so the UI can still show the outcome of the approval it just
+# answered, but not forever: a long-lived server would otherwise accumulate one record per
+# approval since start. Pending entries are never evicted — a turn thread is blocked on each
+# one's event, and dropping it would strand that thread until its timeout.
+_APPROVAL_CACHE_MAX = 200
 
-    Nothing among the three mediated tools requires approval today (REQUIRES_APPROVAL is empty
-    and none is the insecure-TLS case), so this is a guard against a future change rather than a
-    live path. Wiring real approval means a web endpoint plus session taint marking, which
-    belong together — marking taint without somewhere to approve would leave the agent limited
-    to passive recon for the 5-minute taint window with no operator recourse.
+
+def _prune_approvals() -> None:
+    if len(_approvals) <= _APPROVAL_CACHE_MAX:
+        return
+    resolved = [rid for rid, a in _approvals.items() if a.status != "pending"]
+    for rid in resolved[: len(_approvals) - _APPROVAL_CACHE_MAX]:
+        _approvals.pop(rid, None)
+
+
+def _web_confirm(prompt: str) -> bool:
+    """Ask the operator through the web UI and block this turn's thread until they answer.
+
+    This replaces a `_deny_approval` that refused every request, which was the honest answer
+    while nothing could ask — the broker's own default confirm_fn reads stdin, which would wedge
+    a worker, and `use_approval_queue=True` waits on a resolution this runtime had no endpoint
+    to deliver. It turned out the endpoints (`GET/POST /api/approvals`) and the whole UI for them
+    (badge, card, approve/decline, 5s poll) already existed and nothing ever created a request,
+    so the queue was a built UI wired to nothing.
+
+    Blocking is safe here and nowhere else in this file: a turn runs on its own daemon thread,
+    not the event loop, so what stops is that one session's turn — which is the correct thing to
+    stop while waiting for permission to continue it. `resolve_approval` runs on the event loop
+    and sets the event.
+
+    Every exit that is not an explicit approval returns False. A timeout is a denial, not a
+    pass: the operator who walked away did not consent.
     """
-    log.warning("broker requested approval and this runtime cannot ask: denying — %s", prompt)
-    return False
+    session = getattr(_dispatch_ctx, "session", None)
+    if session is None:
+        # Reachable only if a dispatch path forgets to set the context. Denying keeps the
+        # fail-closed property rather than asking an operator who cannot be identified.
+        log.error("approval required but no session is bound to this thread: denying — %s", prompt)
+        return False
+
+    request_id = uuid.uuid4().hex[:12]
+    ar = ApprovalRequest(
+        request_id=request_id,
+        session_id=session.session_id,
+        tool=getattr(_dispatch_ctx, "tool", "") or "",
+        description="The broker requires operator approval before this action runs.",
+        command=json.dumps(getattr(_dispatch_ctx, "arguments", {}) or {}, ensure_ascii=False)[:1000],
+        detail=prompt.strip(),
+        prompt=prompt.strip(),
+    )
+    _approvals[request_id] = ar
+    _prune_approvals()
+    # Pushed, not appended: the UI polls /api/approvals every 5s while a turn is running, and
+    # this makes it immediate. Deliberately not written into session.messages — that transcript
+    # is fed back to the model, and an approval prompt is operator-facing, not context.
+    session.push({"type": "approval_required", "request_id": request_id,
+                  "tool": ar.tool, "prompt": ar.prompt})
+    log.info("approval requested (%s) for %s on session %s", request_id, ar.tool,
+             session.session_id)
+
+    timeout_s = float(_config.APPROVAL_QUEUE_TIMEOUT_S)
+    deadline = time.monotonic() + timeout_s
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                ar.status = "timed_out"
+                ar.resolved_by = "timeout"
+                session.push({"type": "approval_timeout", "request_id": request_id,
+                              "tool": ar.tool})
+                log.warning("approval %s timed out after %.1fs: treating as declined",
+                            request_id, timeout_s)
+                return False
+            if ar.event.wait(min(1.0, remaining)):
+                return bool(ar.approved)
+            # Checked inside the wait loop rather than only at the end: an operator who hits
+            # Stop has answered, and leaving the thread parked for the remaining minutes would
+            # make Stop look broken.
+            if getattr(session, "stop_requested", False):
+                ar.status = "declined"
+                ar.resolved_by = "session-stopped"
+                return False
+    finally:
+        session.push({"type": "approval_resolved", "request_id": request_id,
+                      "status": ar.status, "approved": bool(ar.approved)})
 
 
 def _broker_for(engagement_id: str) -> _broker_mod.Broker:
@@ -1346,7 +1414,12 @@ def _broker_for(engagement_id: str) -> _broker_mod.Broker:
             policy_loader=lambda eid=engagement_id: _scope.policy_from_engagement(
                 _engagements.get(eid)
             ),
-            confirm_fn=_deny_approval,
+            # confirm_fn rather than use_approval_queue=True: both block, but confirm_fn lets
+            # the prompt reach the session's own event stream and the per-session UI, where
+            # the broker's own file-backed queue is keyed by its own ids and would need a
+            # second reader. The broker still records the request in that queue either way
+            # (ApprovalQueue.submit runs before the branch), so the CLI-side trail is intact.
+            confirm_fn=_web_confirm,
             use_approval_queue=False,
         )
     return broker
@@ -1385,7 +1458,18 @@ def _dispatch_via_broker(canonical: str, args: dict, session: Session, *, turn_i
             raise PermissionError(out.get("error") or out["scope_rule"])
         return out
 
-    response = _broker_for(session.engagement_id).dispatch(request, execute)
+    # Bound for the duration of the dispatch so _web_confirm, which the broker may call from
+    # inside it, knows whose approval to ask for. Cleared afterwards so a later approval on a
+    # non-broker path cannot inherit a stale session.
+    _dispatch_ctx.session = session
+    _dispatch_ctx.tool = canonical
+    _dispatch_ctx.arguments = audit_args
+    try:
+        response = _broker_for(session.engagement_id).dispatch(request, execute)
+    finally:
+        _dispatch_ctx.session = None
+        _dispatch_ctx.tool = ""
+        _dispatch_ctx.arguments = {}
     meta = {
         "broker_status": response.status,
         "policy_rule": response.policy_rule,
@@ -1498,6 +1582,26 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
     raw_text = _jsonify_result(result)
     wrapped, scan = _injection_guard.wrap_and_flag(raw_text)
 
+    tainted_by_this_result = False
+    if scan.matched and canonical not in _TAINT_EXEMPT_TOOLS:
+        # The other half of what the wrapper markers start. Wrapping tells the model this text
+        # is data; marking the session tells the *broker* that this session has handled
+        # attacker-controlled text, so the next action beyond passive recon needs an operator.
+        # Without it, injection screening in this runtime was advisory: it raised a flag in the
+        # UI and changed nothing about what the agent was then allowed to do.
+        try:
+            _taint.TaintStore(session.session_id).mark(
+                reason=", ".join(scan.reasons) or f"flagged output from {canonical}",
+                verdict=scan.verdict,
+                source=canonical,
+            )
+            tainted_by_this_result = True
+        except Exception as e:
+            # A taint store that cannot be written must not silently leave the session
+            # untainted — say so where the operator will see it.
+            log.error("TAINT MARK FAILED for %s/%s: %s", session.session_id, canonical, e)
+            session.push({"type": "taint_error", "tool": canonical, "error": str(e)})
+
     audit_entry_id = None
     try:
         if broker_meta:
@@ -1517,7 +1621,9 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
             raw_output=raw_text,
             sanitized_output=wrapped,
             scope_decision=_scope_decision_of(result),
-            approval_identity=None,  # the approval queue is not wired into this runtime yet
+            # Only the broker path can require approval, and it writes its own entry carrying
+            # the approval ref; nothing on this local path is gated on one.
+            approval_identity=None,
             prompt_tokens=session.last_prompt_tokens or None,
             completion_tokens=None,  # not reported per tool call by this runtime
             latency_ms=latency_ms,
@@ -1560,8 +1666,12 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
         )
 
     if scan.matched:
+        # `tainted` carries whether the flag changed what the session may now do, so the UI can
+        # say which it was. A flag on exempt output is a notice; a flag that tainted the session
+        # is a gate.
         session.push({"type": "injection_flagged", "tool": canonical,
-                      "verdict": scan.verdict, "reasons": scan.reasons})
+                      "verdict": scan.verdict, "reasons": scan.reasons,
+                      "tainted": tainted_by_this_result})
     return result, wrapped
 
 
@@ -2280,6 +2390,7 @@ class CreateEngagementRequest(BaseModel):
     engagement_id: str
     description: str = ""
     allow_targets: list[str] = []
+    deny_targets: list[str] = []
     allowed_action_classes: list[str] = []
     authorized_by: str = ""
     valid_hours: float = 24.0
@@ -2595,11 +2706,18 @@ def resolve_approval(request_id: str, req: ApprovalResolveRequest):
     ar = _approvals.get(request_id)
     if not ar:
         raise HTTPException(404, "approval not found")
+    if ar.status != "pending":
+        # The waiting thread has already given up (timeout) or been answered. Silently
+        # overwriting the status here would tell the operator their "approve" took effect on an
+        # action that was refused minutes ago and never ran.
+        return {"status": ar.status, "request_id": request_id, "applied": False,
+                "detail": f"this request was already resolved as {ar.status!r}"
+                          f"{' by ' + ar.resolved_by if ar.resolved_by else ''}"}
     ar.approved = req.approved
     ar.status = "approved" if req.approved else "declined"
     ar.resolved_by = req.resolved_by
     ar.event.set()
-    return {"status": ar.status, "request_id": request_id}
+    return {"status": ar.status, "request_id": request_id, "applied": True}
 
 # ── Consults ──
 @app.get("/api/consults")
@@ -2639,6 +2757,8 @@ def create_engagement(req: CreateEngagementRequest):
         )
     for target in req.allow_targets:
         _intake._validate_scope_line(target, errors, "allow_targets")
+    for target in req.deny_targets:
+        _intake._validate_scope_line(target, errors, "deny_targets")
     if not req.authorized_by.strip():
         errors.append("authorized_by is required — record who authorised this engagement")
     if req.valid_hours <= 0:
@@ -2659,6 +2779,7 @@ def create_engagement(req: CreateEngagementRequest):
         engagement_id=req.engagement_id,
         description=req.description,
         allow_targets=req.allow_targets,
+        deny_targets=req.deny_targets,
         allowed_action_classes=req.allowed_action_classes,
         authorized_by=req.authorized_by,
         valid_until=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + req.valid_hours * 3600)),

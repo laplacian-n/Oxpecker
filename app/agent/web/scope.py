@@ -127,22 +127,29 @@ class ScopeDecision:
 def policy_from_engagement(eng, *, now: float | None = None) -> Policy:
     """Build the broker's `Policy` from the web runtime's in-memory `Engagement`.
 
-    The deny list is `BASE_DENY_NETWORKS` only. The web `Engagement` has no deny field of its
-    own, so per-engagement deny entries are not yet expressible here — worth adding, since
-    deny-wins is the more useful half of the matcher. The base entries are not an invented
-    policy: they are the same ones `intake.create_engagement()` writes into every CLI
-    engagement's deny.txt.
+    The deny list is `BASE_DENY_NETWORKS` plus the engagement's own `deny_targets`. The base
+    entries are not an invented policy: they are the same ones `intake.create_engagement()`
+    writes into every CLI engagement's deny.txt, and because `validate_target` evaluates deny
+    before allow they cannot be re-permitted by an operator's allowlist.
+
+    Per-engagement deny entries matter because deny-wins is the more useful half of the matcher:
+    the realistic engagement is "this /24, except the domain controller at .10", and expressing
+    that with allow rules alone means enumerating 253 hosts. An operator who cannot write the
+    exception writes the broad allow and keeps the carve-out in their head, which the agent
+    cannot read.
     """
     networks, hostnames = _classify_targets(getattr(eng, "allow_targets", []))
+    deny_nets, deny_hosts = _classify_targets(getattr(eng, "deny_targets", []))
     valid_until = _parse_valid_until(getattr(eng, "valid_until", "") or "")
-    deny_networks = [ipaddress.ip_network(n) for n in BASE_DENY_NETWORKS]
+    # Base entries first; an engagement cannot drop one by omission, only add to the set.
+    deny_networks = [ipaddress.ip_network(n) for n in BASE_DENY_NETWORKS] + deny_nets
     return Policy(
         engagement_id=getattr(eng, "engagement_id", ""),
         allowed_action_classes=set(getattr(eng, "allowed_action_classes", []) or []),
         allow_networks=networks,
         allow_hostnames=hostnames,
         deny_networks=deny_networks,
-        deny_hostnames=set(),
+        deny_hostnames=deny_hosts,
         policy_version="web-engagement/in-memory",
         valid_until=valid_until if valid_until is not None else float("inf"),
     )

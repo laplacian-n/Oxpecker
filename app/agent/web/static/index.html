@@ -312,6 +312,25 @@ function handleServerEvent(evt){
       S.threads[sid].push({role:'system',content:'Autonomous run finished — '+evt.status+(evt.reason?' · '+evt.reason:'')});
       render();softScroll();break;
     case 'autonomous_error':S.running=false;clearInterval(S.elapsedTimer);toast('Autonomous error: '+evt.error);render();break;
+    // The turn thread is now blocked waiting for the answer, so fetch the card immediately
+    // rather than waiting up to 5s for the next poll tick.
+    // No chat line: the header banner and the Approvals panel are where this is surfaced,
+    // and the renderer deliberately suppresses '\u23f3 Awaiting approval' lines in favour of them.
+    case 'approval_required':S.approvalsOpen=true;pollApprovals();render();break;
+    case 'approval_timeout':
+      if(!S.threads[sid])S.threads[sid]=[];
+      S.threads[sid].push({role:'system',content:'Approval for '+(evt.tool||'an action')+' went unanswered and was treated as declined \u2014 the action did NOT run'});
+      pollApprovals();render();softScroll();break;
+    case 'approval_resolved':pollApprovals();render(true);break;
+    // Previously dropped on the floor: the server has been pushing this since injection
+    // screening was wired in, and nothing rendered it, so the one signal that says "this output
+    // tried to redirect the agent" never reached the operator.
+    case 'injection_flagged':
+      if(!S.threads[sid])S.threads[sid]=[];
+      S.threads[sid].push({role:'system',content:'\u26a0 Possible prompt injection in '+(evt.tool||'tool')+' output ('+(evt.verdict||'flagged')+(evt.reasons&&evt.reasons.length?': '+evt.reasons.join(', '):'')+')'+(evt.tainted?'. The session is now held to passive recon \u2014 each further action needs your approval for the next 5 minutes.':'. From the local knowledge index, so the session was not restricted.')});
+      render();softScroll();break;
+    case 'taint_error':toast('Taint store write failed: '+evt.error);break;
+    case 'audit_error':toast('Audit write failed: '+evt.error);break;
   }
 }
 
@@ -1801,7 +1820,7 @@ async function saveEngagement(){
 }
 
 let _approvalPoll;
-function startApprovalPolling(){stopApprovalPolling();_approvalPoll=setInterval(()=>{if(!S.activeSession||!S.running)return;pollApprovals();pollConsults();},5000);}
+function startApprovalPolling(){stopApprovalPolling();_approvalPoll=setInterval(()=>{if(!S.activeSession)return;pollApprovals();pollConsults();},5000);}
 function stopApprovalPolling(){if(_approvalPoll){clearInterval(_approvalPoll);_approvalPoll=null;}}
 
 /* INIT */

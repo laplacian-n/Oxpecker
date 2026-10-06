@@ -120,7 +120,7 @@ def main() -> int:
             b = broker_mod.Broker(
                 policy_loader=lambda: d._scope.policy_from_engagement(
                     d._engagements["lab-default"]),
-                confirm_fn=d._deny_approval)
+                confirm_fn=lambda prompt: False)
 
             class _Resp:
                 def to_dict(self):

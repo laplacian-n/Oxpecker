@@ -330,7 +330,10 @@ class TestIndexPage(TestWebServerBase):
         resp = self.client.get("/")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("text/html", resp.headers["content-type"])
-        self.assertIn("localAI agent", resp.text)
+        # Asserted on the <title>, not on marketing copy in the body: this test pinned the
+        # string "localAI agent", which was the product's name before it was renamed, so it had
+        # been failing on a correct page.
+        self.assertIn("<title>Oxpecker</title>", resp.text)
 
 
 class TestLiveEndToEnd(TestWebServerBase):

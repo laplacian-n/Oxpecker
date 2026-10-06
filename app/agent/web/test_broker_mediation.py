@@ -178,18 +178,20 @@ def main() -> int:
         check("it is not labelled a policy block", "NOT made" not in str(r.get("error")),
               str(r)[:120])
 
-        print("\n== approval is refused, never awaited (a wait would hang the server) ==")
-        check("the runtime supplies a non-blocking confirm_fn",
-              d._deny_approval("test prompt") is False)
+        print("\n== approval is asked of the operator, and fails closed when it cannot be ==")
         b = d._broker_for("lab-default")
-        check("the approval queue is not used in blocking mode",
-              b.use_approval_queue is False, str(b.use_approval_queue))
         check("the confirm function is ours, not the stdin default",
-              b.confirm_fn is d._deny_approval)
+              b.confirm_fn is d._web_confirm)
+        check("the broker's own blocking queue mode is not used",
+              b.use_approval_queue is False, str(b.use_approval_queue))
+        # No session bound to this thread: the one path where there is nobody to ask.
+        d._dispatch_ctx.session = None
+        check("an approval with no session to ask denies instead of guessing",
+              d._web_confirm("test prompt") is False)
 
         print("\n== a broken policy source fails closed ==")
         bad = broker_mod.Broker(policy_loader=lambda: (_ for _ in ()).throw(RuntimeError("nope")),
-                               confirm_fn=d._deny_approval)
+                               confirm_fn=lambda prompt: False)
         from ..broker.contracts import ActionRequest
         resp = bad.dispatch(
             ActionRequest(tool="port_discovery", arguments={"host": "127.0.0.1", "ports": [9]},
