@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from .availability import (  # re-exported: availability.py owns the tier names,
     TIER_BUBBLEWRAP,         # Windows-side caller and this module cannot disagree on spelling
     TIER_DIRECT,
     TIER_MICROVM,
+    TIER_WSL2,
+    WSL_ULIMIT_PROLOGUE,
     IsolationUnavailableError,
     probe,
     resolve_tier,
@@ -331,6 +334,209 @@ class BubblewrapExecutor:
                 os.close(seccomp_fd)
 
 
+# ── WSL2 tier ────────────────────────────────────────────────────────────────────────────────
+# Honesty note, stated here rather than buried: this tier is implemented and unit-tested at the
+# level of argv construction and path translation, and it has NOT been exercised on a Windows
+# host with a real WSL2 guest, because the author has no Windows machine. What makes that
+# tolerable rather than a false claim is the direction of its failure: `availability._probe_wsl2`
+# always exec-verifies (it runs a sandboxed /bin/true inside the guest), and `resolve_tier`
+# refuses rather than degrading, so on a host where anything here is wrong the operator is told
+# the tier is unavailable and no command runs. The bad outcome is "it refuses on a host where it
+# could have worked", not "it ran unsandboxed while reporting a sandbox".
+
+# `--ro-bind-try` rather than `--ro-bind`: the bubblewrap tier filters this list with
+# Path(p).exists() on the host, which it can do because host and sandbox share a filesystem.
+# From Windows there is no way to stat a guest path without another wsl.exe round trip per
+# path, and bwrap already has the primitive for "bind this if it is there".
+_WSL_RO_BINDS = list(_RO_BINDS)
+
+_WSLPATH_TIMEOUT_S = 30
+
+
+class WSL2PathError(RuntimeError):
+    """A Windows path could not be translated to its path inside the WSL2 guest."""
+
+
+class WSL2Executor:
+    """Bubblewrap, executed inside the WSL2 guest, for Windows hosts.
+
+    Why this composition and not `wsl.exe -- <command>` on its own: a bare WSL2 invocation is
+    not isolation. The guest mounts the Windows drives at /mnt/c by default and has full network
+    access, so a command running there can read the operator's whole filesystem and reach the
+    network — the two things the bubblewrap profile exists to prevent. The VM boundary is
+    valuable *in addition to* the namespaces, not instead of them.
+
+    Resource caps are applied by the guest shell (`ulimit`, `&&`-chained, then `exec bwrap`)
+    rather than by a preexec_fn, which cannot cross the boundary. They are the same four limits
+    as the Linux tier and are not best-effort: a shell that rejects any of them fails the run,
+    and the probe runs the identical prologue so the capability report says so first.
+
+    What is lost relative to the Linux bubblewrap tier is seccomp. The deny-list is compiled to
+    a BPF program and handed to bwrap as an open file descriptor; a descriptor does not survive
+    the wsl.exe process boundary. `sandbox_profile_digest` records `seccomp_active: False`, so a
+    run on this tier is distinguishable in the audit trail from one that had the syscall filter
+    loaded — the digest is the mechanism that already exists for exactly this, rather than a
+    second claim someone has to remember to check.
+    """
+
+    tier = TIER_WSL2
+
+    @classmethod
+    def available(cls, deep: bool = False) -> tuple[bool, str]:
+        return probe(cls.tier, deep=deep)
+
+    @staticmethod
+    def guest_path(win_path: Path) -> str:
+        """Translate a Windows path to its path inside the guest, by asking the guest.
+
+        `wslpath` is the guest's own translator, so it accounts for the operator's actual
+        /etc/wsl.conf mount root instead of assuming the /mnt/c default. Hand-rolling
+        "C:\\x" -> "/mnt/c/x" would be wrong on any host that moved it.
+        """
+        raw = str(Path(win_path))
+        try:
+            proc = subprocess.run(
+                ["wsl.exe", "-e", "wslpath", "-a", "-u", raw],
+                capture_output=True, timeout=_WSLPATH_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            raise WSL2PathError(f"could not translate {raw!r} via wslpath: {e}") from e
+        out = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0 or not out:
+            err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise WSL2PathError(
+                f"wslpath could not translate {raw!r} (exit {proc.returncode}): {err[:200]!r}"
+            )
+        # One path in, one path out. More than one line means something else wrote to stdout,
+        # and guessing which line is the path would silently bind the wrong directory.
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        if len(lines) != 1:
+            raise WSL2PathError(
+                f"wslpath returned {len(lines)} lines for {raw!r}, expected one: {out[:200]!r}"
+            )
+        return lines[0]
+
+    @staticmethod
+    def build_argv(
+        argv: list[str], guest_cwd: str, guest_workspace: str
+    ) -> list[str]:
+        """The exact argv subprocess.run executes, given paths *already translated* to the
+        guest. Separated from the translation so it is testable without a WSL2 guest, and
+        exposed for the same reason BubblewrapExecutor.build_argv is: a test that rebuilds this
+        by hand drifts from it.
+
+        The inner argv is shell-quoted into a single `/bin/sh -c` string rather than passed as
+        separate arguments. That is not a convenience: `subprocess` on Windows joins a list into
+        one command line by MSVC rules, wsl.exe re-splits it by its own, and a workspace path
+        containing a space (`C:\\Users\\Jane Smith\\...`) does not reliably survive the round
+        trip. Quoting every element ourselves and letting the guest's shell do the final split
+        makes the boundary deterministic. The quoting is generated from an argv list that the
+        caller has already parsed — `shlex.quote` on each element — so no element of it, model-
+        supplied or not, can break out into shell syntax.
+        """
+        inner = ["bwrap"]
+        for path in _WSL_RO_BINDS:
+            inner += ["--ro-bind-try", path, path]
+        inner += ["--clearenv"]
+        for k, v in _build_env(Path(guest_workspace)).items():
+            inner += ["--setenv", k, v]
+        inner += [
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--bind", guest_workspace, guest_workspace,
+            "--chdir", guest_cwd,
+            "--unshare-all",
+            "--die-with-parent",
+            "--new-session",
+            "--", *argv,
+        ]
+        # The prologue ends in `exec`, so the limits are set on the shell and then the shell
+        # is *replaced* by bwrap — no lingering shell process holding the fds, and the limits are
+        # inherited by bwrap and everything under it. `&&`-chained so a shell that rejects one
+        # of the flags fails the run instead of running uncapped; availability._probe_wsl2 runs
+        # this same prologue, so an operator learns that from the capability report rather than
+        # from a failed command.
+        script = WSL_ULIMIT_PROLOGUE + " ".join(shlex.quote(a) for a in inner)
+        # -e: run the program directly, with no login shell or profile of the guest's own. The
+        # /bin/sh here is ours, carrying only the string we quoted.
+        return ["wsl.exe", "-e", "/bin/sh", "-c", script]
+
+    @staticmethod
+    def profile_digest(guest_workspace: str) -> str:
+        """Deliberately not `_profile_digest`: a run on this tier must not produce the same
+        fingerprint as a Linux bubblewrap run. It has no seccomp, its binds are `--ro-bind-try`
+        rather than a host-filtered `--ro-bind` list, and its workspace path is a guest path."""
+        profile = {
+            "tier": TIER_WSL2,
+            "ro_bind_try": list(_WSL_RO_BINDS),
+            "rw_bind": guest_workspace,
+            "unshare": ["user", "pid", "net", "uts", "ipc", "cgroup"],
+            "mem_limit_bytes": BWRAP_MEM_LIMIT_BYTES,
+            "cpu_limit_s": BWRAP_CPU_LIMIT_S,
+            "nofile_limit": BWRAP_NOFILE_LIMIT,
+            "fsize_limit_bytes": BWRAP_FSIZE_LIMIT_BYTES,
+            # Not an omission to be read as "unknown": the fd cannot cross wsl.exe. Recorded as
+            # false so the trail says which runs had the syscall filter and which did not.
+            "seccomp_active": False,
+            "seccomp_denied_syscalls": [],
+            # RLIMIT_* are applied by a wrapper inside the guest rather than by preexec_fn,
+            # which cannot reach across the boundary. Recorded so the digest reflects how.
+            # Not decoration: the prologue is part of what this profile *is*, so a change to
+            # the caps changes the digest, exactly as the Linux tier's byte limits do.
+            "rlimits_applied_via": WSL_ULIMIT_PROLOGUE,
+        }
+        return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
+
+    def run(
+        self, argv: list[str], cwd: Path, workspace_root: Path, timeout: float
+    ) -> ExecResult:
+        start = time.monotonic()
+        try:
+            guest_workspace = self.guest_path(workspace_root)
+            guest_cwd = self.guest_path(cwd)
+        except WSL2PathError as e:
+            # A refusal, not a fallback. Running the command on the Windows host instead would
+            # be the silent degradation this whole tier system is built to prevent.
+            return ExecResult(
+                exit_code=None, stdout="", stderr=str(e), timed_out=False,
+                duration_ms=(time.monotonic() - start) * 1000,
+                isolation_tier=self.tier, killed_reason="path_translation_failed",
+            )
+
+        full_argv = self.build_argv(argv, guest_cwd, guest_workspace)
+        digest = self.profile_digest(guest_workspace)
+        try:
+            proc = subprocess.run(
+                full_argv, timeout=timeout, capture_output=True, shell=False,
+            )
+            stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
+            stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
+            return ExecResult(
+                exit_code=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                timed_out=False,
+                duration_ms=(time.monotonic() - start) * 1000,
+                isolation_tier=self.tier,
+                sandbox_profile_digest=digest,
+                killed_reason="resource_limit" if proc.returncode == 137 else None,
+            )
+        except subprocess.TimeoutExpired as e:
+            def _dec(v):
+                if isinstance(v, bytes):
+                    return v.decode("utf-8", errors="replace")
+                return v or ""
+            return ExecResult(
+                exit_code=None, stdout=_dec(e.stdout), stderr=_dec(e.stderr),
+                timed_out=True,
+                duration_ms=(time.monotonic() - start) * 1000,
+                isolation_tier=self.tier,
+                sandbox_profile_digest=digest,
+                killed_reason="timeout",
+            )
+
+
 class MicroVMExecutor:
     """Not implemented. See module docstring — deliberately not built this pass, must never
     silently degrade to a weaker tier while claiming this name."""
@@ -354,6 +560,7 @@ class MicroVMExecutor:
 EXECUTORS = {
     TIER_DIRECT: DirectExecutor(),
     TIER_BUBBLEWRAP: BubblewrapExecutor(),
+    TIER_WSL2: WSL2Executor(),
     TIER_MICROVM: MicroVMExecutor(),
 }
 

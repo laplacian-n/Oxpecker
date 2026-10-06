@@ -327,25 +327,70 @@ and they run on local hardware.
 
 ## 8. Outstanding after this work
 
-Two pieces were deliberately left, both because landing half of each would be worse than
-landing neither.
+Both pieces this section originally held open — session taint marking paired with a web approval
+endpoint, and a Windows isolation tier — have since landed. What follows records what was done
+and what is still not verified, since "implemented" and "verified" are different claims.
 
-**Session taint marking + a web approval endpoint.** The broker escalates to human approval when
-a session has recently processed suspicious content, and `SAFE_WHILE_TAINTED` is
-`{"passive_recon"}` with a 5-minute window. The web runtime now detects injection and records
-it, but does not mark taint — because it has no endpoint through which an operator could
-approve, so marking it would leave the agent limited to passive recon for five minutes with no
-recourse. The marking and the endpoint are one change.
+**Session taint marking + operator approval — done.** Flagged tool output now marks the session
+tainted, so the broker escalates the next action beyond passive recon, and `_web_confirm`
+replaces the `_deny_approval` that refused unconditionally: it creates a request, pushes it to
+the session's event stream, and blocks that turn's thread until the operator answers through
+`POST /api/approvals/{id}/resolve`. Blocking is safe because a turn runs on its own daemon
+thread, not the event loop. Two things were found while doing it:
 
-**A Windows isolation tier.** `run_command` refuses on non-Linux rather than running
-unsandboxed: the tiers are bubblewrap namespaces plus seccomp, and `tools/run_command.py`
-resolves binaries against a hardcoded Unix PATH. The installer targets Windows, so this is a
-real capability gap there, not a theoretical one. WSL2 is the most promising answer — the
-pentest tooling is Linux-native anyway — and needs a tier plus a detection path. Until it
-lands, say plainly which platforms have enforced isolation.
+* The approval endpoints and the *entire* UI for them — badge, panel, card, approve/decline, a
+  5s poll — already existed. Nothing had ever created a request, so it was a finished UI wired
+  to nothing.
+* The `injection_flagged` event the server had been pushing since screening was wired in had no
+  `case` in the frontend's event switch, so it was dropped. The one signal that says "this
+  output tried to redirect the agent" reached nobody. It renders now, and says whether it gated
+  the session or was only a notice.
 
-Smaller, noted in passing: `_powershell_body` in `dev_server.py` is now unused, kept pending
-that Windows tier; the web `Engagement` has no deny-list field of its own, so per-engagement
-deny entries are not yet expressible (only the base cloud-metadata denials apply); and
-`agent.web.test_frontend` skips all 14 of its tests without a reachable llama-server and lab
-container, so the UI side of the engagement-validation change is unexercised.
+`knowledge_search` is exempt from tainting, mirroring `loop.py`'s
+`INJECTION_SCAN_EXEMPT_TOOLS` — that corpus is HackTricks and ExploitDB, text *about* injection
+rather than attacker-controlled, and a single search for "prompt injection" would otherwise gate
+the next real action. `read_file` is deliberately not exempt: the workspace holds whatever the
+agent saved from a target.
+
+Not changed, and worth an explicit decision by the project owner rather than by whoever is
+editing this file: `SAFE_WHILE_TAINTED` is `{"passive_recon"}`, so a tainted session needs an
+approval even for a local `knowledge_search`, which sends nothing anywhere and cannot act on the
+injection. Widening it would be defensible and would reduce clicks; it would also be weakening a
+security default for ergonomics, which is not a call to make in passing.
+
+**A Windows isolation tier — implemented, not yet exercised on Windows.** `wsl2` runs the same
+bubblewrap profile *inside* the WSL2 guest. The composition is deliberate: a bare
+`wsl.exe -- <command>` is not isolation, because the guest mounts the Windows drives at `/mnt/c`
+and has full network access — the two things the bubblewrap profile exists to prevent. The VM
+boundary is additional to the namespaces, not a replacement.
+
+What it costs relative to the Linux tier is seccomp: the deny-list is compiled to BPF and handed
+to `bwrap` as an open file descriptor, and a descriptor does not cross the `wsl.exe` process
+boundary. The profile digest records `seccomp_active: false`, so an audit trail distinguishes a
+run that had the syscall filter from one that did not. Resource limits are applied by the guest
+shell (`ulimit`, `&&`-chained, then `exec bwrap`) and are not best-effort — a shell that rejects
+any of them fails the run.
+
+The honest limitation: there is no Windows host or WSL2 guest in this project's development
+environment, so what is verified is argv construction, path translation via the guest's own
+`wslpath`, and every refusal path — 55 checks in `agent/sandbox/test_wsl2.py` — not a real
+sandboxed execution. The design puts that gap on the safe side: `availability._probe_wsl2`
+always exec-verifies (it runs a sandboxed `/bin/true` under this tier's own ulimit prologue
+inside the guest) rather than inferring availability from `wsl.exe` being on PATH, and
+`resolve_tier` refuses instead of degrading. So on a host where any assumption here is wrong,
+the operator is told the tier is unavailable and nothing runs. The bad outcome is "it refuses on
+a host where it could have worked", never "it ran unsandboxed while reporting a sandbox".
+
+**Also closed since.** `_powershell_body` and its two regexes are deleted — they were kept
+pending this Windows tier and the tier does not use them. The web `Engagement` now carries
+`deny_targets`, so a per-engagement carve-out ("this /24 except the domain controller at .10")
+is expressible instead of only the base cloud-metadata denials; the base entries are prepended
+rather than replaced, so an engagement can only add to the deny set.
+
+**Still not verified here.** `agent.web.test_frontend` skips all 14 of its tests without a
+reachable llama-server and lab container, so every UI change in this work is unexercised: the
+engagement-validation change, the approval panel now being driven by real requests, the
+`injection_flagged` rendering, and the `wsl2` entry in the isolation picker. The approval poll
+no longer requires `S.running` — an autonomous phase run reports not-running while still
+executing tools, which is exactly when an approval can appear — and that too is reasoned, not
+observed.

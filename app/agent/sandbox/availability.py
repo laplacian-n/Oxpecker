@@ -24,9 +24,10 @@ import subprocess
 
 TIER_DIRECT = "direct"
 TIER_BUBBLEWRAP = "bubblewrap"
+TIER_WSL2 = "wsl2"
 TIER_MICROVM = "microvm"
 
-TIERS = (TIER_DIRECT, TIER_BUBBLEWRAP, TIER_MICROVM)
+TIERS = (TIER_DIRECT, TIER_BUBBLEWRAP, TIER_WSL2, TIER_MICROVM)
 
 # How much isolation each tier actually provides, for honest reporting. `direct` is in the list
 # because it is a legitimate, deliberately-chosen tier (Phase 1 behaviour: scrubbed env, no
@@ -34,10 +35,38 @@ TIERS = (TIER_DIRECT, TIER_BUBBLEWRAP, TIER_MICROVM)
 TIER_DESCRIPTION = {
     TIER_DIRECT: "no kernel isolation — scrubbed env and a command blocklist only",
     TIER_BUBBLEWRAP: "kernel-enforced namespace isolation (fs/net/pid) + seccomp + rlimits",
+    TIER_WSL2: (
+        "bubblewrap inside the WSL2 guest VM — namespace isolation (fs/net/pid) + rlimits "
+        "behind a hypervisor boundary, but NO seccomp (the compiled BPF program is passed to "
+        "bwrap as a file descriptor, and an fd does not cross the wsl.exe process boundary)"
+    ),
     TIER_MICROVM: "hardware-virtualised guest (not implemented)",
 }
 
+# Ranked weakest to strongest, for `describe_host`. wsl2 sits above bubblewrap because it is
+# bubblewrap *plus* a hypervisor boundary; it loses seccomp, which is a narrowing of the syscall
+# surface inside an already-unshared namespace rather than a containment boundary of its own.
+_TIER_STRENGTH = (TIER_DIRECT, TIER_BUBBLEWRAP, TIER_WSL2, TIER_MICROVM)
+
 _USERNS_MAX_PATH = "/proc/sys/user/max_user_namespaces"
+
+# Resource caps for the wsl2 tier, applied by the guest shell rather than by a preexec_fn: an
+# fd-passing preexec_fn cannot reach across the wsl.exe process boundary, and `ulimit` is the
+# shell's interface to the same setrlimit(2) calls. Declared here, not in executor.py, because
+# `_probe_wsl2` has to verify the guest's /bin/sh accepts the whole prologue — a limit silently
+# skipped is a limit not applied, and the executor's own digest would then claim caps that were
+# not in force. executor.py imports this so the probe and the real run use one string.
+#
+# Units differ per flag and are not interchangeable: -v is KiB, -f is 512-byte blocks, -t is
+# seconds, -n is a count. Kept in sync with the BWRAP_* constants in executor.py, which are the
+# Linux tier's and are expressed in bytes.
+WSL_ULIMIT_PROLOGUE = (
+    "ulimit -v 524288 && "     # 512 MiB address space
+    "ulimit -t 10 && "          # 10 CPU-seconds
+    "ulimit -n 64 && "          # 64 file descriptors
+    "ulimit -f 102400 && "      # 50 MiB max single-file write
+    "exec "
+)
 
 
 class IsolationUnavailableError(RuntimeError):
@@ -104,6 +133,95 @@ def _probe_bubblewrap(deep: bool = False) -> tuple[bool, str]:
     return True, "bwrap is present and user namespaces are permitted (not exec-verified)"
 
 
+# How long to wait for the WSL2 guest. A cold VM start is seconds, not milliseconds, and the
+# probe pays that cost once — it is not on the per-command path.
+_WSL_PROBE_TIMEOUT_S = 60
+
+
+def _wsl(args: list[str], timeout: float = _WSL_PROBE_TIMEOUT_S) -> tuple[int, str]:
+    """Run something in the WSL2 guest and return (exit code, combined output).
+
+    Decoded with errors="replace" rather than text=True: some wsl.exe subcommands emit UTF-16,
+    and a probe that raises UnicodeDecodeError would report "unavailable" for the wrong reason.
+    """
+    try:
+        proc = subprocess.run(
+            ["wsl.exe", *args], capture_output=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        return 127, "wsl.exe not found"
+    except subprocess.TimeoutExpired:
+        return 124, f"wsl.exe did not respond within {timeout:.0f}s"
+    except OSError as e:  # pragma: no cover — platform-specific spawn failures
+        return 126, f"could not start wsl.exe: {e}"
+    out = (proc.stdout or b"") + (proc.stderr or b"")
+    return proc.returncode, out.decode("utf-8", errors="replace").strip()
+
+
+def _probe_wsl2(deep: bool = False) -> tuple[bool, str]:
+    """Always exec-verifies, regardless of `deep`.
+
+    Every other probe here can answer statically because the thing it checks is a property of
+    the host that a file or a PATH lookup settles. This one cannot: whether `bwrap` can unshare
+    *inside* the WSL2 guest depends on that guest distribution's packages and on the WSL kernel's
+    user-namespace configuration, neither of which is visible from the Windows side. A static
+    "wsl.exe is on PATH, so this tier is available" would be precisely the false claim
+    `resolve_tier` exists to prevent — the operator would be told the sandbox is active and get
+    a failure at the first command instead. So the cost of one `wsl.exe` round trip is paid to
+    make the answer true.
+
+    This tier has not been exercised on a real Windows host by its author; see
+    docs/OBSERVABILITY_PLAN.md. That is also why the verification is a real execution rather
+    than a set of assumptions about wsl.exe's behaviour: on a host where any assumption here is
+    wrong, the probe fails and the tier reports unavailable, which is the safe direction.
+    """
+    if platform.system() != "Windows":
+        return False, (
+            f"the wsl2 tier is for Windows hosts; this host is {platform.system() or 'unknown'} "
+            f"— use the {TIER_BUBBLEWRAP!r} tier directly"
+        )
+
+    if shutil.which("wsl.exe") is None:
+        return False, "the 'wsl.exe' launcher is not on PATH (install WSL2 and a distribution)"
+
+    code, out = _wsl(["-e", "/bin/true"])
+    if code != 0:
+        return False, (
+            f"the WSL2 guest did not run a trivial command (exit {code}): {out[:200]!r}. "
+            "Check that a distribution is installed and starts (`wsl -l -v`)."
+        )
+
+    code, out = _wsl(["-e", "bwrap", "--version"])
+    if code != 0:
+        return False, (
+            "the WSL2 guest runs, but 'bwrap' is not usable inside it "
+            f"(exit {code}): {out[:200]!r}. Install bubblewrap in the distribution "
+            "(e.g. `sudo apt install bubblewrap`)."
+        )
+
+    # The definitive check, and the one that cannot be predicted from the Windows side: several
+    # WSL kernel builds permit bwrap to run but not to unshare.
+    # The definitive check runs the real shape of a real invocation: the guest's /bin/sh, the
+    # whole ulimit prologue, and bwrap unsharing. Anything that only tests one of those can
+    # report the tier available while the other two fail at the first command.
+    code, out = _wsl([
+        "-e", "/bin/sh", "-c",
+        WSL_ULIMIT_PROLOGUE
+        + "bwrap --unshare-all --ro-bind / / -- /bin/true",
+    ])
+    if code != 0:
+        return False, (
+            "the WSL2 guest has bubblewrap but could not run a sandboxed /bin/true under the "
+            f"resource limits this tier applies (exit {code}): {out[:200]!r}. Either the guest "
+            "kernel restricts unprivileged user namespaces, or its /bin/sh does not accept the "
+            "ulimit prologue — in both cases the tier cannot honour what it would claim."
+        )
+    return True, (
+        "verified by executing a sandboxed /bin/true inside the WSL2 guest, under this tier's "
+        "resource limits"
+    )
+
+
 def _probe_microvm(deep: bool = False) -> tuple[bool, str]:
     return False, "microVM isolation is not implemented"
 
@@ -115,6 +233,8 @@ def probe(tier: str, deep: bool = False) -> tuple[bool, str]:
         return _probe_direct()
     if tier == TIER_BUBBLEWRAP:
         return _probe_bubblewrap(deep=deep)
+    if tier == TIER_WSL2:
+        return _probe_wsl2(deep=deep)
     if tier == TIER_MICROVM:
         return _probe_microvm(deep=deep)
     raise ValueError(f"unknown isolation tier: {tier!r}, choose from {list(TIERS)}")
@@ -170,7 +290,7 @@ def describe_host(deep: bool = False) -> dict:
             "provides": TIER_DESCRIPTION[tier],
         }
     strongest = next(
-        (t for t in (TIER_MICROVM, TIER_BUBBLEWRAP) if tiers[t]["available"]), TIER_DIRECT
+        (t for t in reversed(_TIER_STRENGTH) if tiers[t]["available"]), TIER_DIRECT
     )
     return {
         "platform": platform.system(),

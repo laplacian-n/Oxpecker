@@ -988,16 +988,22 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         # to be `subprocess.run(cmd, shell=True)` on the host with only the destructive-command
         # regex in front of it, while `session.isolation_tier` reported "bubblewrap" to the API
         # and was read by nothing.
-        if platform.system() != "Linux":
-            return {"ok": False, "error": (
-                f"run_command is unavailable on {platform.system() or 'this platform'}: the "
-                "isolation tiers are Linux-only (bubblewrap namespaces + seccomp), and the "
-                "command runner resolves binaries against a Unix PATH. Running commands "
-                "unsandboxed on the host is not offered as a fallback. The network tools "
-                "(http_request, port_discovery) work on every platform and cover web and "
-                "service testing; local command execution needs a Linux host or WSL2."
-            )}
         requested_tier = getattr(session, "isolation_tier", "bubblewrap") or "bubblewrap"
+        # Every isolation tier but wsl2 executes on this host's own kernel, against a Unix PATH.
+        # wsl2 is the one that does not: it runs bwrap inside the WSL2 guest, so it is the only
+        # tier a Windows operator can select. Running unsandboxed on the Windows host is still
+        # not offered as a fallback.
+        if platform.system() != "Linux" and requested_tier != _isolation.TIER_WSL2:
+            return {"ok": False, "error": (
+                f"run_command is unavailable on {platform.system() or 'this platform'} with the "
+                f"{requested_tier!r} isolation tier: it needs a Linux kernel (bubblewrap "
+                "namespaces + seccomp) and resolves binaries against a Unix PATH. On Windows, "
+                "select the 'wsl2' isolation tier for this session — it runs the same bubblewrap "
+                "profile inside the WSL2 guest, and requires WSL2 with a distribution that has "
+                "bubblewrap installed. Running commands unsandboxed on the host is not offered "
+                "as a fallback. The network tools (http_request, port_discovery) work on every "
+                "platform and cover web and service testing."
+            )}
         try:
             # Selecting "direct" IS the operator's explicit opt-out, so no fallback flag is
             # needed: resolve_tier returns direct when direct was asked for, and raises when a
@@ -1678,7 +1684,7 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
 # Tool schemas exposed to the model
 TOOL_SCHEMAS = [
     _port_discovery.SCHEMA,
-    {"type": "function", "function": {"name": "run_command", "description": "Run ONE local program inside the isolation sandbox. There is no shell: pipes, redirects, &&, ; and $( ) are refused — run one program per call and combine results yourself, or pass a pipeline to python3 -c. The sandbox has NO network, so use http_request and port_discovery for anything involving a target. Linux only.", "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}, "description": "Program and arguments, e.g. [\"grep\",\"-rn\",\"password\",\"notes.txt\"]. Preferred — no quoting to get wrong."}, "command": {"type": "string", "description": "Alternative to argv: a single command line, split on whitespace honouring quotes. Shell constructs are refused."}}}}},
+    {"type": "function", "function": {"name": "run_command", "description": "Run ONE local program inside the isolation sandbox. There is no shell: pipes, redirects, &&, ; and $( ) are refused — run one program per call and combine results yourself, or pass a pipeline to python3 -c. The sandbox has NO network, so use http_request and port_discovery for anything involving a target. Needs a Linux host, or a Windows host with the wsl2 tier selected.", "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}, "description": "Program and arguments, e.g. [\"grep\",\"-rn\",\"password\",\"notes.txt\"]. Preferred — no quoting to get wrong."}, "command": {"type": "string", "description": "Alternative to argv: a single command line, split on whitespace honouring quotes. Shell constructs are refused."}}}}},
     {"type": "function", "function": {"name": "http_request", "description": "Send an HTTP request to an in-scope target and get back status, headers, and body. PREFER this over run_command for any web testing — send SQLi/XSS/auth payloads as structured fields (no shell quote-escaping). For Juice Shop login use POST http://HOST:3000/rest/user/login with a JSON body {\"email\":\"...\",\"password\":\"...\"}.", "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Full URL incl. path and query string"}, "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"], "default": "GET"}, "headers": {"type": "object", "description": "Request headers as key/value pairs"}, "body": {"description": "Request body — a JSON object (sent as application/json) or a raw string"}}, "required": ["url"]}}},
     {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to read"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Write content to a file in the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to write"}, "content": {"type": "string", "description": "File content"}}, "required": ["path", "content"]}}},
@@ -2448,6 +2454,15 @@ def index():
 # ── Sessions ──
 @app.post("/api/sessions")
 def create_session(req: CreateSessionRequest):
+    # Validated here rather than at the first run_command: an unknown tier name reached
+    # get_executor() and raised ValueError mid-turn, which surfaced to the model as a tool
+    # exception on a session that had been reporting that tier as its isolation since creation.
+    if req.isolation_tier not in _isolation.TIERS:
+        raise HTTPException(
+            400,
+            f"unknown isolation_tier {req.isolation_tier!r}; choose from "
+            f"{list(_isolation.TIERS)}",
+        )
     sid = str(uuid.uuid4())[:12]
     session = Session(
         session_id=sid,
@@ -2463,6 +2478,7 @@ def create_session(req: CreateSessionRequest):
         "session_id": sid, "workspace_root": str(DATA_DIR),
         "profile": req.profile, "use_security_tools": req.use_security_tools,
         "engagement_id": req.engagement_id,
+        "isolation_tier": req.isolation_tier,
     }
 
 @app.get("/api/sessions")

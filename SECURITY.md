@@ -32,15 +32,17 @@ authorized to test. Unauthorized access to computer systems is illegal in most j
 > |---|---|---|
 > | Scope / RoE enforcement | enforced via the broker | **active** — the same matcher, exact host and CIDR comparison, deny evaluated before allow, denying on an empty or expired engagement |
 > | Destructive-command denylist | — | **active** |
-> | Sandboxed execution | bubblewrap + seccomp + rlimits | **active on Linux**; on other platforms `run_command` refuses rather than running unsandboxed |
+> | Sandboxed execution | bubblewrap + seccomp + rlimits | **active on Linux**. On Windows, select the `wsl2` tier — the same bubblewrap profile inside the WSL2 guest, without seccomp; implemented and unit-tested, but never exercised on a real Windows host, so it verifies itself by execution at startup and refuses if it cannot. Everywhere else `run_command` refuses rather than running unsandboxed |
 > | Audit logging | hash-chained audit log + encrypted evidence store | **active** — every tool call, plus a separate debug trace and a reader (`agent.web.trace_cli`) |
 > | Broker mediation (RoE class gate, rate limit, kill switch, evidence) | active | **active** for the outward-facing tools; `run_command` is gated by the sandbox instead, by design |
 > | Injection screening of tool output | active | **active** |
-> | Human approval of escalated actions | interactive prompt | **not active** — refused rather than awaited, since there is no endpoint to ask through. Session taint is therefore not marked either; the two are one piece of outstanding work |
+> | Human approval of escalated actions | interactive prompt | **active** — the request appears in the UI's Approvals panel and the turn waits for the answer. Anything that is not an explicit approval, a timeout included, is a denial |
+> | Session taint after flagged output | marked, escalates to approval | **active** — a flagged tool result taints the session, so the next action beyond passive recon needs an operator. The local knowledge index is exempt: it is text *about* injection, not attacker-controlled |
 >
 > **This is still dual-use software that runs model-chosen commands.** The isolation is real on
-> Linux and absent elsewhere, and no sandbox is a substitute for running it somewhere you can
-> afford to lose. Prefer a disposable machine or VM.
+> Linux, available on Windows through WSL2 but not yet exercised on one, and absent elsewhere —
+> and no sandbox is a substitute for running it somewhere you can afford to lose. Prefer a
+> disposable machine or VM.
 
 Oxpecker enforces safety architecturally, not by relying on a model to refuse:
 
@@ -49,8 +51,13 @@ Oxpecker enforces safety architecturally, not by relying on a model to refuse:
   instance-metadata addresses are denied regardless of what an engagement lists.
 - **Destructive-command denylist** — clearly destructive host commands are blocked outright.
 - **Sandboxed / isolated execution** — kernel-enforced namespace isolation with a seccomp
-  profile and resource limits. *(Linux only; elsewhere local command execution is refused
-  rather than downgraded.)*
+  profile and resource limits. *(Linux, or Windows via the `wsl2` tier, which runs the same
+  profile inside the WSL2 guest without seccomp. Elsewhere local command execution is refused
+  rather than downgraded, and a tier that cannot run is refused rather than silently replaced
+  by a weaker one.)*
+- **Human approval, and taint after flagged output** — output that trips the injection screen
+  marks the session, and the broker then holds any action beyond passive reconnaissance until an
+  operator approves it in the UI. A request that goes unanswered expires as a denial.
 - **Audit logging** — every action, observation and decision is recorded in a hash-chained log,
   with full output in an encrypted evidence store. Verify a session's chain with
   `python3 -m agent.main --verify-audit <session_id>`, or read it back with

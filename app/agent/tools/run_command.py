@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from .. import config
-from ..sandbox.executor import get_executor
+from ..sandbox.executor import TIER_WSL2, get_executor
 from .workspace import WorkspaceEscapeError, contains_credential_path, resolve_within_workspace
 
 SCHEMA = {
@@ -110,7 +110,11 @@ def run(
         return {"ok": False, "blocked": True, "error": reason}
 
     binary = Path(argv[0]).name
-    if shutil.which(binary, path="/usr/bin:/bin") is None:
+    # The wsl2 tier runs the binary inside the WSL2 guest, so it is not on this host's
+    # filesystem at all — and this host is Windows, where a which() against a Unix PATH can
+    # only ever return None. The guest reports a missing binary itself, as exit 127 with its
+    # own message, which is the accurate source for a question about the guest.
+    if isolation_tier != TIER_WSL2 and shutil.which(binary, path="/usr/bin:/bin") is None:
         return {"ok": False, "blocked": False, "error": f"binary not found on PATH: {binary}"}
 
     if cwd:

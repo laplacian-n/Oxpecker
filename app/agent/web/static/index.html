@@ -694,7 +694,11 @@ function renderMenuDropdown(minW){
     items.push({value:false,label:'Off',desc:'Only run_command / read_file / write_file',cur:!S.securityTools});
     items.push({value:true,label:'On',desc:'http_recon, port_discovery, knowledge_search, osint_record, browser_fetch',cur:S.securityTools});
   }else if(S.menu==='iso'){
-    items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default)',cur:S.isolation==='bubblewrap'});
+    items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default) \u2014 Linux hosts',cur:S.isolation==='bubblewrap'});
+    // The only tier a Windows host can run local commands under: the same bubblewrap profile,
+    // inside the WSL2 guest. Needs WSL2 with bubblewrap installed in the distribution; the
+    // server exec-verifies that and refuses the run if it is not true, rather than downgrading.
+    items.push({value:'wsl2',label:'wsl2',desc:'bubblewrap inside the WSL2 guest \u2014 Windows hosts; no seccomp',cur:S.isolation==='wsl2'});
     items.push({value:'direct',label:'direct',desc:'No sandbox beyond the binary blocklist',cur:S.isolation==='direct'});
   }else if(S.menu==='mode'){
     items.push({value:'assistant',label:'Assistant',desc:'Free chat — you drive every turn, no staged protocol.',cur:S.mode==='assistant'});
