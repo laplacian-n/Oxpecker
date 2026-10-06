@@ -60,6 +60,10 @@ TOOL_ACTION_CLASS = {
 # just its tool name.
 REQUIRES_APPROVAL: set[str] = set()
 
+# The idempotency cache is rewritten whole on every dispatch, so it is bounded rather than
+# allowed to grow for the life of an install.
+IDEMPOTENCY_CACHE_MAX_ENTRIES = 500
+
 
 def _action_class_for(request: ActionRequest) -> str | None:
     """M4.6: http_recon with verify_cert=False is a distinct, harder-gated action class —
@@ -118,7 +122,18 @@ class Broker:
     def _save_idempotent(self, key: str, response: ActionResponse) -> None:
         cache = self._idempotency_cache()
         cache[key] = response.to_dict()
-        self._idempotency_path.write_text(json.dumps(cache))
+        # Bounded, and pruned oldest-first. This file is rewritten in full on every dispatch, so
+        # an unpruned cache costs a growing serialization on each call as well as unbounded disk
+        # — and because ActionRequest mints a fresh idempotency_key per request unless the caller
+        # supplies one, most entries are single-use and will never be read back. Harmless while
+        # only the CLI dispatched; the web runtime now dispatches on every tool call.
+        if len(cache) > IDEMPOTENCY_CACHE_MAX_ENTRIES:
+            # dicts keep insertion order, so the head is the oldest.
+            for stale in list(cache)[: len(cache) - IDEMPOTENCY_CACHE_MAX_ENTRIES]:
+                cache.pop(stale, None)
+        tmp = self._idempotency_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache))
+        tmp.replace(self._idempotency_path)  # atomic: a crash mid-write left it unparseable
 
     def _finalize(self, request: ActionRequest, response: ActionResponse) -> ActionResponse:
         """Single exit path: store full raw output in the encrypted evidence store, write the

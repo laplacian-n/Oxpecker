@@ -29,6 +29,7 @@ import hmac
 import json
 import logging
 import os
+import pathlib
 import platform
 import shlex
 import queue
@@ -875,6 +876,31 @@ class _ShellFeatureError(ValueError):
     pass
 
 
+class _PathEscape(ValueError):
+    pass
+
+
+def _resolve_in_data_dir(path: str) -> pathlib.Path:
+    """Resolve `path` under DATA_DIR, or refuse.
+
+    Both file tools used `str(fp).startswith(str(DATA_DIR))`, which is a string-prefix test, not
+    a containment test: a sibling directory whose name merely begins with the same characters
+    passes it. `dev_data_evil` sat outside `dev_data` and read as inside, so `read_file` returned
+    its contents and `write_file` created files there. Verified before the fix; a test now holds
+    it.
+
+    `is_relative_to` tests actual containment. Resolution happens first, so ordinary `../`
+    traversal and symlinks pointing outside both resolve to a path that fails the check.
+    """
+    root = DATA_DIR.resolve()
+    fp = (root / path).resolve()
+    if fp != root and not fp.is_relative_to(root):
+        raise _PathEscape(
+            f"path escapes the workspace: {path!r} resolves outside {root.name}/"
+        )
+    return fp
+
+
 def _parse_argv(args: dict) -> list[str]:
     """Accept either `argv` (a list, preferred) or `command` (a string, split with shlex).
 
@@ -885,6 +911,10 @@ def _parse_argv(args: dict) -> list[str]:
     argv = args.get("argv")
     if isinstance(argv, list) and argv:
         return [str(a) for a in argv]
+    if isinstance(argv, str) and argv.strip():
+        # A model that reaches for argv and then passes a string meant the command line; saying
+        # "empty command" at that point is both wrong and unhelpful. Treat it as `command`.
+        args = {**args, "command": argv}
 
     cmd = str(args.get("command") or args.get("cmd") or "").strip()
     if not cmd:
@@ -1016,6 +1046,9 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
                 "run. This host reported the tier as available but could not use it."
             )}
         except Exception as e:
+            # Nothing completed, so no tier describes what ran — same reason a preflight-blocked
+            # command reports none.
+            session.effective_isolation_tier = None
             return {"ok": False, "error": f"execution failed: {e}"}
 
         # Flatten to the shape this tool has always returned, and state the tier that actually
@@ -1047,9 +1080,10 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         if not path:
             return {"ok": False, "error": "empty path"}
         try:
-            fp = (DATA_DIR / path).resolve()
-            if not str(fp).startswith(str(DATA_DIR)):
-                return {"ok": False, "error": "path traversal blocked"}
+            try:
+                fp = _resolve_in_data_dir(path)
+            except _PathEscape as e:
+                return {"ok": False, "error": str(e)}
             content = fp.read_text(encoding="utf-8", errors="replace")[:8000]
             return {"ok": True, "content": content}
         except FileNotFoundError:
@@ -1063,9 +1097,10 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         if not path:
             return {"ok": False, "error": "empty path"}
         try:
-            fp = (DATA_DIR / path).resolve()
-            if not str(fp).startswith(str(DATA_DIR)):
-                return {"ok": False, "error": "path traversal blocked"}
+            try:
+                fp = _resolve_in_data_dir(path)
+            except _PathEscape as e:
+                return {"ok": False, "error": str(e)}
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             return {"ok": True, "path": str(fp)}
@@ -1389,6 +1424,13 @@ def _dispatch_via_broker(canonical: str, args: dict, session: Session, *, turn_i
 _audit_logs: dict[str, _audit_log.AuditLog] = {}
 
 
+# Per-session handles are cached so each session keeps one hash chain. Bounded because a
+# long-lived server would otherwise hold one object per session seen since start; the entries are
+# only caches — a dropped one is rebuilt on next use, and AuditLog re-reads the chain head from
+# disk on every write, so rebuilding cannot fork the chain.
+_AUDIT_LOG_CACHE_MAX = 200
+
+
 def _audit_for(session_id: str) -> _audit_log.AuditLog:
     """One AuditLog per session, matching Broker._audit_for. Writes land in config.AUDIT_DIR
     beside the CLI's, so `python3 -m agent.main --verify-audit <session_id>` verifies a web
@@ -1396,6 +1438,9 @@ def _audit_for(session_id: str) -> _audit_log.AuditLog:
     and a trail only the web UI can read would be half a fix."""
     log_obj = _audit_logs.get(session_id)
     if log_obj is None:
+        if len(_audit_logs) >= _AUDIT_LOG_CACHE_MAX:
+            for stale in list(_audit_logs)[: len(_audit_logs) - _AUDIT_LOG_CACHE_MAX + 1]:
+                _audit_logs.pop(stale, None)
         log_obj = _audit_logs[session_id] = _audit_log.AuditLog(session_id)
     return log_obj
 

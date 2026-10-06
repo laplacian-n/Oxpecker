@@ -214,9 +214,18 @@ class DebugTrace:
 
 _traces: dict[str, DebugTrace] = {}
 
+# Bounded for the same reason as the audit-log cache: a long-lived server would otherwise keep
+# one object per session seen since start. These hold no unflushed state — each write opens and
+# closes the file — so evicting one loses nothing but the header flag, which is recomputed from
+# the file's existence.
+_TRACE_CACHE_MAX = 200
+
 
 def for_session(session_id: str) -> DebugTrace:
     trace = _traces.get(session_id)
     if trace is None:
+        if len(_traces) >= _TRACE_CACHE_MAX:
+            for stale in list(_traces)[: len(_traces) - _TRACE_CACHE_MAX + 1]:
+                _traces.pop(stale, None)
         trace = _traces[session_id] = DebugTrace(session_id)
     return trace
