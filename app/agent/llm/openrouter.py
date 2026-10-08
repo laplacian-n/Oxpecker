@@ -195,9 +195,17 @@ class OpenRouterProvider:
         cost = (prompt_cost, completion_cost) if None not in (prompt_cost, completion_cost) else None
 
         has_tools = "tools" in supported or "tool_choice" in supported
+        # OpenRouter publishes the real window per model. Without it the runtime would budget a
+        # 200k-context model as if it were the 32k local build and compact it eight times
+        # sooner than necessary — every fold costing a summarisation call and a cache miss.
+        try:
+            window = int(entry.get("context_length") or 0)
+        except (TypeError, ValueError):
+            window = 0
         return replace(
             caps,
             native_tool_calls=has_tools,
+            context_window=window or caps.context_window,
             # "strict" tool schemas are a stronger claim than "accepts tools", and OpenRouter
             # does not advertise it per model, so it stays False: dev_server's alias table and
             # JSON-block scraper are harmless when the model emits proper calls anyway.

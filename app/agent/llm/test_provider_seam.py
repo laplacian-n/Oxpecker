@@ -9,6 +9,8 @@ Run directly: `python3 -m agent.llm.test_provider_seam`.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import json
 from unittest.mock import patch
 
@@ -59,11 +61,19 @@ def main() -> int:
         check(f"{field} defaults to False", getattr(bare, field) is False)
     check("reasoning defaults to 'none'", bare.reasoning == "none")
     check("cost defaults to unmetered", bare.cost_per_mtok is None)
-    check("to_dict round-trips every declared field",
-          set(bare.to_dict()) == {"name", "model", "native_tool_calls", "strict_tool_schemas",
-                                  "prompt_caching", "server_compaction", "server_token_count",
-                                  "reasoning", "append_only_history", "cost_per_mtok"},
-          str(sorted(bare.to_dict())))
+    # Derived from the dataclass rather than written out, which is what the name of this check
+    # claims to test. A hardcoded list only catches to_dict LOSING a field: declare a new
+    # capability and forget to expose it, and both the list and to_dict stay unchanged, so the
+    # frozen version passed while /api/health silently stopped reporting the new field. Every
+    # declared capability has to reach the trajectory record and the health endpoint, so this
+    # compares against the fields that actually exist.
+    declared = {f.name for f in dataclasses.fields(ProviderCapabilities)}
+    check("to_dict exposes every declared field, and no field that does not exist",
+          set(bare.to_dict()) == declared,
+          f"missing={sorted(declared - set(bare.to_dict()))} "
+          f"extra={sorted(set(bare.to_dict()) - declared)}")
+    check("context_window defaults to the smallest window any provider here has",
+          bare.context_window == 32768, str(bare.context_window))
 
     print("\n== the llama.cpp provider declares what it actually does ==")
     c = LlamaCppProvider.CAPABILITIES

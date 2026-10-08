@@ -50,6 +50,11 @@ class LlamaCppProvider:
         reasoning="raw",
         append_only_history=False,
         cost_per_mtok=None,
+        # Matches `llama-server -c 32768`, the launch this project documents and the number
+        # dev_server's old character budget was derived from. A server started with a smaller
+        # `-c` would overrun this; llama-server reports the real value on /props, which this
+        # client does not read yet, so the documented launch is the honest declaration.
+        context_window=32768,
     )
 
     def capabilities(self) -> ProviderCapabilities:

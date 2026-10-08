@@ -722,14 +722,20 @@ function renderMenuDropdown(minW){
   </div>`;
 }
 
-// Real context estimate for the 8192-token window the server actually sends per turn:
-// stable system prompt + tool schemas + the recent conversation (last ~14 msgs) + any
-// live stream. ~4 chars/token. This mirrors _fit_context/history window in dev_server.py.
+// Context estimate, used only until the server reports a real prompt_tokens count for this
+// session: stable system prompt + tool schemas + the recent conversation + any live stream,
+// at ~4 chars/token. It mirrors dev_server.py's _fit_context and history window, so the two
+// numbers below have to track that module's CTX_HISTORY slice and char budget.
+// CTX_MAX starts at the local llama build's window and is replaced by the real one as soon as
+// the server sends a 'context' event (see the handler above) — the provider's declared window,
+// which for an API model can be several times this. Without that replacement the gauge pegs at
+// "100% full" on any model with a larger window than the local one.
 let CTX_MAX=32768; const CTX_HISTORY=20;
-// Server caps the conversation it actually sends: last ~14 turns, each ≤5000 chars, then
-// the whole non-system block trimmed to MAX_INPUT_CHARS (18000 chars ≈ 4500 tok) by
-// _fit_context. The estimate must mirror that cap or it reads "100% full" forever.
-const CTX_CONV_CAP_TOK=22000;
+// _fit_context trims the non-system block to MAX_INPUT_CHARS, which is 90000 chars for a 32k
+// window and scales with the window from there (INPUT_CHARS_PER_CTX_TOKEN). 90000/4 ≈ 22000
+// tokens, expressed as a fraction of the window so this estimate scales the same way the
+// server's budget does rather than pegging at the local build's number.
+const CTX_CONV_CAP_FRACTION=22000/32768;
 function estimateContext(){
   const sysTok=560;                            // system prompt + platform facts (~fixed)
   const toolsTok=S.securityTools?1390:1190;    // tool schemas, measured from TOOL_SCHEMAS (~chars/4)
@@ -744,7 +750,7 @@ function estimateContext(){
   let chars=0;
   thread.slice(-CTX_HISTORY).forEach(m=>{chars+=(m.content||'').length+(m.reasoning_content||'').length;});
   chars+=(S.streamingText||'').length+(S.streamingReasoning||'').length;
-  const convTok=Math.min(Math.round(chars/4),CTX_CONV_CAP_TOK);
+  const convTok=Math.min(Math.round(chars/4),Math.round(CTX_MAX*CTX_CONV_CAP_FRACTION));
   const used=Math.min(sysTok+toolsTok+convTok,CTX_MAX);
   const avail=Math.max(CTX_MAX-used,0);
   return {sysTok,toolsTok,convTok,used,avail,pct:Math.round(used/CTX_MAX*100),real:false};
