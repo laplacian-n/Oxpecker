@@ -30,16 +30,29 @@ _BASE64_DECODE_EXEC = re.compile(
 # communicates in Thai; a scanner that only covers English misses a whole attack surface for
 # any non-English-speaking deployment, which the "multilingual" test case in the doc's own
 # eval list explicitly calls out). Not exhaustive — a non-match is not an allow decision.
+# NOTE on whitespace: every gap between words is `\s+`, never a literal space. The patterns
+# used single spaces, so `ignore all  previous instructions` (two spaces) or the same phrase
+# with a line break in the middle — which word-wrapped HTTP response bodies produce as a matter
+# of course — scanned as CLEAN and the session was never tainted. One extra space defeated the
+# canonical phrase this module exists to catch.
+#
+# NOTE on specificity: `you are now` and `act as` were unanchored, so git's own
+# "You are now up to date" and prose like "this wrapper will act as a transparent proxy" tainted
+# the session. A detector that fires on ordinary tool output is a detector operators learn to
+# ignore, which costs more than the few evasions the narrowing admits.
 _PHRASES = [
-    r"ignore (all )?previous instructions",
-    r"disregard (all )?(the )?(previous|above) instructions",
-    r"new instructions\s*:",
-    r"following directive",
-    r"system prompt\s*:",
-    r"you are now",
-    r"act as (if )?",
-    r"do not (tell|inform|mention) the user",
-    r"reveal your (system prompt|instructions)",
+    r"ignore\s+(all\s+)?previous\s+instructions",
+    r"ignore\s+(any|all)\s+(prior|previous|preceding)\s+instructions",
+    r"disregard\s+(all\s+)?(the\s+)?(previous|above|prior|preceding)\s+instructions",
+    r"forget\s+(all\s+)?(your\s+)?(previous|prior)\s+instructions",
+    r"new\s+instructions\s*:",
+    r"following\s+directive",
+    r"system\s+prompt\s*:",
+    r"you\s+are\s+now\s+(a|an|the|acting|operating|no\s+longer|free|unrestricted|allowed)\b",
+    r"(you|now|please|instead)\s+act\s+as\s+(if\s+|a\s+|an\s+)?",
+    r"act\s+as\s+(a\s+|an\s+)?(dan|jailbroken|unrestricted|unfiltered|developer\s+mode)\b",
+    r"do\s+not\s+(tell|inform|mention)\s+the\s+user",
+    r"reveal\s+your\s+(system\s+prompt|instructions)",
     # Thai
     r"ละเลยคำสั่งก่อนหน้า",
     r"ลืมคำสั่งเดิม",
@@ -106,8 +119,9 @@ class ScanResult:
 
 def scan(text: str) -> ScanResult:
     reasons = []
-    if _SHELL_SUBSTITUTION.search(text):
-        reasons.append("shell_substitution_pattern")
+    # Recorded, but NOT on its own a reason to call the output suspicious — see
+    # `corroborating` below.
+    shell_substitution = bool(_SHELL_SUBSTITUTION.search(text))
     if _BASE64_DECODE_EXEC.search(text):
         reasons.append("deferred_execution_pattern")
     if _PHRASE_RE.search(text):
@@ -126,6 +140,14 @@ def scan(text: str) -> ScanResult:
             if _shannon_entropy(m.group(0)) > 4.0:  # near-random-looking, not e.g. "aaaa...aaaa"
                 unknown_signal = True
                 break
+
+    # A shell-substitution pattern is a corroborating signal, not a verdict of its own. The
+    # pattern matches any pair of backticks, so every README, `--help` text and git hint
+    # ("use `git config --global ...`") marked the session tainted — and because scan() drives
+    # TaintStore.mark(), that escalation was constant noise on ordinary output. It still turns a
+    # known injection phrase into "malicious", which is what it was for.
+    if shell_substitution and reasons:
+        reasons.append("shell_substitution_pattern")
 
     if "deferred_execution_pattern" in reasons or (
         "shell_substitution_pattern" in reasons and "known_injection_phrasing" in reasons

@@ -83,6 +83,7 @@ class AuditLog:
         exit_code: int | None,
         injection_flagged: bool,
         prompt_version: str | None = None,
+        isolation_tier: str | None = None,
     ) -> dict:
         # Re-sync from disk on every write, not just __init__: a separate process (e.g. the
         # Phase-3 security-tools MCP subprocess, which does its own broker-mediated audit
@@ -112,6 +113,12 @@ class AuditLog:
             "exit_code": exit_code,
             "injection_flagged": injection_flagged,
             "prompt_version": prompt_version,
+            # The tier the action ACTUALLY executed under, where one applies (local command
+            # execution). None for actions with no isolation dimension, such as an HTTP request
+            # or an in-memory note. Recorded because "which sandbox ran this" is not
+            # reconstructable after the fact, and a session's requested tier is not evidence of
+            # what happened — see agent/sandbox/availability.py.
+            "isolation_tier": isolation_tier,
             "prev_hash": self._prev_hash,
         }
         entry_hash = hashlib.sha256(
@@ -149,12 +156,35 @@ def verify(session_id: str, audit_dir: Path | None = None) -> tuple[bool, str]:
     if not log_path.exists():
         return False, "log file missing"
 
-    entries = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-    checkpoints = (
-        [json.loads(line) for line in checkpoint_path.read_text().splitlines() if line.strip()]
-        if checkpoint_path.exists()
-        else []
-    )
+    # Parse defensively. This used to be a bare comprehension over json.loads, which raised
+    # JSONDecodeError on a malformed line instead of returning a verdict — so anyone able to
+    # corrupt a single line turned integrity verification from "FAILED" into an unhandled
+    # exception, and a crash mid-write left the operator unable to check the log at all. A line
+    # that will not parse IS a verification failure, and it is reported as one.
+    def _parse(path: Path, label: str) -> tuple[list[dict] | None, str]:
+        rows = []
+        try:
+            text = path.read_text()
+        except OSError as e:
+            return None, f"{label} unreadable: {e}"
+        for n, line in enumerate(text.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                return None, f"{label} line {n} is not valid JSON ({e}) — the log is damaged"
+        return rows, ""
+
+    entries, err = _parse(log_path, "log")
+    if entries is None:
+        return False, err
+    if checkpoint_path.exists():
+        checkpoints, err = _parse(checkpoint_path, "checkpoint file")
+        if checkpoints is None:
+            return False, err
+    else:
+        checkpoints = []
     if len(entries) != len(checkpoints):
         return False, f"entry/checkpoint count mismatch: {len(entries)} vs {len(checkpoints)}"
 
@@ -170,7 +200,19 @@ def verify(session_id: str, audit_dir: Path | None = None) -> tuple[bool, str]:
         ).hexdigest()
         if stored_hash != expected_hash:
             return False, f"hash mismatch at index {i}: entry was modified"
-        if checkpoints[i]["index_hash"] != stored_hash:
+        # Indexed defensively, like the log lines above it and for the same reason stated
+        # there: a checkpoint line that will not parse IS a verification failure. Reading
+        # `checkpoints[i]["index_hash"]` blind turned a damaged checkpoint into a KeyError or a
+        # TypeError out of the verifier, so anyone who could write the file — the same threat
+        # model the file exists to detect — could deny the operator a verdict entirely instead
+        # of being caught. A crash mid-write leaving a partial line did the same.
+        checkpoint = checkpoints[i] if i < len(checkpoints) else None
+        if not isinstance(checkpoint, dict) or "index_hash" not in checkpoint:
+            return False, (
+                f"checkpoint {i} is missing or unreadable ({checkpoint!r:.60}): the checkpoint "
+                f"file cannot corroborate the log"
+            )
+        if checkpoint["index_hash"] != stored_hash:
             return False, f"checkpoint mismatch at index {i}: log and checkpoint disagree"
         prev_hash = stored_hash
 

@@ -30,6 +30,8 @@ Isolation model, stated precisely rather than implied:
 """
 from __future__ import annotations
 
+import os
+
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
@@ -64,7 +66,18 @@ def browser_session(policy: Policy, headless: bool = True):
     caller can inspect what was denied during the session without polling anything."""
     denied: list[dict] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, args=["--no-sandbox"])
+        # OXPECKER_BROWSER_EXECUTABLE points at a Chromium binary to use instead of the one
+        # Playwright downloaded for itself. Two reasons it is worth having: a server install may
+        # prefer the distribution's chromium to a second copy under ~/.cache, and a Playwright
+        # Python version only launches the exact browser build it was pinned against — a host
+        # carrying a different build has a perfectly good browser that Playwright refuses to use
+        # ("Executable doesn't exist at .../chromium_headless_shell-<build>/..."). Unset, this
+        # changes nothing: Playwright resolves the browser exactly as before.
+        launch_kwargs: dict = {"headless": headless, "args": ["--no-sandbox"]}
+        executable = os.environ.get("OXPECKER_BROWSER_EXECUTABLE", "").strip()
+        if executable:
+            launch_kwargs["executable_path"] = executable
+        browser = p.chromium.launch(**launch_kwargs)
         try:
             context = browser.new_context()
             try:

@@ -37,21 +37,46 @@ def truncate_tool_result(client: LlamaClient, result_text: str) -> str:
     if n <= config.MAX_SINGLE_RESULT_TOKENS:
         return result_text
 
-    # Binary-search-free approximate split by character ratio, then trim to exact token
-    # budget by iterative shrink — good enough for Phase 1, avoids repeated tokenize() calls
-    # in a tight loop for very large outputs.
+    # Approximate split by character ratio, THEN actually shrink until the result fits. The
+    # comment here used to promise an "iterative shrink" that was never implemented: a single
+    # global chars-per-token average sized the head and tail slices, and the function never
+    # re-measured. On output of mixed density — a CJK or hex blob followed by a long run of a
+    # repeated character, which is what a truncated hexdump or a padded response body looks
+    # like — the average is wrong in both directions at once and the "hard ceiling" was
+    # exceeded 4.6x. Measured before this change with a tokenizer whose ratio varies the way
+    # every real BPE does.
     keep_head_tokens = int(config.MAX_SINGLE_RESULT_TOKENS * 0.6)
     keep_tail_tokens = int(config.MAX_SINGLE_RESULT_TOKENS * 0.4)
     approx_chars_per_token = max(1, len(result_text) // max(1, n))
 
     head_chars = keep_head_tokens * approx_chars_per_token
     tail_chars = keep_tail_tokens * approx_chars_per_token
-    head = result_text[:head_chars]
-    tail = result_text[-tail_chars:] if tail_chars else ""
-    omitted = n - client.token_count(head) - client.token_count(tail)
-    truncated = f"{head}\n[...truncated, ~{max(omitted, 0)} tokens omitted...]\n{tail}"
-    log.info("truncate_tool_result: %d tokens -> ~%d tokens", n, client.token_count(truncated))
-    return truncated
+
+    marker_template = "\n[...truncated, ~{} tokens omitted...]\n"
+    # Bounded: each round halves the slice sizes, so this terminates in ~log2(len) rounds and
+    # at worst lands on the marker alone. Capped anyway rather than trusted to converge.
+    for _ in range(40):
+        head = result_text[:head_chars]
+        tail = result_text[-tail_chars:] if tail_chars else ""
+        omitted = max(n - client.token_count(head) - client.token_count(tail), 0)
+        candidate = f"{head}{marker_template.format(omitted)}{tail}"
+        if client.token_count(candidate) <= config.MAX_SINGLE_RESULT_TOKENS:
+            log.info("truncate_tool_result: %d tokens -> %d tokens",
+                     n, client.token_count(candidate))
+            return candidate
+        if head_chars <= 1 and tail_chars <= 1:
+            break
+        head_chars = max(1, head_chars // 2)
+        tail_chars = max(0, tail_chars // 2)
+
+    # Nothing we can slice fits — the marker itself is already at or over the ceiling. Say so
+    # rather than return something over the limit while claiming it was enforced.
+    fallback = marker_template.format(n).strip()
+    log.warning(
+        "truncate_tool_result: a %d-token result could not be reduced to the %d-token ceiling "
+        "by slicing; returning the truncation notice alone", n, config.MAX_SINGLE_RESULT_TOKENS,
+    )
+    return fallback
 
 
 def wrap_as_tool_output(result_text: str) -> str:

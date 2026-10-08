@@ -7,8 +7,9 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import config
@@ -30,22 +31,174 @@ class Policy:
     deny_hostnames: set[str]
     policy_version: str
     valid_until: float
+    # Wildcard scope: the registrable parent of a `*.example.com` entry, stored WITHOUT the
+    # `*.` — so `example.com` here means "any strict subdomain of example.com". Defaulted so
+    # every existing keyword construction of Policy keeps working unchanged.
+    allow_suffixes: set[str] = field(default_factory=set)
+    deny_suffixes: set[str] = field(default_factory=set)
+    # The program this engagement runs under, when there is one. None is a legal state — every
+    # local lab engagement — and defaulting it to a permissive Program would make the absence
+    # invisible, so the broker branches on `is None` rather than on field values.
+    program: "object | None" = None
 
 
-def _parse_scope_file(path: Path) -> tuple[list[IPNetwork], set[str]]:
-    if not path.exists():
-        raise PolicyError(f"policy file missing: {path}")
+class ScopeLineError(ValueError):
+    """A scope entry that cannot be accepted — malformed, or a wildcard too broad to be a scope."""
+
+
+WILDCARD_PREFIX = "*."
+
+# A wildcard whose parent is a public suffix would put every registrable domain under it in
+# scope. One label (`*.com`) is caught structurally; these are the common two-label public
+# suffixes that would otherwise pass that check. This is deliberately a short deny-list and NOT
+# the Public Suffix List: pulling in a PSL dependency (and keeping it current) is not warranted
+# for a check whose input is an operator-typed scope line, and the structural rule below already
+# refuses the shapes that do unbounded damage. The limitation is that an unusual public suffix
+# not listed here would be accepted if an operator typed it.
+_PUBLIC_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
+    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
+    "com.br", "net.br", "org.br", "gov.br",
+    "co.in", "net.in", "org.in", "gen.in", "firm.in",
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
+    "co.za", "org.za", "web.za", "gov.za",
+    "com.mx", "com.ar", "com.tr", "com.sg", "com.hk", "com.tw", "com.my",
+    "co.kr", "or.kr", "ne.kr", "go.kr",
+    "co.th", "in.th", "ac.th", "go.th", "or.th", "net.th",
+})
+
+
+# Labels of letters, digits, hyphen and underscore; no leading or trailing hyphen; 1-63 bytes
+# each; 253 bytes overall. Underscore is permitted because internal and SRV-style names use it.
+# Non-ASCII is refused, which means an IDN has to be given in punycode (`xn--...`) — the stricter
+# reading, and the one where two layers cannot disagree about what the name is.
+_HOSTNAME_RE = re.compile(
+    r"(?=.{1,253}\Z)"
+    r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
+    r"(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*"
+    r"\Z"
+)
+
+
+def normalize_host(host: str) -> str:
+    """One spelling of a hostname, so two layers cannot disagree about whether they match.
+
+    Lowercased, trailing root dot removed. The root dot matters: `example.com.` and
+    `example.com` are the same host to a resolver, so leaving it in would let `example.com.`
+    slip past an exact-match deny entry written without it.
+    """
+    return host.strip().rstrip(".").lower()
+
+
+def parse_scope_line(line: str):
+    """Classify one scope/deny entry. The single place this decision is made.
+
+    Returns `("network", IPNetwork)`, `("hostname", str)`, `("suffix", str)`, or `None` for a
+    blank line or a comment. Raises `ScopeLineError` for an entry that must not be accepted.
+
+    `("suffix", "example.com")` comes from `*.example.com` and means *strict subdomains only* —
+    the apex is a separate host and bug-bounty programs list it separately when it is in scope,
+    so inferring it here would silently widen the scope beyond what the operator wrote.
+    """
+    line = (line or "").strip()
+    if not line or line.startswith("#"):
+        return None
+
+    # A URL pasted into a targets field is common enough to accept rather than reject.
+    if "://" in line:
+        from urllib.parse import urlparse
+
+        parsed_host = urlparse(line).hostname or ""
+        if not parsed_host:
+            raise ScopeLineError(f"no host could be read from {line!r}")
+        line = parsed_host
+
+    if line.startswith(WILDCARD_PREFIX):
+        parent = normalize_host(line[len(WILDCARD_PREFIX):])
+        if not parent:
+            raise ScopeLineError(f"{line!r} has no parent domain after the wildcard")
+        if "*" in parent:
+            raise ScopeLineError(
+                f"{line!r} has more than one wildcard; only a leading '*.' is supported"
+            )
+        labels = parent.split(".")
+        if len(labels) < 2 or not all(labels):
+            raise ScopeLineError(
+                f"{line!r} would put a whole top-level domain in scope; a wildcard needs at "
+                f"least a registrable domain (e.g. '*.example.com')"
+            )
+        if not _HOSTNAME_RE.fullmatch(parent):
+            # Same charset rule as a bare hostname: without it `*.169.254.169.254\t#x` would
+            # become a suffix carrying a tab, i.e. a wildcard entry that can never match.
+            raise ScopeLineError(
+                f"{line!r} has a parent domain that is not a valid hostname"
+            )
+        if parent in _PUBLIC_SUFFIXES:
+            raise ScopeLineError(
+                f"{line!r} would put every domain under the public suffix {parent!r} in scope"
+            )
+        return "suffix", parent
+
+    if "*" in line:
+        # Mid-label and suffix wildcards (`a.*.example.com`, `example.*`) are refused rather
+        # than approximated: a glob that silently matches more than the operator pictured is
+        # the one failure mode this module exists to prevent.
+        raise ScopeLineError(
+            f"{line!r} is not supported; a wildcard may only appear as a leading '*.'"
+        )
+
+    try:
+        return "network", ipaddress.ip_network(line, strict=False)
+    except ValueError:
+        pass
+
+    host = normalize_host(line)
+    if not _HOSTNAME_RE.fullmatch(host):
+        # Validated against a charset rather than by deny-listing a couple of characters. The
+        # deny-listing version ("/" in host or " " in host) let a TAB-separated inline comment
+        # through as a hostname: `169.254.169.254\t#metadata` became a deny entry that can never
+        # match an IP, so the hard deny list read as populated while being empty, and the agent
+        # was permitted to reach the cloud metadata endpoint with the action recorded as in
+        # scope. Any whitespace, any comment marker, and anything outside the DNS charset is a
+        # refusal now.
+        raise ScopeLineError(
+            f"{line!r} is not a valid CIDR, IP or hostname (an inline comment or stray "
+            f"whitespace is refused rather than read as part of the name)"
+        )
+    return "hostname", host
+
+
+def classify_scope_lines(lines) -> tuple[list[IPNetwork], set[str], set[str]]:
+    """(networks, hostnames, suffixes) for a sequence of entries. Raises on the first bad one —
+    a scope half-loaded is a scope nobody can reason about."""
     networks: list[IPNetwork] = []
     hostnames: set[str] = set()
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    suffixes: set[str] = set()
+    for line in lines or []:
+        parsed = parse_scope_line(str(line))
+        if parsed is None:
             continue
-        try:
-            networks.append(ipaddress.ip_network(line, strict=False))
-        except ValueError:
-            hostnames.add(line.lower())
-    return networks, hostnames
+        kind, value = parsed
+        if kind == "network":
+            networks.append(value)
+        elif kind == "hostname":
+            hostnames.add(value)
+        else:
+            suffixes.add(value)
+    return networks, hostnames, suffixes
+
+
+def _parse_scope_file(path: Path) -> tuple[list[IPNetwork], set[str], set[str]]:
+    if not path.exists():
+        raise PolicyError(f"policy file missing: {path}")
+    try:
+        return classify_scope_lines(path.read_text().splitlines())
+    except ScopeLineError as e:
+        # Fail closed: a scope file with an entry we will not honour must not load as a policy
+        # that silently drops it.
+        raise PolicyError(f"{path}: {e}") from e
 
 
 def load_policy(engagement_dir: Path = config.ENGAGEMENT_DIR) -> Policy:
@@ -82,8 +235,8 @@ def load_policy(engagement_dir: Path = config.ENGAGEMENT_DIR) -> Policy:
             f"policy is not currently valid (window {roe['valid_from']}..{roe['valid_until']})"
         )
 
-    allow_networks, allow_hostnames = _parse_scope_file(scope_path)
-    deny_networks, deny_hostnames = _parse_scope_file(deny_path)
+    allow_networks, allow_hostnames, allow_suffixes = _parse_scope_file(scope_path)
+    deny_networks, deny_hostnames, deny_suffixes = _parse_scope_file(deny_path)
 
     allowed_action_classes = set(roe.get("allowed_action_classes") or [])
     if not allowed_action_classes:
@@ -102,4 +255,6 @@ def load_policy(engagement_dir: Path = config.ENGAGEMENT_DIR) -> Policy:
         deny_hostnames=deny_hostnames,
         policy_version=digest,
         valid_until=valid_until_ts,
+        allow_suffixes=allow_suffixes,
+        deny_suffixes=deny_suffixes,
     )

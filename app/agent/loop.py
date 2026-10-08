@@ -692,6 +692,15 @@ class AgentLoop:
                 latency_ms=latency_ms + exec_ms,
                 exit_code=raw_result.get("exit_code") if isinstance(raw_result, dict) else None,
                 injection_flagged=scan_result.matched,
+                # From the RESULT, not from self.isolation_tier: audit_log's contract is "the
+                # tier the action ACTUALLY executed under", and the requested tier is not
+                # evidence of that — resolve_tier can refuse, and a refusal reports no tier at
+                # all. This was omitted entirely, so every sandboxed command execution in the
+                # CLI recorded None, indistinguishable from an action with no isolation
+                # dimension such as an HTTP request. The web path already passed it.
+                isolation_tier=(
+                    raw_result.get("isolation_tier") if isinstance(raw_result, dict) else None
+                ),
                 prompt_version=self.prompt_version,
             )
 

@@ -265,7 +265,10 @@ const api={
 /* SSE */
 function connectSSE(sessionId){
   disconnectSSE();
-  const url='/api/sessions/'+sessionId+'/events';
+  /* EventSource cannot set headers, so the API key rides as ?key= — the one query-param
+     channel the server accepts (see _key_supplied in dev_server.py). Without this the SSE
+     stream is the only part of the UI that 401s once a key file exists. */
+  const url='/api/sessions/'+sessionId+'/events'+(S.apiKey?('?key='+encodeURIComponent(S.apiKey)):'');
   const es=new EventSource(url);
   S.eventSource=es;
   es.onmessage=function(e){try{handleServerEvent(JSON.parse(e.data))}catch(err){console.error('SSE parse error',err)}};
@@ -312,6 +315,25 @@ function handleServerEvent(evt){
       S.threads[sid].push({role:'system',content:'Autonomous run finished — '+evt.status+(evt.reason?' · '+evt.reason:'')});
       render();softScroll();break;
     case 'autonomous_error':S.running=false;clearInterval(S.elapsedTimer);toast('Autonomous error: '+evt.error);render();break;
+    // The turn thread is now blocked waiting for the answer, so fetch the card immediately
+    // rather than waiting up to 5s for the next poll tick.
+    // No chat line: the header banner and the Approvals panel are where this is surfaced,
+    // and the renderer deliberately suppresses '\u23f3 Awaiting approval' lines in favour of them.
+    case 'approval_required':S.approvalsOpen=true;pollApprovals();render();break;
+    case 'approval_timeout':
+      if(!S.threads[sid])S.threads[sid]=[];
+      S.threads[sid].push({role:'system',content:'Approval for '+(evt.tool||'an action')+' went unanswered and was treated as declined \u2014 the action did NOT run'});
+      pollApprovals();render();softScroll();break;
+    case 'approval_resolved':pollApprovals();render(true);break;
+    // Previously dropped on the floor: the server has been pushing this since injection
+    // screening was wired in, and nothing rendered it, so the one signal that says "this output
+    // tried to redirect the agent" never reached the operator.
+    case 'injection_flagged':
+      if(!S.threads[sid])S.threads[sid]=[];
+      S.threads[sid].push({role:'system',content:'\u26a0 Possible prompt injection in '+(evt.tool||'tool')+' output ('+(evt.verdict||'flagged')+(evt.reasons&&evt.reasons.length?': '+evt.reasons.join(', '):'')+')'+(evt.tainted?'. The session is now held to passive recon \u2014 each further action needs your approval for the next 5 minutes.':'. From the local knowledge index, so the session was not restricted.')});
+      render();softScroll();break;
+    case 'taint_error':toast('Taint store write failed: '+evt.error);break;
+    case 'audit_error':toast('Audit write failed: '+evt.error);break;
   }
 }
 
@@ -672,10 +694,18 @@ function renderConfigPill(key,icon,label,color,minW){
 function renderMenuDropdown(minW){
   const items=[];
   if(S.menu==='sec'){
-    items.push({value:false,label:'Off',desc:'Only run_command / read_file / write_file',cur:!S.securityTools});
-    items.push({value:true,label:'On',desc:'http_recon, port_discovery, knowledge_search, osint_record, browser_fetch',cur:S.securityTools});
+    /* These two lines described a tool set this server does not have — the Off text omitted
+       port_discovery, http_request and knowledge_search, which are always available, and the On
+       text named osint_record and browser_fetch, which dev_server has never dispatched (they
+       belong to loop.py, the CLI runtime). What the toggle actually gates is http_recon. */
+    items.push({value:false,label:'Off',desc:'port_discovery, http_request, files, knowledge_search, and the record_* tools',cur:!S.securityTools});
+    items.push({value:true,label:'On',desc:'Adds http_recon — passive HTTP metadata, scope-checked per redirect hop',cur:S.securityTools});
   }else if(S.menu==='iso'){
-    items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default)',cur:S.isolation==='bubblewrap'});
+    items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default) \u2014 Linux hosts',cur:S.isolation==='bubblewrap'});
+    // The only tier a Windows host can run local commands under: the same bubblewrap profile,
+    // inside the WSL2 guest. Needs WSL2 with bubblewrap installed in the distribution; the
+    // server exec-verifies that and refuses the run if it is not true, rather than downgrading.
+    items.push({value:'wsl2',label:'wsl2',desc:'bubblewrap inside the WSL2 guest \u2014 Windows hosts; no seccomp',cur:S.isolation==='wsl2'});
     items.push({value:'direct',label:'direct',desc:'No sandbox beyond the binary blocklist',cur:S.isolation==='direct'});
   }else if(S.menu==='mode'){
     items.push({value:'assistant',label:'Assistant',desc:'Free chat — you drive every turn, no staged protocol.',cur:S.mode==='assistant'});
@@ -702,7 +732,7 @@ let CTX_MAX=32768; const CTX_HISTORY=20;
 const CTX_CONV_CAP_TOK=22000;
 function estimateContext(){
   const sysTok=560;                            // system prompt + platform facts (~fixed)
-  const toolsTok=S.securityTools?680:420;      // tool schemas
+  const toolsTok=S.securityTools?1390:1190;    // tool schemas, measured from TOOL_SCHEMAS (~chars/4)
   // Prefer the REAL prompt-token count llama-server reported for the last turn.
   if(S.ctxUsage&&S.ctxUsage.prompt_tokens){
     const used=Math.min(S.ctxUsage.prompt_tokens,CTX_MAX);
@@ -1801,7 +1831,7 @@ async function saveEngagement(){
 }
 
 let _approvalPoll;
-function startApprovalPolling(){stopApprovalPolling();_approvalPoll=setInterval(()=>{if(!S.activeSession||!S.running)return;pollApprovals();pollConsults();},5000);}
+function startApprovalPolling(){stopApprovalPolling();_approvalPoll=setInterval(()=>{if(!S.activeSession)return;pollApprovals();pollConsults();},5000);}
 function stopApprovalPolling(){if(_approvalPoll){clearInterval(_approvalPoll);_approvalPoll=null;}}
 
 /* INIT */

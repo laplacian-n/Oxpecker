@@ -80,12 +80,27 @@ def unavailable_reason() -> str | None:
     return _IMPORT_ERROR
 
 
-def build_filter():
-    """Returns a compiled seccomp.SyscallFilter. Raises RuntimeError if pyseccomp isn't
-    available — callers must check available() first if they want to degrade gracefully instead."""
+def build_filter() -> tuple[object, list[str]]:
+    """(compiled filter, the syscall names actually in it).
+
+    The second element is the whole point of the signature change. Rules are skipped per
+    syscall when libseccomp/the kernel/the architecture does not know the name — correctly, so
+    one unknown name does not cost the whole deny-list — but the caller used to hash
+    `DENIED_SYSCALLS` into the sandbox profile digest regardless. The digest then attested a
+    deny-list that was partially not loaded: on an older libseccomp, `ptrace` and the entire
+    new-mount-API family (`move_mount`, `open_tree`, `fsopen`, `fsconfig`, `fsmount`, `fspick`)
+    were skipped while the digest still listed them, and two hosts with materially different
+    filters produced the same fingerprint. Returning what was accepted lets the digest describe
+    the filter that exists.
+
+    Raises RuntimeError if pyseccomp isn't available — callers must check available() first if
+    they want to degrade gracefully instead.
+    """
     if _seccomp is None:
         raise RuntimeError(f"pyseccomp not available: {_IMPORT_ERROR}")
     f = _seccomp.SyscallFilter(defaction=_seccomp.ALLOW)
+    accepted: list[str] = []
+    skipped: list[str] = []
     for name in DENIED_SYSCALLS:
         try:
             # EPERM, not a filter-triggered kill: the caller sees a normal-looking syscall
@@ -95,20 +110,32 @@ def build_filter():
         except OSError:
             # Syscall name not recognized on this libseccomp/kernel version/arch — skip rather
             # than fail filter construction entirely; the rest of the deny-list still applies.
-            log.debug("seccomp: syscall %r not recognized on this system, skipping", name)
+            skipped.append(name)
             continue
-    return f
+        accepted.append(name)
+    if skipped:
+        # Raised from debug to warning: "which protections were applied" is the question the
+        # profile digest exists to answer, and a silent skip is how that answer went wrong.
+        log.warning(
+            "seccomp: %d of %d deny rules were not recognised on this system and are NOT in "
+            "the filter: %s", len(skipped), len(DENIED_SYSCALLS), ", ".join(skipped),
+        )
+    return f, accepted
 
 
-def open_bpf_fd() -> int:
+def open_bpf_fd() -> tuple[int, list[str]]:
     """Compiles the filter and returns an open, seek-reset FD holding the compiled BPF program.
     The backing temp file is deleted immediately after the FD is duplicated — Linux doesn't
     require a path to exist for an already-open descriptor to keep working, so nothing
     accumulates on disk across repeated calls (an earlier version of this function cached the
     compiled file under a fixed path with `delete=False` and never cleaned it up; found and
     fixed while verifying this module didn't leak state, the same discipline applied to every
-    other module this session)."""
-    f = build_filter()
+    other module this session).
+
+    Returns `(fd, accepted_syscalls)` — the second element is what the caller must record in
+    the sandbox profile digest, not the declared deny-list; see `build_filter`.
+    """
+    f, accepted = build_filter()
     with tempfile.NamedTemporaryFile(prefix="localai-seccomp-", suffix=".bpf") as tmp:
         f.export_bpf(tmp)
         tmp.flush()
@@ -116,4 +143,4 @@ def open_bpf_fd() -> int:
     # tmp's own fd is closed (and the file unlinked, delete=True default) by the `with` block
     # exiting — `fd` above is an independent duplicate that survives that.
     os.lseek(fd, 0, os.SEEK_SET)
-    return fd
+    return fd, accepted

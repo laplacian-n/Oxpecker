@@ -1,10 +1,21 @@
+# HISTORICAL — nothing installs from this file, and it should not be trusted as the
+# dependency list. Audited 2026-10: of 16 entries, two name packages that do not exist
+# (httpx2, mcp-types), and 12 pins differ from what is actually installed and working. The one
+# pin that was ever load-bearing was wrong in a way that broke the suite: `mcp==2.1.1` went with
+# `from mcp.server.mcpserver import MCPServer`, a module path no released mcp provides, which
+# made agent/security_mcp_server.py unimportable and took 45 tests down with it — including every
+# agent/test_loop_*_wiring module, none of which is about MCP. The real API is
+# `from mcp.server import FastMCP`, which takes the same arguments that file already passed.
+#
+# The remaining pins below are left as recorded rather than rewritten to match one container,
+# which would assert a tested compatibility nobody has established. For what to actually
+# install, see the Prerequisites block in agent/web/dev_server.py and docs/DEPLOY_UBUNTU.md.
+
 anyio==4.14.2
 fastapi==0.141.1
 httpx==0.28.1
-httpx2==2.12.0
 jsonschema==4.26.0
-mcp==2.1.1
-mcp-types==2.1.1
+mcp>=1.28,<2        # FastMCP; see the note above
 opentelemetry-api==1.44.0
 pydantic==2.13.5
 pydantic_core==2.46.5

@@ -28,6 +28,12 @@ class ActionRequest:
     deadline: float | None = None
     idempotency_key: str = field(default_factory=lambda: str(uuid.uuid4()))
     approval_ref: str | None = None
+    # Audit context the caller holds and the broker cannot derive. _finalize() used to record
+    # turn_index=0 and its own rationale string for every dispatch, which flattened the turn
+    # grouping a reader needs and discarded the model's stated reason for the action — both of
+    # which the caller knows. Defaulted, so existing callers record exactly what they did before.
+    turn_index: int = 0
+    action_rationale: str = ""
 
 
 @dataclass
@@ -44,6 +50,10 @@ class ActionResponse:
     exit_metadata: dict[str, Any]
     output: dict[str, Any]
     audit_record_digest: str | None = None
+    # The audit entry's id, alongside its hash. The hash is the chain link; the id is what the
+    # entry is keyed by, so it is what another record correlates against. Exposing only the
+    # hash meant a caller wanting to point at this entry had to store the wrong key.
+    audit_entry_id: str | None = None
     evidence_digest: str | None = None
     detail: str = ""
 

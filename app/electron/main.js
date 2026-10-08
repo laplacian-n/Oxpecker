@@ -160,7 +160,16 @@ async function startEverything() {
 
   if (!(await httpOk(devUrl))) {
     const py = cfg.pythonCmd || 'py';
-    const devArgs = [cfg.devServer.script, '--port', String(cfg.devServer.port)];
+    // Launched as a module, not as a script path. dev_server.py uses package-relative imports
+    // (`from .. import config`), and `python agent/web/dev_server.py` gives those no parent
+    // package: it died with "attempted relative import with no known parent package" before
+    // binding a port, every time. The failure then surfaced as the generic "did not start —
+    // is Python installed?" message below, which sends you after dependencies that are fine.
+    // The module path is derived from cfg.devServer.script so config.json stays the one place
+    // that names the entry point.
+    const devModule = String(cfg.devServer.script)
+      .replace(/\.py$/, '').replace(/[\\/]/g, '.');
+    const devArgs = ['-m', devModule, '--port', String(cfg.devServer.port)];
     if (cfg.devServer.ragIndex) devArgs.push('--vector-index', cfg.devServer.ragIndex);
     if (cfg.devServer.ragMeta) devArgs.push('--vector-meta', cfg.devServer.ragMeta);
     if (cfg.devServer.embedUrl) devArgs.push('--embed-url', cfg.devServer.embedUrl);

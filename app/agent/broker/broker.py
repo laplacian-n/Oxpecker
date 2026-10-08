@@ -16,8 +16,12 @@ against current (possibly since-changed) state.
 from __future__ import annotations
 
 import json
+import os
 import socket
+import threading
 import time
+import uuid
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Callable
 
@@ -29,6 +33,7 @@ from .approval_queue import ApprovalQueue
 from .contracts import ActionRequest, ActionResponse
 from .kill_switch import KillSwitch
 from .taint import SAFE_WHILE_TAINTED, TaintStore
+from ..engagement.program import TARGET_TOUCHING_ACTION_CLASSES
 
 RUNTIME_IDENTITY = socket.gethostname()
 
@@ -39,6 +44,11 @@ RUNTIME_IDENTITY = socket.gethostname()
 # (agent/broker/taint.py), so both correctly escalate to approval once a session is tainted.
 TOOL_ACTION_CLASS = {
     "http_recon": "passive_recon",
+    # Its own class rather than folded into passive_recon: http_recon issues GET only and is
+    # read-only by construction, while http_request carries arbitrary methods and bodies — it is
+    # how a payload reaches a target. An RoE that permits passive reconnaissance has not thereby
+    # permitted sending one.
+    "http_request": "active_web_request",
     "port_discovery": "active_scan_light",
     "knowledge_search": "knowledge_search",
     "knowledge_fetch": "knowledge_fetch",
@@ -55,13 +65,40 @@ TOOL_ACTION_CLASS = {
 # just its tool name.
 REQUIRES_APPROVAL: set[str] = set()
 
+# The idempotency cache is rewritten whole on every dispatch, so it is bounded rather than
+# allowed to grow for the life of an install.
+IDEMPOTENCY_CACHE_MAX_ENTRIES = 500
+
+
+# Strings a tool call can plausibly carry for "off". `http_recon` consumes verify_cert with a
+# plain truthiness test, so `0` and `""` already disable verification; these spellings are
+# included because a model emitting JSON-ish arguments produces them and a gate that reads them
+# as "verification on" would under-classify the action.
+_FALSEY_STRINGS = frozenset({"false", "0", "no", "off", "none", "null", ""})
+
+
+def _verification_disabled(arguments: dict) -> bool:
+    """True when this request would run with TLS verification off.
+
+    `arguments.get("verify_cert") is False` only caught the singleton False. Anything else
+    falsy — `0`, `""`, `None` — disables verification in `http_recon` (`if self._verify_cert:`)
+    while the broker classed the action as ordinary `passive_recon`: no `http_recon_insecure`
+    opt-in in the RoE, no approval, and an audit entry that does not say verification was off.
+    """
+    if "verify_cert" not in arguments:
+        return False
+    value = arguments["verify_cert"]
+    if isinstance(value, str):
+        return value.strip().lower() in _FALSEY_STRINGS
+    return not value
+
 
 def _action_class_for(request: ActionRequest) -> str | None:
     """M4.6: http_recon with verify_cert=False is a distinct, harder-gated action class —
     denied by default unless the RoE explicitly lists "http_recon_insecure" in
     allowed_action_classes (most engagements' RoE won't, by design: this needs a deliberate,
     documented opt-in, not just an approval click), and still requires approval even then."""
-    if request.tool == "http_recon" and request.arguments.get("verify_cert") is False:
+    if request.tool == "http_recon" and _verification_disabled(request.arguments):
         return "http_recon_insecure"
     return TOOL_ACTION_CLASS.get(request.tool)
 
@@ -74,11 +111,25 @@ class Broker:
         idempotency_cache_path: Path = config.IDEMPOTENCY_CACHE_PATH,
         approval_queue: ApprovalQueue | None = None,
         use_approval_queue: bool = False,
+        policy_loader: Callable[[], policy_mod.Policy] | None = None,
     ):
         self.engagement_dir = engagement_dir
+        # Where the policy comes from. The default reads roe.json/scope.txt/deny.txt from
+        # `engagement_dir`, which is how every CLI caller works. A caller that holds its
+        # engagement somewhere other than on disk — the web runtime keeps them in memory —
+        # supplies its own loader instead of being forced to materialise files it does not
+        # otherwise need. It is only a source: every gate below is applied identically either
+        # way, and a loader that raises PolicyError still fails closed.
+        self._policy_loader = policy_loader or (lambda: policy_mod.load_policy(self.engagement_dir))
         self.confirm_fn = confirm_fn or (lambda prompt: input(prompt).strip().lower() == "y")
         self.kill_switch = KillSwitch()
         self._last_action_at: dict[tuple[str, str], float] = {}  # (session_id, class) -> ts
+        # Timestamps of target-touching dispatches that were allowed through, per engagement.
+        # Per ENGAGEMENT and not per session on purpose: a program's request cap applies to its
+        # assets, and two sessions on one engagement hitting the same host at half the cap each
+        # is the same traffic the program asked us not to send.
+        self._program_window: dict[str, deque] = defaultdict(deque)
+        self._idempotency_lock = threading.Lock()
         self._idempotency_path = idempotency_cache_path
         self._idempotency_path.parent.mkdir(parents=True, exist_ok=True)
         self._audit_logs: dict[str, audit_log_mod.AuditLog] = {}
@@ -103,9 +154,43 @@ class Broker:
         return {}
 
     def _save_idempotent(self, key: str, response: ActionResponse) -> None:
+        with self._idempotency_lock:
+            self._save_idempotent_locked(key, response)
+
+    def _save_idempotent_locked(self, key: str, response: ActionResponse) -> None:
+        # Held across the read-modify-write: without it two dispatches both read the cache,
+        # both add their own entry, and the second write loses the first. The lock is per
+        # Broker, which covers the concurrency this process has; two processes sharing the file
+        # still interleave, but the atomic replace means the loser loses an entry rather than
+        # corrupting the file, and a lost idempotency entry degrades to "replay not available".
         cache = self._idempotency_cache()
         cache[key] = response.to_dict()
-        self._idempotency_path.write_text(json.dumps(cache))
+        # Bounded, and pruned oldest-first. This file is rewritten in full on every dispatch, so
+        # an unpruned cache costs a growing serialization on each call as well as unbounded disk
+        # — and because ActionRequest mints a fresh idempotency_key per request unless the caller
+        # supplies one, most entries are single-use and will never be read back. Harmless while
+        # only the CLI dispatched; the web runtime now dispatches on every tool call.
+        if len(cache) > IDEMPOTENCY_CACHE_MAX_ENTRIES:
+            # dicts keep insertion order, so the head is the oldest.
+            for stale in list(cache)[: len(cache) - IDEMPOTENCY_CACHE_MAX_ENTRIES]:
+                cache.pop(stale, None)
+        # The temp name carries the pid AND a nonce. A single shared `.tmp` name meant two
+        # concurrent dispatches both wrote the same file, the first `replace()` moved it away,
+        # and the second raised FileNotFoundError — from inside `_finalize`, i.e. AFTER the
+        # action had run and after its audit entry was appended. The caller saw an exception
+        # ("it did not happen") for traffic that was sent and is recorded as succeeded. One
+        # Broker serves concurrent FastAPI requests per engagement, so this was reachable.
+        tmp = self._idempotency_path.with_name(
+            f"{self._idempotency_path.name}.tmp{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            tmp.write_text(json.dumps(cache))
+            os.replace(tmp, self._idempotency_path)  # atomic: a reader never sees a partial file
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover — the replace normally consumed it
+                pass
 
     def _finalize(self, request: ActionRequest, response: ActionResponse) -> ActionResponse:
         """Single exit path: store full raw output in the encrypted evidence store, write the
@@ -125,9 +210,15 @@ class Broker:
         response.evidence_digest = evidence_digest
 
         entry = self._audit_for(request.session_id).record(
-            turn_index=0,
+            turn_index=request.turn_index,
             tool_name=request.tool,
-            action_rationale=f"broker dispatch: {response.status} ({response.policy_rule})",
+            # The caller's reason when it has one — the model's own account of why it acted is
+            # the part a reader actually needs, and the broker's verdict is already recorded in
+            # scope_decision below, so nothing is lost by preferring it.
+            action_rationale=(
+                request.action_rationale
+                or f"broker dispatch: {response.status} ({response.policy_rule})"
+            ),
             arguments=request.arguments,
             raw_output=raw_output_str,  # audit_log.py itself caps the stored excerpt to 2000
             sanitized_output=response.detail[:2000],
@@ -140,6 +231,7 @@ class Broker:
             injection_flagged=False,
         )
         response.audit_record_digest = entry["entry_hash"]
+        response.audit_entry_id = entry["entry_id"]
         # By construction, both digests are sha256 of the same raw_output bytes — a genuine
         # cross-reference a reader can verify independently, not just a matching-by-convention.
         assert entry["content_digest"] == evidence_digest, "audit/evidence digest mismatch"
@@ -178,13 +270,20 @@ class Broker:
             return ActionResponse(**cached)
 
         if self.kill_switch.is_engaged():
-            status = self.kill_switch.status()
+            # `is_engaged()` is an existence check and `status()` re-reads the file, so an
+            # operator disengaging between the two calls made `status` None and
+            # `status.get(...)` raise an AttributeError — leaving the caller with no
+            # ActionResponse and the trail with no entry, instead of a denial. Deny either way:
+            # the switch was engaged when we looked, and that is the safe reading.
+            status = self.kill_switch.status() or {}
             return deny(f"kill switch engaged: {status.get('reason', '')}", "kill_switch")
 
         try:
-            policy = policy_mod.load_policy(self.engagement_dir)
+            policy = self._policy_loader()
         except policy_mod.PolicyError as e:
             return deny(f"policy load failed, failing closed: {e}", "policy_error")
+        except Exception as e:  # a custom loader must not be able to bypass the gate by raising
+            return deny(f"policy loader failed, failing closed: {e}", "policy_error")
 
         action_class = _action_class_for(request)
         if action_class is None:
@@ -195,6 +294,37 @@ class Broker:
                 "roe.allowed_action_classes",
                 policy.policy_version,
             )
+
+        # The program's own terms, where the engagement carries them. Checked after the RoE
+        # gate so a class that was never permitted does not consume the program's budget, and
+        # before execution so a refusal means nothing was sent.
+        program = getattr(policy, "program", None)
+        touches_target = action_class in TARGET_TOUCHING_ACTION_CLASSES
+        if program is not None and touches_target:
+            if not getattr(program, "automation_allowed", True):
+                return deny(
+                    f"this program forbids automated testing, and {action_class!r} puts traffic "
+                    f"on its assets. Nothing was sent. Testing it needs a human driving, or the "
+                    f"program's written permission recorded on the engagement.",
+                    "program.automation_forbidden",
+                    policy.policy_version,
+                )
+            cap = getattr(program, "max_requests_per_min", None)
+            if cap:
+                window = self._program_window[request.engagement_id or policy.engagement_id]
+                now = time.time()
+                while window and now - window[0] >= 60.0:
+                    window.popleft()
+                if len(window) >= cap:
+                    wait_s = 60.0 - (now - window[0])
+                    return deny(
+                        f"this program's rate limit is {cap} requests/min and "
+                        f"{len(window)} have gone out in the last minute; the next is allowed in "
+                        f"{wait_s:.0f}s. Nothing was sent. Pace the hunt rather than retrying: "
+                        f"an IP ban costs the whole engagement, not one request.",
+                        "program.rate_limit",
+                        policy.policy_version,
+                    )
 
         cooldown = config.ACTION_CLASS_COOLDOWN_S.get(action_class, 1.0)
         key = (request.session_id, action_class)
@@ -217,7 +347,8 @@ class Broker:
         if (
             request.tool in REQUIRES_APPROVAL or taint_escalation or insecure_tls
         ) and not request.approval_ref:
-            note = f" [session tainted: {taint_info['reason']}]" if taint_escalation else ""
+            reason_text = (taint_info or {}).get("reason", "unknown reason")
+            note = f" [session tainted: {reason_text}]" if taint_escalation else ""
             if insecure_tls:
                 note += " [TLS certificate verification disabled]"
             reason_for_queue = f"{request.tool}({request.arguments}){note}"
@@ -250,6 +381,10 @@ class Broker:
             request.approval_ref = approval_ref
 
         self._last_action_at[key] = time.time()
+        if program is not None and touches_target and getattr(program, "max_requests_per_min", None):
+            # Recorded here, past every gate including approval, so the window counts requests
+            # that actually went out rather than ones that were refused.
+            self._program_window[request.engagement_id or policy.engagement_id].append(time.time())
 
         try:
             raw_result = executor(policy, request.arguments)
