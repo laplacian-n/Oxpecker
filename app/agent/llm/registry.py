@@ -12,9 +12,10 @@ from __future__ import annotations
 from .base import ChatProvider, ProviderCapabilities
 
 PROVIDER_LLAMA_CPP = "llama.cpp"
+PROVIDER_OPENROUTER = "openrouter"
 
 #: Every provider this build can serve. A name absent here cannot be selected.
-PROVIDERS = (PROVIDER_LLAMA_CPP,)
+PROVIDERS = (PROVIDER_LLAMA_CPP, PROVIDER_OPENROUTER)
 
 DEFAULT_PROVIDER = PROVIDER_LLAMA_CPP
 
@@ -33,6 +34,14 @@ def capabilities_for(name: str) -> ProviderCapabilities:
         from .llama import LlamaCppProvider
 
         return LlamaCppProvider.CAPABILITIES
+    if name == PROVIDER_OPENROUTER:
+        from .openrouter import OpenRouterProvider
+
+        # The class constant, not a probed instance: this function exists to answer "what could
+        # this provider do" before a session exists, and for a router the real answer depends on
+        # the model, which is not known yet. The floor is the honest answer to the question
+        # actually being asked.
+        return OpenRouterProvider.CAPABILITIES
     raise UnknownProviderError(
         f"unknown model provider {name!r}; choose from {list(PROVIDERS)}"
     )
@@ -46,6 +55,10 @@ def build(name: str = DEFAULT_PROVIDER, **kwargs) -> ChatProvider:
         from .llama import LlamaCppProvider
 
         return LlamaCppProvider(**kwargs)
+    if name == PROVIDER_OPENROUTER:
+        from .openrouter import OpenRouterProvider
+
+        return OpenRouterProvider(**kwargs)
     raise UnknownProviderError(
         f"unknown model provider {name!r}; choose from {list(PROVIDERS)}"
     )

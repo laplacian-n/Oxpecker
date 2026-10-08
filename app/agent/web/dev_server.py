@@ -74,6 +74,7 @@ from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..engagement.program import Program as _Program
+from ..llm import registry as _llm_registry
 from ..sandbox import availability as _isolation
 from ..security_tools import http_recon as _http_recon
 from ..security_tools import port_discovery as _port_discovery
@@ -2002,8 +2003,20 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
 
         _LLM_LOCK.acquire()  # one generation at a time on the single-slot llama-server
         stream = None
+        # Hoisted out of the call so the trace records what was SENT. `_fit_context` can drop
+        # messages, so tracing `messages` would record a prompt that never existed — and the
+        # whole point of this record is to be able to ask "what did the model actually see when
+        # it decided that".
+        sent_messages = _fit_context(messages)
+        _debug.for_session(session.session_id).prompt(
+            turn_index=tool_round, system_content=system_content, messages=sent_messages,
+            prompt_tokens=session.last_prompt_tokens,
+            summary_present=any("[conversation summary" in str(m.get("content") or "").lower()
+                                for m in sent_messages),
+        )
+        gen_started = time.monotonic()
         try:
-            stream = _llm.chat(_fit_context(messages), stream=True, max_tokens=3072,
+            stream = _llm.chat(sent_messages, stream=True, max_tokens=3072,
                                tools=tools, enable_thinking=session.thinking)
         except Exception as e:
             _LLM_LOCK.release()
@@ -2110,6 +2123,27 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
         except Exception:
             pass
         _LLM_LOCK.release()
+
+        # Recorded BEFORE the error and stop branches below, which return early: a turn that
+        # died mid-stream or was stopped by the operator is exactly the turn whose output you
+        # want to read afterwards, and those were the two cases that would have had no record.
+        #
+        # `tool_calls` here is what the MODEL emitted (delta.tool_calls), not what ended up
+        # running. The prose-recovered calls from the JSON-block scraper are an interpretation of
+        # the text, and `.tool()` already records what actually ran — "the model emitted a valid
+        # call" and "we recovered one from prose" are different facts about the model, and a
+        # dataset that conflates them cannot measure tool-calling ability at all.
+        _debug.for_session(session.session_id).model_output(
+            turn_index=tool_round,
+            content=collected_text,
+            reasoning=collected_reasoning,
+            tool_calls=[
+                {"index": i, "name": oai_tool_calls[i].get("name", ""),
+                 "arguments": oai_tool_calls[i].get("arguments", "")}
+                for i in sorted(oai_tool_calls)
+            ],
+            latency_ms=(time.monotonic() - gen_started) * 1000,
+        )
 
         if stream_error is not None:
             # Surface what we have, then end this turn cleanly (autonomous moves to next phase).
@@ -2581,6 +2615,11 @@ def health_check():
         "version": API_VERSION,
         "sessions_active": len(_sessions),
         "model_loaded": _llm is not None,
+        # Which provider and model are actually serving, and what they can do. A smoke test and
+        # an operator both need this, and "model_loaded: true" alone cannot distinguish a local
+        # 4B from a frontier model over an API — a distinction that changes what every result
+        # from this session means.
+        "provider": _llm.capabilities().to_dict() if _llm is not None else None,
         "rag_documents": _rag.count(),
         "timestamp": time.time(),
     }
@@ -2652,6 +2691,14 @@ def get_session(session_id: str):
         "thinking": s.thinking,
         "stage": s.stage,
         "guided": s.guided,
+        # Whether a turn is in flight. The state already existed and already governed behaviour
+        # — POST /messages answers 409 "a task is already running" from it — but nothing exposed
+        # it, so the only way for a client to know was to watch the SSE stream. The browser UI
+        # does that; an API client, an automation harness or a smoke test cannot, and a caller
+        # that has to infer "busy" from the absence of events will infer "idle" the moment it
+        # polls too early.
+        "running": s.running,
+        "stop_requested": s.stop_requested,
         "last_prompt_tokens": s.last_prompt_tokens,
         # `isolation_tier` is what the session ASKED for; `effective_isolation_tier` is what the
         # last run_command actually executed under (None if none has run, or if one was refused
@@ -3240,6 +3287,16 @@ def main():
                         help="nomic-embed llama-server URL for query embedding (default :8091)")
     parser.add_argument("--no-vector-rag", action="store_true",
                         help="Disable dense RAG even if an index is present")
+    parser.add_argument("--provider", type=str, default=_llm_registry.DEFAULT_PROVIDER,
+                        choices=list(_llm_registry.PROVIDERS),
+                        help="Which model provider to drive (default: %(default)s). "
+                             "'openrouter' needs --model and an API key in $OPENROUTER_API_KEY "
+                             "or state/openrouter_api_key.txt; it does NOT need llama-server.")
+    parser.add_argument("--model", type=str, default="",
+                        help="Model id for providers that route to one (e.g. "
+                             "'deepseek/deepseek-chat' for --provider openrouter). Required "
+                             "there: which model ran a trajectory is the most important thing a "
+                             "trajectory records, so there is no default.")
     parser.add_argument("--insecure-no-auth", action="store_true",
                         help="Permit a non-loopback bind with no API key configured. Exposes "
                              "run_command and the autonomous-start endpoint to anyone who can "
@@ -3257,7 +3314,27 @@ def main():
     _load_state()
 
     # Connect to llama-server
-    _llm = LLMClient(server_url=args.llama_url)
+    # Built through the registry rather than constructed directly, so an unknown provider
+    # fails here with the list of real ones instead of mid-turn on a session that has been
+    # reporting that provider since it was created.
+    if args.provider == _llm_registry.PROVIDER_LLAMA_CPP:
+        _llm = _llm_registry.build(args.provider, server_url=args.llama_url)
+    else:
+        if not args.model.strip():
+            parser.error(
+                f"--provider {args.provider} requires --model (e.g. "
+                f"--model deepseek/deepseek-chat). There is no default on purpose."
+            )
+        try:
+            _llm = _llm_registry.build(args.provider, model=args.model)
+        except Exception as e:
+            # A missing key or an unreachable API is a configuration problem with a specific
+            # remedy, and the remedy is in the exception text. Dying with a traceback would
+            # bury it.
+            parser.error(str(e))
+    _caps = _llm.capabilities()
+    log.info("Model provider: %s (model=%s, native_tool_calls=%s, reasoning=%s)",
+             _caps.name, _caps.model or "unknown", _caps.native_tool_calls, _caps.reasoning)
 
     # ── RAG ──
     # Prefer the dense vector index (memory-mapped) when present. The TF-IDF path stays

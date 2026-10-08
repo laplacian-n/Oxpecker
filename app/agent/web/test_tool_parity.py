@@ -154,6 +154,33 @@ def main() -> int:
               not writes(var),
               "it has one now — wire the endpoint and move this out of the known-gap list")
 
+    print("\n== every capture the trace layer offers is actually wired ==")
+    # Third instance of one bug class in this codebase: something fully implemented, with a
+    # docstring explaining why it matters, that nothing ever calls. First was the four record_*
+    # tools; second was DebugTrace.prompt and DebugTrace.model_output — the two that carry the
+    # prompt as assembled and the model's own output with its reasoning, i.e. precisely the half
+    # of a trajectory that is trainable. Every engagement run before they were wired is a run
+    # whose reasoning is gone for good, which is not recoverable later like a missing field is.
+    #
+    # So this stops being a thing to notice and becomes a rule: a public capture method with no
+    # caller is a gap, not a convenience.
+    import inspect
+
+    from . import debug_trace as dt
+
+    runtime_src = src  # dev_server.py, read above
+    public = [
+        n for n, _ in inspect.getmembers(dt.DebugTrace, inspect.isfunction)
+        if not n.startswith("_")
+    ]
+    check("DebugTrace exposes capture methods to check", len(public) >= 4, str(public))
+    for name in public:
+        if name == "record":
+            continue  # the generic primitive the typed helpers are built on
+        called = f".{name}(" in runtime_src
+        check(f"DebugTrace.{name}() has a caller in the runtime", called,
+              "implemented but never called — either wire it or delete it")
+
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:
         print("FAILED:", FAIL)
