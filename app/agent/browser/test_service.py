@@ -54,6 +54,20 @@ def _policy_allowing_only(host: str, port: int) -> Policy:
 class TestBrowserService(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # A host without a launchable Chromium skips, rather than reporting four errors that
+        # look like defects in the scope enforcement these tests exist to check. Playwright
+        # launches only the exact browser build its Python package was pinned against, so a host
+        # with a perfectly good browser of another build fails here too — set
+        # OXPECKER_BROWSER_EXECUTABLE to that binary and these run. Same convention as the
+        # bwrap and pyseccomp skips elsewhere in the suite: absent dependency, clean skip.
+        try:
+            with browser_session(_policy_allowing_only("127.0.0.1", 1)):
+                pass
+        except Exception as e:  # noqa: BLE001 - any launch failure is the same answer here
+            raise unittest.SkipTest(
+                f"no launchable Chromium ({type(e).__name__}: {str(e).splitlines()[0][:160]}). "
+                "Set OXPECKER_BROWSER_EXECUTABLE to a Chromium binary to run these."
+            )
         cls.in_scope = _start_server("127.0.0.1")
         cls.out_of_scope = _start_server("127.0.0.2")
         cls.in_scope.other_port = cls.out_of_scope.server_address[1]  # type: ignore[attr-defined]

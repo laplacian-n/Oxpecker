@@ -174,6 +174,26 @@ def main() -> int:
           _profile_digest(ws, True, None) != loaded,
           "declared and loaded sources must not collide")
 
+    print("\n== every tier says whether it has been run on the hardware it targets ==")
+    # `available` and `exercised` answer different questions and both get asked. A tier can
+    # probe available on this host and still never have been run on the platform it is for:
+    # wsl2 is exactly that, and an operator choosing a tier should not have to read
+    # availability.py to find out.
+    host = av.describe_host()
+    for tier in av.TIERS:
+        entry = host["tiers"][tier]
+        check(f"{tier} reports an `exercised` flag", "exercised" in entry, str(sorted(entry)))
+        check(f"{tier}'s `exercised` is a bool, not a reason string",
+              isinstance(entry.get("exercised"), bool), repr(entry.get("exercised")))
+    check("wsl2 is declared NOT exercised, because nobody has run it on real Windows",
+          host["tiers"]["wsl2"]["exercised"] is False)
+    check("bubblewrap IS declared exercised — it is what the Linux server runs",
+          host["tiers"]["bubblewrap"]["exercised"] is True)
+    check("every tier in TIERS has an entry in _TIER_EXERCISED, so a new tier cannot "
+          "default to looking battle-tested",
+          set(av.TIERS) <= set(av._TIER_EXERCISED),
+          str(sorted(set(av.TIERS) - set(av._TIER_EXERCISED))))
+
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:
         print("FAILED:", FAIL)

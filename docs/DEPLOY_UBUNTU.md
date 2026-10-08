@@ -98,6 +98,7 @@ trail and the traces, and no backup job would think to look inside a checkout.
 |---|---|
 | `OXPECKER_DATA_DIR` | dev_server state, the agent's workspace root, evidence, debug traces |
 | `AGENT_STATE_DIR` | engagement state, the API key file, caches |
+| `OXPECKER_BROWSER_EXECUTABLE` | a Chromium binary to use instead of Playwright's own download (optional) |
 
 `OXPECKER_DATA_DIR` is also the confinement root the file tools are checked against, so it is
 resolved eagerly at import; point it at a real directory, not a symlink you intend to re-aim.
@@ -224,10 +225,27 @@ is in the target's logs. Mitigations that now exist and are worth actually setti
 whose terms you have not read. A VPS is still worth keeping as a second egress for the cases
 where being identifiable is fine.
 
-## Open decision: the `wsl2` tier
+## The `wsl2` tier: kept, and marked
 
-With the server always on Ubuntu, the `wsl2` tier only exists for an all-in-one install on
-Windows — roughly 250 lines of safety-relevant code that has never run on real Windows hardware
-and that cannot carry seccomp by construction. It is kept for now. If the server is always
-Linux, deleting it is the honest move: unverified safety code is a liability, because it reports
-an isolation tier whose guarantees nobody has confirmed.
+Deleting it was considered and rejected. The argument for deleting was that it is
+safety-relevant code that has never run on real Windows hardware and that cannot carry a seccomp
+filter. The first half is true, the conclusion does not follow:
+
+- `_probe_wsl2` makes three real round trips into the guest — `/bin/true`, `bwrap --version`,
+  then `bwrap --unshare-all --ro-bind / / -- /bin/true` under this tier's own `ulimit` prologue —
+  and returns unavailable with a reason on any failure. It cannot report a tier it has not just
+  demonstrated on the host it is running on. The usual reason to delete unverified safety code
+  is that it claims protection it cannot deliver; that is engineered out here.
+- Its own description states that it carries no seccomp filter, and why (the compiled BPF is
+  passed to `bwrap` as a file descriptor, which does not cross the `wsl.exe` process boundary).
+  It does not overclaim.
+- It is the **only** tier a Windows operator can select. Every other tier needs a Linux kernel
+  and a Unix PATH, and running unsandboxed on the Windows host is deliberately not offered as a
+  fallback. Deleting the tier would make `run_command` permanently unavailable on Windows.
+
+What was missing is only the knowledge that we have never exercised it, so that is now a field
+rather than a fact you had to read the source to learn: `describe_host()["tiers"][t]["exercised"]`
+is `False` for `wsl2` and `microvm`, `True` for `direct` and `bubblewrap`. `available` and
+`exercised` answer different questions, and a tier can be the first without being the second.
+
+For this deployment it stays unused: the server is Ubuntu and Windows is only a UI.

@@ -312,6 +312,27 @@ def resolve_tier(
     )
 
 
+# Which tiers this project has actually run on the hardware they target, as distinct from ones
+# whose implementation is exercised only by unit tests on another platform.
+#
+# `wsl2` is the honest False. It is not untrustworthy code: `_probe_wsl2` makes three real round
+# trips into the guest, ending with `bwrap --unshare-all` under this tier's own ulimit prologue,
+# and returns (False, reason) on any failure — so it cannot report a tier it has not just
+# demonstrated on the host it is running on. Its description states plainly that it carries no
+# seccomp filter and why. It also has 50 checks of its own. What is missing is only that nobody
+# has run it on real Windows with a real WSL2 guest, and that is worth knowing at the point of
+# use rather than being discoverable by reading this file — same reasoning as `seccomp_available`
+# below. Deleting the tier was considered and rejected: it is the only tier a Windows operator
+# can select, so removing it would make run_command permanently unavailable there, and the
+# design deliberately offers no unsandboxed fallback.
+_TIER_EXERCISED = {
+    TIER_DIRECT: True,
+    TIER_BUBBLEWRAP: True,
+    TIER_WSL2: False,
+    TIER_MICROVM: False,
+}
+
+
 def describe_host(deep: bool = False) -> dict:
     """A snapshot for the UI, the API and the audit trail: what this host can actually do. Keeps
     'what we claim' and 'what is true' in one place so a UI cannot drift from reality."""
@@ -322,6 +343,9 @@ def describe_host(deep: bool = False) -> dict:
             "available": ok,
             "reason": reason,
             "provides": TIER_DESCRIPTION[tier],
+            # False means "implemented and unit-tested, but never run on the hardware it
+            # targets". Available AND not exercised is a real state — see _TIER_EXERCISED.
+            "exercised": _TIER_EXERCISED.get(tier, False),
         }
     strongest = next(
         (t for t in reversed(_TIER_STRENGTH) if tiers[t]["available"]), TIER_DIRECT

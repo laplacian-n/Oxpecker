@@ -14,7 +14,13 @@ from __future__ import annotations
 
 import argparse
 
-from mcp.server.mcpserver import MCPServer
+# `mcp.server.mcpserver.MCPServer` is not a module path any released `mcp` provides — the
+# pin it went with (doc/requirements-phase2.txt: mcp==2.1.1) does not match what installs
+# either. FastMCP is the real API and takes the same arguments this file already passes:
+# FastMCP(name), .tool(name=, description=), .run(). Importing the non-existent path made
+# this module unimportable, which took 45 of the suite's tests down with it — including
+# every agent.test_loop_*_wiring module, none of which is about MCP.
+from mcp.server import FastMCP
 
 from . import config
 from .broker.broker import Broker
@@ -182,7 +188,7 @@ def _browser_fetch(policy, url: str) -> dict:
 
     return browser_fetch(policy, url)
 
-server = MCPServer("localai-phase3-security-tools")
+server = FastMCP("localai-phase3-security-tools")
 
 _broker: Broker
 _session_id: str
