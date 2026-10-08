@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import socket
 import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Callable
 
@@ -29,6 +30,7 @@ from .approval_queue import ApprovalQueue
 from .contracts import ActionRequest, ActionResponse
 from .kill_switch import KillSwitch
 from .taint import SAFE_WHILE_TAINTED, TaintStore
+from ..engagement.program import TARGET_TOUCHING_ACTION_CLASSES
 
 RUNTIME_IDENTITY = socket.gethostname()
 
@@ -96,6 +98,11 @@ class Broker:
         self.confirm_fn = confirm_fn or (lambda prompt: input(prompt).strip().lower() == "y")
         self.kill_switch = KillSwitch()
         self._last_action_at: dict[tuple[str, str], float] = {}  # (session_id, class) -> ts
+        # Timestamps of target-touching dispatches that were allowed through, per engagement.
+        # Per ENGAGEMENT and not per session on purpose: a program's request cap applies to its
+        # assets, and two sessions on one engagement hitting the same host at half the cap each
+        # is the same traffic the program asked us not to send.
+        self._program_window: dict[str, deque] = defaultdict(deque)
         self._idempotency_path = idempotency_cache_path
         self._idempotency_path.parent.mkdir(parents=True, exist_ok=True)
         self._audit_logs: dict[str, audit_log_mod.AuditLog] = {}
@@ -233,6 +240,37 @@ class Broker:
                 policy.policy_version,
             )
 
+        # The program's own terms, where the engagement carries them. Checked after the RoE
+        # gate so a class that was never permitted does not consume the program's budget, and
+        # before execution so a refusal means nothing was sent.
+        program = getattr(policy, "program", None)
+        touches_target = action_class in TARGET_TOUCHING_ACTION_CLASSES
+        if program is not None and touches_target:
+            if not getattr(program, "automation_allowed", True):
+                return deny(
+                    f"this program forbids automated testing, and {action_class!r} puts traffic "
+                    f"on its assets. Nothing was sent. Testing it needs a human driving, or the "
+                    f"program's written permission recorded on the engagement.",
+                    "program.automation_forbidden",
+                    policy.policy_version,
+                )
+            cap = getattr(program, "max_requests_per_min", None)
+            if cap:
+                window = self._program_window[request.engagement_id or policy.engagement_id]
+                now = time.time()
+                while window and now - window[0] >= 60.0:
+                    window.popleft()
+                if len(window) >= cap:
+                    wait_s = 60.0 - (now - window[0])
+                    return deny(
+                        f"this program's rate limit is {cap} requests/min and "
+                        f"{len(window)} have gone out in the last minute; the next is allowed in "
+                        f"{wait_s:.0f}s. Nothing was sent. Pace the hunt rather than retrying: "
+                        f"an IP ban costs the whole engagement, not one request.",
+                        "program.rate_limit",
+                        policy.policy_version,
+                    )
+
         cooldown = config.ACTION_CLASS_COOLDOWN_S.get(action_class, 1.0)
         key = (request.session_id, action_class)
         last = self._last_action_at.get(key, 0.0)
@@ -287,6 +325,10 @@ class Broker:
             request.approval_ref = approval_ref
 
         self._last_action_at[key] = time.time()
+        if program is not None and touches_target and getattr(program, "max_requests_per_min", None):
+            # Recorded here, past every gate including approval, so the window counts requests
+            # that actually went out rather than ones that were refused.
+            self._program_window[request.engagement_id or policy.engagement_id].append(time.time())
 
         try:
             raw_result = executor(policy, request.arguments)

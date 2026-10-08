@@ -155,6 +155,7 @@ def policy_from_engagement(eng, *, now: float | None = None) -> Policy:
         valid_until=valid_until if valid_until is not None else float("inf"),
         allow_suffixes=suffixes,
         deny_suffixes=deny_suffixes,
+        program=getattr(eng, "program", None),
     )
 
 

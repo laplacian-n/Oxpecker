@@ -54,6 +54,7 @@ from ..broker.contracts import ActionRequest as _ActionRequest
 from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
+from ..engagement.program import Program as _Program
 from ..sandbox import availability as _isolation
 from ..security_tools import port_discovery as _port_discovery
 from ..tools import run_command as _run_command
@@ -607,6 +608,9 @@ class Engagement:
     allowed_action_classes: list[str] = field(default_factory=list)
     authorized_by: str = ""
     valid_until: str = ""
+    # The program's own terms, when this engagement runs under one. None for a local lab
+    # engagement, and the broker branches on the absence rather than on a permissive default.
+    program: _Program | None = None
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -616,6 +620,7 @@ class Engagement:
             "allow_targets": self.allow_targets,
             "proposed_targets": self.proposed_targets,
             "deny_targets": self.deny_targets,
+            "program": self.program.to_dict() if self.program else None,
             "allowed_action_classes": self.allowed_action_classes,
             "valid_until": self.valid_until,
         }
@@ -766,6 +771,7 @@ def _persist():
                 {"engagement_id": e.engagement_id, "description": e.description,
                  "allow_targets": e.allow_targets, "proposed_targets": e.proposed_targets,
                  "deny_targets": e.deny_targets,
+                 "program": e.program.to_dict() if e.program else None,
                  "allowed_action_classes": e.allowed_action_classes,
                  "authorized_by": e.authorized_by, "valid_until": e.valid_until, "created_at": e.created_at}
                 for e in list(_engagements.values())
@@ -792,7 +798,12 @@ def _load_state():
         log.warning("load state failed: %s", e)
         return
     for e in data.get("engagements", []):
-        _engagements[e["engagement_id"]] = _mk(Engagement, e)
+        eng = _mk(Engagement, e)
+        # _mk copies known keys verbatim, which would leave `program` as a plain dict and make
+        # every getattr on it return None — i.e. a restored engagement would silently lose its
+        # program terms while still reporting that it had some.
+        eng.program = _Program.from_dict(e.get("program"))
+        _engagements[e["engagement_id"]] = eng
     for eid, fs in data.get("findings", {}).items():
         _findings[eid] = [_mk(Finding, f) for f in fs]
     for eid, ns in data.get("graphs", {}).items():
@@ -2397,6 +2408,7 @@ class CreateEngagementRequest(BaseModel):
     description: str = ""
     allow_targets: list[str] = []
     deny_targets: list[str] = []
+    program: dict | None = None
     allowed_action_classes: list[str] = []
     authorized_by: str = ""
     valid_hours: float = 24.0
@@ -2787,6 +2799,9 @@ def create_engagement(req: CreateEngagementRequest):
                 f"(choose from {sorted(known)}) — an unknown name permits nothing, and before "
                 "the RoE check was enforced it silently did nothing at all"
             )
+    program = _Program.from_dict(req.program)
+    if program is not None:
+        errors.extend(program.validate())
     if errors:
         raise HTTPException(400, "; ".join(errors))
 
@@ -2796,6 +2811,7 @@ def create_engagement(req: CreateEngagementRequest):
         description=req.description,
         allow_targets=req.allow_targets,
         deny_targets=req.deny_targets,
+        program=program,
         allowed_action_classes=req.allowed_action_classes,
         authorized_by=req.authorized_by,
         valid_until=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + req.valid_hours * 3600)),

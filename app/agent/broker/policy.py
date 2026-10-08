@@ -35,6 +35,10 @@ class Policy:
     # every existing keyword construction of Policy keeps working unchanged.
     allow_suffixes: set[str] = field(default_factory=set)
     deny_suffixes: set[str] = field(default_factory=set)
+    # The program this engagement runs under, when there is one. None is a legal state — every
+    # local lab engagement — and defaulting it to a permissive Program would make the absence
+    # invisible, so the broker branches on `is None` rather than on field values.
+    program: "object | None" = None
 
 
 class ScopeLineError(ValueError):
