@@ -60,6 +60,7 @@ from ..security_tools import port_discovery as _port_discovery
 from ..tools import run_command as _run_command
 from . import debug_trace as _debug
 from . import scope as _scope
+from ..llm.llama import LlamaCppProvider as _LlamaCppProvider
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -189,96 +190,10 @@ preamble — the operator wants commands run and real results, not a plan recite
 # LLM Client (llama-server OpenAI-compatible API)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class LLMClient:
-    """Talks to llama-server via its OpenAI-compatible /v1/chat/completions endpoint."""
-
-    def __init__(self, server_url: str = "http://127.0.0.1:8080"):
-        self.base_url = server_url.rstrip("/")
-        log.info("Connecting to llama-server at %s", self.base_url)
-        self._check_health()
-
-    def _check_health(self):
-        try:
-            req = urllib.request.Request(f"{self.base_url}/health")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-            status = data.get("status", "unknown")
-            if status == "ok":
-                log.info("llama-server is ready")
-            else:
-                log.warning("llama-server status: %s (may still be loading)", status)
-        except urllib.error.URLError as e:
-            raise RuntimeError(
-                f"Cannot connect to llama-server at {self.base_url}.\n"
-                f"Start it first:\n"
-                f"  llama-server -m your-model.gguf --port 8080 -ngl 99\n\n{e}"
-            ) from e
-
-    def chat(self, messages: list[dict], *, max_tokens: int = 3072,
-             temperature: float = 0.6, stream: bool = False,
-             tools: list[dict] | None = None, enable_thinking: bool = False) -> Any:
-        # Qwen3-recommended sampling (temp 0.6 / top_p 0.95 / top_k 20); a bigger
-        # max_tokens so a <think> block can't eat the whole budget and leave empty content.
-        payload = {
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": 0.95,
-            "top_k": 20,
-            "repeat_penalty": 1.1,
-            "stream": stream,
-            # Qwen3 thinking: off by default — a 4B otherwise spends the whole token budget
-            # inside <think> and often returns EMPTY content. When on, llama.cpp surfaces the
-            # reasoning as delta.reasoning_content (handled by the agent loop) so the UI can
-            # show it without the answer being swallowed.
-            "chat_template_kwargs": {"enable_thinking": enable_thinking},
-        }
-        if stream:
-            # Ask llama-server for a trailing usage chunk so the UI can show the REAL
-            # prompt-token count (drives the context monitor + makes compaction visible).
-            payload["stream_options"] = {"include_usage": True}
-        if tools:
-            payload["tools"] = tools
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{self.base_url}/v1/chat/completions", data=data,
-            headers={"Content-Type": "application/json"},
-        )
-
-        if not stream:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                return json.loads(resp.read())
-
-        return self._stream_response(req)
-
-    def _stream_response(self, req):
-        """Read SSE stream from llama-server (OpenAI format: 'data: {...}' lines)."""
-        resp = urllib.request.urlopen(req, timeout=300)
-        try:
-            buffer = b""
-            while True:
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line == b"data: [DONE]":
-                        return
-                    if line.startswith(b"data: "):
-                        try:
-                            obj = json.loads(line[6:])
-                        except json.JSONDecodeError:
-                            continue
-                        yield obj
-        finally:
-            resp.close()
-
-    def token_count(self, text: str) -> int:
-        return len(text) // 4
+# The llama.cpp provider lives in agent/llm/ now, behind agent.llm.base.ChatProvider, so an
+# API-backed provider can exist without a second runtime (docs/API_MODE_DESIGN.md). The class
+# moved verbatim and is imported under its old name, so every call site below is unchanged.
+LLMClient = _LlamaCppProvider
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
