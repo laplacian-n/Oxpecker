@@ -16,10 +16,14 @@ Implements the FULL API surface that agent/web/static/index.html expects, with:
   - WebSocket support for bidirectional comms
 
 Prerequisites:
-  pip install fastapi 'uvicorn[standard]' scikit-learn numpy
+  pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography
   # Linux, for a real sandbox:  apt install bubblewrap  &&  pip install pyseccomp
   # `uvicorn[standard]` not bare `uvicorn`: the bare package has no WebSocket implementation,
   # so /api/sessions/{id}/ws stops being a WebSocket route and answers as plain HTTP.
+  # `cryptography` is not optional despite not appearing anywhere else in this file: it is
+  # imported at module scope by agent/evidence/store.py, which agent/audit_log.py imports at
+  # module scope, which this file imports at module scope — so dev_server cannot bind a port
+  # without it, with or without the sandbox or a real LLM provider.
 
 Usage:
   Step 1 — Start llama-server (in a separate terminal):
