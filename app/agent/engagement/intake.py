@@ -90,20 +90,32 @@ class EngagementIntake:
 
 
 def _validate_scope_line(line: str, errors: list, field_name: str) -> None:
-    import ipaddress
+    """Accept exactly what the policy parser will later honour, and reject the rest here.
 
-    stripped = line.strip()
+    This used to carry its own rule (`stripped.replace(".","").replace("-","").isalnum()`),
+    which was a third independent opinion about what a scope entry is, and it rejected
+    `*.example.com` — the form every bug-bounty scope is written in. Delegating means an entry
+    accepted at intake is an entry the broker will enforce, which is the only useful contract
+    for this function. Single-label hostnames (`localhost`, a lab box's short name) stay legal:
+    the shipped lab engagement uses one.
+    """
+    from ..broker.policy import ScopeLineError, parse_scope_line
+
+    stripped = (line or "").strip()
     if not stripped:
         errors.append(f"{field_name} contains an empty entry")
         return
     try:
-        ipaddress.ip_network(stripped, strict=False)
-        return  # valid CIDR/IP
-    except ValueError:
-        pass
-    if stripped.replace(".", "").replace("-", "").isalnum():
-        return  # looks like a plausible hostname
-    errors.append(f"{field_name} entry {stripped!r} is not a valid CIDR/IP or hostname-looking string")
+        parsed = parse_scope_line(stripped)
+    except ScopeLineError as e:
+        errors.append(f"{field_name} entry rejected: {e}")
+        return
+    if parsed is None:
+        # A comment line is legal in a scope FILE but meaningless as an API-supplied target:
+        # it would silently contribute nothing to the scope the operator thinks they set.
+        errors.append(
+            f"{field_name} entry {stripped!r} is a comment, so it authorises nothing"
+        )
 
 
 def create_engagement(

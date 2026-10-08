@@ -41,28 +41,29 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from ..broker import scope_check
-from ..broker.policy import Policy
+from ..broker.policy import Policy, ScopeLineError, classify_scope_lines
 
-# Mirrors `policy._parse_scope_file`: an entry that parses as a network is a network, anything
-# else is a hostname. Kept as one function so the two cannot classify the same string
-# differently.
-def _classify_targets(targets: list[str]) -> tuple[list, set[str]]:
-    networks, hostnames = [], set()
+def _classify_targets(targets: list[str]) -> tuple[list, set[str], set[str]]:
+    """Delegates to `policy.classify_scope_lines` — the same parser the CLI's scope.txt uses.
+
+    This used to be a near-copy of `policy._parse_scope_file`, kept in sync by hand. It was a
+    near-copy that had already drifted (it accepted a pasted URL; the policy parser did not),
+    and once wildcards entered the picture a second classifier would have been a second set of
+    wildcard semantics. One parser, one meaning.
+
+    An entry the parser refuses is dropped rather than raised here, because this function is
+    also called from the live scope check where an engagement edited to contain one bad line
+    must still enforce its good ones. `create_engagement` validates up front, so a refused line
+    cannot normally reach here at all.
+    """
+    good = []
     for raw in targets or []:
-        line = str(raw).strip()
-        if not line or line.startswith("#"):
-            continue
-        # An operator pasting a full URL into the targets field is common enough to handle here
-        # rather than reject: take its hostname. A bare host or CIDR passes through untouched.
-        if "://" in line:
-            line = urlparse(line).hostname or ""
-            if not line:
-                continue
         try:
-            networks.append(ipaddress.ip_network(line, strict=False))
-        except ValueError:
-            hostnames.add(line.lower())
-    return networks, hostnames
+            classify_scope_lines([str(raw)])
+        except ScopeLineError:
+            continue
+        good.append(str(raw))
+    return classify_scope_lines(good)
 
 
 def _parse_valid_until(value: str) -> float | None:
@@ -138,8 +139,8 @@ def policy_from_engagement(eng, *, now: float | None = None) -> Policy:
     exception writes the broad allow and keeps the carve-out in their head, which the agent
     cannot read.
     """
-    networks, hostnames = _classify_targets(getattr(eng, "allow_targets", []))
-    deny_nets, deny_hosts = _classify_targets(getattr(eng, "deny_targets", []))
+    networks, hostnames, suffixes = _classify_targets(getattr(eng, "allow_targets", []))
+    deny_nets, deny_hosts, deny_suffixes = _classify_targets(getattr(eng, "deny_targets", []))
     valid_until = _parse_valid_until(getattr(eng, "valid_until", "") or "")
     # Base entries first; an engagement cannot drop one by omission, only add to the set.
     deny_networks = [ipaddress.ip_network(n) for n in BASE_DENY_NETWORKS] + deny_nets
@@ -152,6 +153,8 @@ def policy_from_engagement(eng, *, now: float | None = None) -> Policy:
         deny_hostnames=deny_hosts,
         policy_version="web-engagement/in-memory",
         valid_until=valid_until if valid_until is not None else float("inf"),
+        allow_suffixes=suffixes,
+        deny_suffixes=deny_suffixes,
     )
 
 

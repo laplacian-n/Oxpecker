@@ -13,7 +13,7 @@ import ipaddress
 import socket
 from dataclasses import dataclass
 
-from .policy import Policy
+from .policy import Policy, normalize_host
 
 
 @dataclass
@@ -29,6 +29,28 @@ def _matches_any(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, networks) ->
         if ip in net:
             return str(net)
     return None
+
+
+def _matching_suffix(host: str, suffixes) -> str | None:
+    """The `*.parent` entry that covers `host`, or None.
+
+    Two properties this has to get right, because getting either wrong is a scope bypass:
+
+    * The dot is required. `host.endswith(parent)` would match `evilexample.com` against
+      `*.example.com` — the same permissive-substring class of bug that the web runtime's
+      original inline scope check shipped with.
+    * The apex is NOT covered. `*.example.com` does not match `example.com`; a program that
+      includes the apex lists it separately, and inferring it here would put a host in scope
+      that the operator did not write.
+
+    The longest matching entry is returned so the rule shown to the operator is the specific
+    one, not whichever happened to be first in an unordered set.
+    """
+    best = None
+    for parent in suffixes:
+        if host.endswith("." + parent) and (best is None or len(parent) > len(best)):
+            best = parent
+    return best
 
 
 def _resolve(hostname: str) -> list[str]:
@@ -65,12 +87,19 @@ def validate_target(host: str, policy: Policy) -> ValidationResult:
         if not candidates:
             return ValidationResult(False, None, "DNS resolution returned no addresses", "dns_error")
 
-    hostname_lower = host.lower()
+    hostname_lower = normalize_host(host)
 
     # Deny checked first, before allow — deny always wins (APTS-SE-009), even if the same
     # host/IP also appears in the allowlist.
     if hostname_lower in policy.deny_hostnames:
         return ValidationResult(False, None, f"hostname {host!r} is on the deny list", "deny.txt:hostname")
+    denied_suffix = _matching_suffix(hostname_lower, getattr(policy, "deny_suffixes", ()) or ())
+    if denied_suffix is not None:
+        return ValidationResult(
+            False, None,
+            f"hostname {host!r} is under denied domain {denied_suffix!r}",
+            f"deny.txt:*.{denied_suffix}",
+        )
     for ip_str in candidates:
         ip = ipaddress.ip_address(ip_str)
         rule = _matches_any(ip, policy.deny_networks)
@@ -83,6 +112,16 @@ def validate_target(host: str, policy: Policy) -> ValidationResult:
         # Hostname itself is explicitly in scope — still need a concrete IP to connect to and
         # to fix it (rebinding prevention), so use the first resolved candidate.
         return ValidationResult(True, candidates[0], "hostname explicitly in scope", f"scope.txt:{hostname_lower}")
+
+    allowed_suffix = _matching_suffix(hostname_lower, getattr(policy, "allow_suffixes", ()) or ())
+    if allowed_suffix is not None:
+        # Reached only after every resolved IP cleared the deny networks above, so a wildcard
+        # allow cannot admit a host that resolves into denied space (cloud metadata included).
+        return ValidationResult(
+            True, candidates[0],
+            f"hostname under in-scope domain {allowed_suffix!r}",
+            f"scope.txt:*.{allowed_suffix}",
+        )
 
     for ip_str in candidates:
         ip = ipaddress.ip_address(ip_str)
