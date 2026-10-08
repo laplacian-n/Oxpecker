@@ -1,0 +1,233 @@
+# Running Oxpecker with the server on Ubuntu
+
+Decided topology: **the server, the GPU and the model all live on one Ubuntu box at home.**
+Windows, if it is used at all, is only a window onto it.
+
+```
+  Windows laptop                      Ubuntu box (home LAN, GPU)
+  ┌──────────────┐                    ┌──────────────────────────────────────┐
+  │ browser or   │   SSH tunnel /     │  dev_server   --host 127.0.0.1:7777  │
+  │ Electron     │◀──  Tailscale  ───▶│  llama-server (chat)   127.0.0.1:8080│
+  │ (UI only)    │                    │  llama-server (embed)  127.0.0.1:8091│
+  └──────────────┘                    │  bubblewrap + seccomp + rlimits      │
+                                      │  $OXPECKER_DATA_DIR ──▶ backup       │
+                                      └──────────────────────────────────────┘
+```
+
+Nothing binds a public interface. The tunnel is the authentication; the API key below is the
+second layer, for the day someone types `--host 0.0.0.0`.
+
+## Why the server belongs on Linux, not Windows or WSL2
+
+This is not a preference. The isolation tier the agent runs tools under is only real on Linux:
+
+| tier | what it actually provides |
+|---|---|
+| `direct` | **no kernel isolation** — a scrubbed environment and a command blocklist, nothing more |
+| `bubblewrap` | namespace isolation (fs/net/pid) + rlimits + a seccomp syscall filter |
+| `wsl2` | bubblewrap inside the WSL2 VM — namespaces and rlimits, but **no seccomp** |
+| `microvm` | not implemented |
+
+`wsl2` loses seccomp for a concrete reason, not an oversight: the compiled BPF program is handed
+to `bwrap` as a file descriptor, and a file descriptor does not cross the `wsl.exe` process
+boundary. On top of that, the `wsl2` tier has never been exercised on real Windows hardware — it
+is tested only by unit tests on Linux. Running the server natively on Ubuntu is the only
+configuration where the sandbox is both complete and actually tested.
+
+Three further wins, all of which follow from there being exactly one server process:
+
+- **One rate-limit window.** `Program.max_requests_per_min` is enforced by a per-process sliding
+  window in the broker. Two machines running the agent means the cap a program's terms set is
+  silently doubled — which is how you get IP-banned while believing you are throttled.
+- **One audit chain.** The hash-chained audit log and its checkpoint file are per-host on disk.
+  Two hosts produce two chains that cannot be reconciled into one account of what was done.
+- **The data ends up somewhere backupable.** Trajectories, evidence, the audit chain and the
+  debug traces are the training set. On a server they sit on a disk with a backup job instead of
+  on a laptop that will be reinstalled.
+
+## Install
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip bubblewrap
+
+sudo useradd --system --create-home --home-dir /var/lib/oxpecker oxpecker
+sudo mkdir -p /opt/oxpecker /var/lib/oxpecker/{data,state}
+sudo chown -R oxpecker:oxpecker /opt/oxpecker /var/lib/oxpecker
+
+sudo -u oxpecker git clone <your-remote> /opt/oxpecker
+sudo -u oxpecker python3 -m venv /opt/oxpecker/.venv
+sudo -u oxpecker /opt/oxpecker/.venv/bin/pip install \
+    fastapi 'uvicorn[standard]' scikit-learn numpy pyseccomp
+```
+
+`uvicorn[standard]` rather than plain `uvicorn`: the bare package has no WebSocket
+implementation, so `/api/sessions/{id}/ws` silently stops being a WebSocket route and answers as
+plain HTTP (404). The shipped UI uses SSE and does not need it, but a client that opens the
+WebSocket will fail confusingly without it.
+
+`pyseccomp` is what makes the seccomp filter available. Without it `bubblewrap` still gives
+namespaces and rlimits, and the tier honestly reports that no filter was loaded — the result
+dict's `seccomp_active` and the profile digest's `seccomp_syscalls_source` both say so rather
+than implying protection that is not there.
+
+Verify before trusting it:
+
+```bash
+cd /opt/oxpecker/app
+/opt/oxpecker/.venv/bin/python -c \
+  "from agent.sandbox import availability as a; import json; print(json.dumps(a.describe_host(), indent=2))"
+```
+
+Expect `"strongest_available": "bubblewrap"`, `"kernel_isolation_available": true` and
+`"seccomp_available": true`. If `bubblewrap` reads unavailable, the `reason` field says why.
+
+> On Ubuntu 23.10 and newer, unprivileged user namespaces are restricted by AppArmor
+> (`kernel.apparmor_restrict_unprivileged_userns`). The `bubblewrap` package ships a profile for
+> this, so it normally works — but this is the first thing to check if the tier reports
+> unavailable, because it is the one failure that silently downgrades every tool run to
+> `direct`. Confirm with the command above rather than assuming.
+
+## Paths
+
+Both state roots are environment-overridable, and on a server both should be moved off the
+source tree — otherwise a `git pull` runs over the directory holding the state store, the audit
+trail and the traces, and no backup job would think to look inside a checkout.
+
+| variable | holds |
+|---|---|
+| `OXPECKER_DATA_DIR` | dev_server state, the agent's workspace root, evidence, debug traces |
+| `AGENT_STATE_DIR` | engagement state, the API key file, caches |
+
+`OXPECKER_DATA_DIR` is also the confinement root the file tools are checked against, so it is
+resolved eagerly at import; point it at a real directory, not a symlink you intend to re-aim.
+
+## systemd
+
+`/etc/systemd/system/oxpecker-llama-chat.service`:
+
+```ini
+[Unit]
+Description=llama-server (chat model) for Oxpecker
+After=network-online.target
+
+[Service]
+User=oxpecker
+ExecStart=/opt/llama/llama-server -m /var/lib/oxpecker/models/<chat-model>.gguf \
+    --host 127.0.0.1 --port 8080 -ngl 999 -c 32768 -fa on \
+    --cache-type-k q8_0 --cache-type-v q8_0 -np 1 -lm none
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/systemd/system/oxpecker.service`:
+
+```ini
+[Unit]
+Description=Oxpecker dev server
+After=network-online.target oxpecker-llama-chat.service
+Wants=oxpecker-llama-chat.service
+
+[Service]
+User=oxpecker
+WorkingDirectory=/opt/oxpecker/app
+Environment=OXPECKER_DATA_DIR=/var/lib/oxpecker/data
+Environment=AGENT_STATE_DIR=/var/lib/oxpecker/state
+ExecStart=/opt/oxpecker/.venv/bin/python -m agent.web.dev_server \
+    --host 127.0.0.1 --port 7777 \
+    --llama-url http://127.0.0.1:8080 \
+    --vector-index /var/lib/oxpecker/knowledge_rag/index/vectors.npy \
+    --vector-meta  /var/lib/oxpecker/knowledge_rag/index/meta.jsonl \
+    --embed-url http://127.0.0.1:8091
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Note `-m agent.web.dev_server`, not the path to `dev_server.py`. The module uses
+package-relative imports, so running it as a script file fails at import with "attempted
+relative import with no known parent package" before it binds anything.
+
+**Do not add the usual systemd hardening directives to `oxpecker.service` without checking the
+sandbox afterwards.** `RestrictNamespaces=`, `PrivateUsers=yes` and friends are exactly the
+settings that stop `bwrap` from creating the namespaces the isolation tier is made of. The
+failure is quiet: tool runs fall back to a weaker tier or refuse. If you harden this unit,
+re-run the `describe_host()` check above *under the unit* and confirm `bubblewrap` is still
+available. Hardening that disables the sandbox is a net loss.
+
+## Reaching it from Windows
+
+**Preferred — a tunnel, no code change and no open port:**
+
+```bash
+ssh -N -L 7777:127.0.0.1:7777 oxpecker-box
+```
+
+Then open `http://127.0.0.1:7777` on the laptop. Tailscale or WireGuard works the same way and
+survives reboots better.
+
+**Second layer — an API key.** Worth setting even behind a tunnel, because it is what protects
+you on the day the bind address changes:
+
+```bash
+sudo -u oxpecker sh -c \
+  "python3 -c 'import secrets;print(secrets.token_urlsafe(32))' > /var/lib/oxpecker/state/web_ui_api_key.txt"
+sudo chmod 600 /var/lib/oxpecker/state/web_ui_api_key.txt
+```
+
+Paste it into the key field in the UI; it is kept in `localStorage` and sent as `X-API-Key`
+(the SSE stream passes it as `?key=`, since `EventSource` cannot set headers).
+
+With no key file, `/api/*` is unauthenticated — which is the right default for a loopback
+install and is what every existing test relies on. The server will not, however, start on a
+non-loopback address with no key configured: behind those routes are `run_command`,
+`/api/sessions/.../autonomous/start`, the evidence store and `/api/approvals/.../resolve`, so
+unauthenticated it is remote code execution plus the ability to approve your own escalation.
+`--insecure-no-auth` overrides the refusal and has to be typed on purpose.
+
+An API key file that exists but is empty, unreadable or not UTF-8 makes every `/api` request
+answer 503 and startup refuse — "no key found" and "key unreadable" are one line apart and only
+one of them is safe to treat as "auth off".
+
+CORS is off unless `AGENT_WEB_CORS_ORIGINS` is set. Both shipped clients load the page from this
+origin and fetch `/api/...` relatively, so they are same-origin and need no CORS header at all.
+
+## Back up
+
+Everything of long-term value is under `$OXPECKER_DATA_DIR` and `$AGENT_STATE_DIR`:
+
+- `state.json` — sessions, engagements, findings
+- the evidence store **and its key** — without the key, stored evidence is undecryptable and
+  every `content_digest` becomes unverifiable
+- the audit log and its checkpoint file — the chain is what makes the record tamper-evident
+- debug traces — the raw material for the training set
+
+Back up the key and the evidence together or neither is useful. Keep the API key out of the
+same backup as the evidence key; `agent/state/` is gitignored, so neither reaches the repo.
+
+## Home line vs VPS
+
+The box is at home, which is the right call for bug bounty: a residential IP clears Cloudflare's
+managed challenges far more often than a datacenter one. In the transcript this project was
+designed against, two hosts answered `cf-mitigated: challenge` from a cloud IP and a headless
+browser sat on "Just a moment…" — a chunk of the target surface simply was not testable from
+there.
+
+The trade is that a ban or an abuse complaint lands on the household connection, and the home IP
+is in the target's logs. Mitigations that now exist and are worth actually setting:
+`Program.max_requests_per_min` per engagement, and `automation_allowed=False` on any program
+whose terms you have not read. A VPS is still worth keeping as a second egress for the cases
+where being identifiable is fine.
+
+## Open decision: the `wsl2` tier
+
+With the server always on Ubuntu, the `wsl2` tier only exists for an all-in-one install on
+Windows — roughly 250 lines of safety-relevant code that has never run on real Windows hardware
+and that cannot carry seccomp by construction. It is kept for now. If the server is always
+Linux, deleting it is the honest move: unverified safety code is a liability, because it reports
+an isolation tier whose guarantees nobody has confirmed.

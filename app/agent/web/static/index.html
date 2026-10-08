@@ -265,7 +265,10 @@ const api={
 /* SSE */
 function connectSSE(sessionId){
   disconnectSSE();
-  const url='/api/sessions/'+sessionId+'/events';
+  /* EventSource cannot set headers, so the API key rides as ?key= — the one query-param
+     channel the server accepts (see _key_supplied in dev_server.py). Without this the SSE
+     stream is the only part of the UI that 401s once a key file exists. */
+  const url='/api/sessions/'+sessionId+'/events'+(S.apiKey?('?key='+encodeURIComponent(S.apiKey)):'');
   const es=new EventSource(url);
   S.eventSource=es;
   es.onmessage=function(e){try{handleServerEvent(JSON.parse(e.data))}catch(err){console.error('SSE parse error',err)}};

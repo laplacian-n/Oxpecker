@@ -12,9 +12,11 @@ Run directly: `python3 -m agent.web.test_workspace_confinement`.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import shutil
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 PASS, FAIL = [], []
@@ -168,6 +170,32 @@ def main() -> int:
             check("the chain still verifies after a handle was evicted and rebuilt", ok, detail)
         finally:
             d._AUDIT_LOG_CACHE_MAX, dt._TRACE_CACHE_MAX = saved_a, saved_t
+
+    print("\n== DATA_DIR, the confinement root itself ==")
+    # Every check above compares a candidate path against DATA_DIR by prefix. That test is only
+    # sound if DATA_DIR is already absolute and symlink-resolved — a relative or unresolved root
+    # would make `/data/../etc/passwd` or a symlinked parent read as inside. DATA_DIR became
+    # env-overridable (OXPECKER_DATA_DIR) so a server install can keep state off the source
+    # tree, which is exactly the change that could have quietly reintroduced that.
+    check("DATA_DIR is absolute", d.DATA_DIR.is_absolute(), str(d.DATA_DIR))
+    check("DATA_DIR is already resolved, so the prefix comparison cannot be fooled by a symlink",
+          d.DATA_DIR == d.DATA_DIR.resolve(), f"{d.DATA_DIR} != {d.DATA_DIR.resolve()}")
+
+    import subprocess
+    import sys as _sys
+
+    probe = subprocess.run(
+        [_sys.executable, "-c",
+         "from agent.web import dev_server as d; print(d.DATA_DIR); print(d.STATE_FILE)"],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "OXPECKER_DATA_DIR": "/tmp/oxp-confine-probe/./sub/.."},
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    lines = probe.stdout.strip().splitlines()
+    check("OXPECKER_DATA_DIR moves DATA_DIR, normalised", 
+          lines[:1] == ["/tmp/oxp-confine-probe"], f"{probe.stdout!r} {probe.stderr[-300:]!r}")
+    check("the state file follows the override rather than staying in the source tree",
+          len(lines) > 1 and lines[1] == "/tmp/oxp-confine-probe/state.json", str(lines))
 
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:

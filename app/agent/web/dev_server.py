@@ -1,5 +1,12 @@
 """Oxpecker standalone dev server — runs on any machine with llama-server (llama.cpp).
-Designed for: Windows laptop, RTX 4050 6GB, Qwen3.5-4B-Q6_K.
+
+Deployment target is an Ubuntu host that also holds the GPU, with any Windows machine acting
+only as a UI reached over an SSH tunnel or a VPN; see docs/DEPLOY_UBUNTU.md. That is not a
+packaging preference: `bubblewrap` is Linux-only, the `wsl2` tier cannot carry a seccomp filter
+(the compiled BPF is passed to bwrap as a file descriptor, which does not cross the wsl.exe
+process boundary) and has never run on real Windows hardware, and `direct` provides no kernel
+isolation at all. Ubuntu is the only configuration where the isolation tier is both complete and
+tested. It still runs on Windows — with a weaker sandbox, which it reports honestly.
 
 Implements the FULL API surface that agent/web/static/index.html expects, with:
   - LLM inference via llama-server's OpenAI-compatible API (streaming)
@@ -9,16 +16,28 @@ Implements the FULL API surface that agent/web/static/index.html expects, with:
   - WebSocket support for bidirectional comms
 
 Prerequisites:
-  pip install fastapi uvicorn scikit-learn numpy
+  pip install fastapi 'uvicorn[standard]' scikit-learn numpy
+  # Linux, for a real sandbox:  apt install bubblewrap  &&  pip install pyseccomp
+  # `uvicorn[standard]` not bare `uvicorn`: the bare package has no WebSocket implementation,
+  # so /api/sessions/{id}/ws stops being a WebSocket route and answers as plain HTTP.
 
 Usage:
   Step 1 — Start llama-server (in a separate terminal):
-    llama-server.exe -m Qwen3.5-4B-Q6_K.gguf --port 8080 -ngl 99 --cors "*"
+    llama-server -m <chat-model>.gguf --host 127.0.0.1 --port 8080 -ngl 99
 
-  Step 2 — Start Oxpecker dev server:
-    python dev_server.py --port 7777
+  Step 2 — Start Oxpecker dev server, FROM THE `app/` DIRECTORY, as a module:
+    python -m agent.web.dev_server --port 7777
 
   Then open http://127.0.0.1:7777 in your browser.
+
+`python agent/web/dev_server.py` does not work and never did: this module uses
+package-relative imports (`from .. import config`), which need a parent package, so running it
+as a script file dies with "attempted relative import with no known parent package" before it
+binds a port. electron/main.js spawned it that way and could not start the backend at all; the
+generic "did not start — is Python installed?" message it showed sent you after dependencies
+that were already fine.
+
+llama-server needs no `--cors "*"`: dev_server talks to it server-side, not from the browser.
 """
 from __future__ import annotations
 
@@ -73,7 +92,18 @@ from pydantic import BaseModel
 log = logging.getLogger("oxpecker.dev")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-DATA_DIR = Path(__file__).resolve().parent / "dev_data"
+# DATA_DIR is three things at once: the state/evidence/trace directory, the agent's workspace
+# root, and the confinement root that `_resolve_under_data_dir` checks file tools against. It
+# defaulted to a path inside the source tree, which is fine for a laptop checkout and wrong for
+# a server install — it puts the state store, the hash-chained audit trail and the debug traces
+# (i.e. the training data) in the directory you `git pull` over, and nowhere a backup job would
+# think to look. OXPECKER_DATA_DIR moves it, mirroring AGENT_STATE_DIR in agent/config.py.
+#
+# Resolved eagerly: the confinement check compares against this path, so it has to be the real
+# one before any symlink in the configured value gets a chance to matter.
+DATA_DIR = Path(
+    os.environ.get("OXPECKER_DATA_DIR") or (Path(__file__).resolve().parent / "dev_data")
+).expanduser().resolve()
 RAG_CORPUS_DIR = DATA_DIR / "rag_corpus"
 API_VERSION = "1.0.0-dev"
 
@@ -2352,13 +2382,120 @@ class NotebookResolveRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 app = FastAPI(title="Oxpecker Dev Server", version=API_VERSION)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# ── Origin and auth boundary ──
+#
+# Until now this file's entire security model was "we bind 127.0.0.1, so the OS is the
+# boundary". That is a real model and it was not wrong for a single-operator laptop. It stops
+# being a model the moment `--host` is pointed at anything else, and what sits behind these
+# routes is `run_command`, `/api/sessions/{id}/autonomous/start`, the evidence store, and
+# `/api/approvals/{id}/resolve` — i.e. remote code execution plus the ability to approve one's
+# own escalation. So the bind address is no longer allowed to be the only thing standing there:
+# see `require_api_key` below, the WebSocket check in `websocket_events`, and the refusal in
+# `main()` that will not start a non-loopback bind with no key configured.
+#
+# CORS is opt-in rather than "*". Both shipped clients (the Electron shell, and a browser
+# pointed at this server) load index.html FROM this origin and fetch "/api/..." relatively, so
+# they are same-origin and need no CORS header at all. A wildcard only ever helped a page
+# served from somewhere else — and `allow_origins=["*"]` with `allow_credentials=True`, which
+# is what stood here, is a combination browsers reject outright, so it was not even buying
+# that. Set AGENT_WEB_CORS_ORIGINS (comma-separated) if a cross-origin client becomes real.
+if _config.WEB_UI_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_config.WEB_UI_CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+def _web_ui_key() -> tuple[str | None, bool]:
+    """`(key, unreadable)` — the shared secret gating /api/*, and whether reading it failed.
+
+    `(None, False)` means no key file exists, so auth is off: that is the historical
+    unauthenticated behaviour every existing test relies on, and it stays the default for the
+    loopback install. `(None, True)` means a key file is there but unreadable, which must NOT
+    read as "auth off" — that is the fail-open direction — so the caller refuses traffic.
+
+    Read at call time, never captured as a default argument. `config.WEB_UI_API_KEY_FILE` is
+    `STATE_DIR / ...` computed at import, and binding it early is the exact trap that made
+    EvidenceStore and AuditLog disagree about which key file they were using (documented in
+    test_integrity.py). Tests patch `agent.config.WEB_UI_API_KEY_FILE`; this reads the patch.
+    """
+    try:
+        path = _config.WEB_UI_API_KEY_FILE
+        if not path.exists():
+            return None, False
+        key = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        log.error("web UI API key file exists but could not be read; refusing /api traffic")
+        return None, True
+    except UnicodeDecodeError:
+        log.error("web UI API key file is not valid UTF-8; refusing /api traffic")
+        return None, True
+    if not key:
+        # An empty key file is a misconfiguration, not a request to disable auth. Treating it
+        # as "auth off" would turn a truncated write into a silently open server.
+        log.error("web UI API key file is empty; refusing /api traffic")
+        return None, True
+    return key, False
+
+
+def _key_supplied(scoped, key: str) -> bool:
+    """Whether `scoped` (a Request or a WebSocket — both carry .headers and .query_params)
+    presents `key`.
+
+    Three accepted channels, each because something real needs it:
+      - `X-API-Key`: what static/index.html has always sent. The orphaned agent/web/server.py
+        reads `Authorization: Bearer` instead, and this file read neither, so the key input in
+        the UI was wired to nothing on both servers. Accepting this header is what makes the
+        existing client work.
+      - `Authorization: Bearer`: the convention, and what server.py uses. Kept so a curl or a
+        reverse proxy does the obvious thing.
+      - `?key=`: for the two browser APIs that cannot set a header at all — EventSource (the
+        SSE stream) and WebSocket. A narrow, deliberate exception, not a general bypass.
+
+    Every non-empty candidate is compared, so a client that sends both a header and a query
+    param is not rejected because the wrong one came first. Each comparison is constant-time.
+    """
+    auth = scoped.headers.get("authorization", "")
+    candidates = (
+        scoped.headers.get("x-api-key", ""),
+        auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else "",
+        scoped.query_params.get("key", ""),
+    )
+    return any(c and hmac.compare_digest(c, key) for c in candidates)
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """Gates every /api/* route behind config.WEB_UI_API_KEY_FILE when it exists.
+
+    Checked as ASGI middleware rather than a per-route Depends() so it covers all ~40 routes
+    uniformly, including any added later — a route that forgets a decorator is the failure mode
+    this shape rules out.
+
+    NOT covered: the WebSocket at /api/sessions/{id}/ws. Starlette's http middleware only sees
+    `scope["type"] == "http"`, so a websocket handshake passes straight through it. That route
+    accepts `message` and `steer` frames — it can drive the agent — so it carries its own
+    check; see `websocket_events`.
+
+    The static page and /static/* are never gated: the shell carries no data, every real action
+    goes through /api/*, and gating it would need a login redirect this single-operator tool
+    does not need. /health (the Electron startup probe's unprefixed alias) stays open for the
+    same reason; its /api/health twin is gated.
+    """
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    key, unreadable = _web_ui_key()
+    if unreadable:
+        return JSONResponse({"detail": "API key file present but unusable"}, status_code=503)
+    if key is None:
+        return await call_next(request)
+    if not _key_supplied(request, key):
+        return JSONResponse({"detail": "missing or invalid API key"}, status_code=401)
+    return await call_next(request)
 
 # ── Health ──
 @app.get("/api/health")
@@ -2578,6 +2715,17 @@ async def stream_events(session_id: str):
 # ── WebSocket ──
 @app.websocket("/api/sessions/{session_id}/ws")
 async def websocket_events(websocket: WebSocket, session_id: str):
+    # Authenticated here, not by require_api_key: Starlette's http middleware never sees a
+    # websocket scope, so this route would otherwise be the one unauthenticated way in — and it
+    # is the worst one to leave open, because its `message` and `steer` frames drive the agent.
+    # The check runs BEFORE the session lookup so an unauthenticated caller cannot tell a live
+    # session id from a dead one by the close code. A browser WebSocket cannot set headers, so
+    # ?key= is the channel that matters here; _key_supplied still accepts a header for curl and
+    # for non-browser clients. 1008 is the policy-violation close code.
+    key, unreadable = _web_ui_key()
+    if unreadable or (key is not None and not _key_supplied(websocket, key)):
+        await websocket.close(code=1008, reason="missing or invalid API key")
+        return
     s = _sessions.get(session_id)
     if not s:
         await websocket.close(code=4004, reason="session not found")
@@ -2933,6 +3081,70 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Startup
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _is_loopback(host: str) -> bool:
+    """Whether binding `host` keeps the server off the network.
+
+    Anything unparseable counts as NOT loopback: "" and "*" both mean every interface to
+    uvicorn, and a hostname we cannot resolve to a loopback literal is not something to give
+    the benefit of the doubt when the answer decides whether an unauthenticated run_command
+    endpoint goes on a LAN.
+    """
+    import ipaddress
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_bind_is_safe(parser: argparse.ArgumentParser, args) -> None:
+    """Refuse to start an unauthenticated server on a reachable address.
+
+    A warning was the other option, and it is what agent/run_web_ui.py does for the orphaned
+    server. A warning is not enough here: scrolled past once, what is left running is a service
+    that will run commands and start autonomous engagements for anyone who can open the port.
+    `--insecure-no-auth` keeps the escape hatch, but it has to be typed.
+    """
+    key, unreadable = _web_ui_key()
+    if unreadable:
+        parser.error(
+            f"the web UI API key file {_config.WEB_UI_API_KEY_FILE} exists but is unusable "
+            "(unreadable, empty, or not UTF-8). Fix or remove it — leaving it in place would "
+            "make every /api request fail with 503."
+        )
+    if key is not None:
+        log.info("API auth: enabled (key from %s)", _config.WEB_UI_API_KEY_FILE)
+        return
+    if _is_loopback(args.host):
+        log.info("API auth: disabled — loopback bind (%s) is the boundary", args.host)
+        return
+    if args.insecure_no_auth:
+        log.warning(
+            "API auth: DISABLED on a non-loopback bind (%s) because --insecure-no-auth was "
+            "passed. run_command and /autonomous/start are reachable by anyone on this network.",
+            args.host,
+        )
+        return
+    parser.error(
+        f"refusing to bind {args.host} with no API key configured.\n"
+        f"  Behind these routes: run_command, /api/sessions/.../autonomous/start, the evidence\n"
+        f"  store, and /api/approvals/.../resolve. Unauthenticated, that is remote code\n"
+        f"  execution for anyone who can reach the port.\n"
+        f"\n"
+        f"  Pick one:\n"
+        f"    1. Keep it off the network and reach it over SSH or a VPN (no key needed):\n"
+        f"         ssh -N -L {args.port}:127.0.0.1:{args.port} user@this-host\n"
+        f"       then run with the default --host 127.0.0.1.\n"
+        f"    2. Set a key:\n"
+        f"         python -c \"import secrets;print(secrets.token_urlsafe(32))\" \\\n"
+        f"           > {_config.WEB_UI_API_KEY_FILE}\n"
+        f"       and paste it into the key field in the UI.\n"
+        f"    3. --insecure-no-auth, if this network is genuinely isolated."
+    )
+
+
 def main():
     global _llm, _rag
 
@@ -2953,9 +3165,15 @@ def main():
                         help="nomic-embed llama-server URL for query embedding (default :8091)")
     parser.add_argument("--no-vector-rag", action="store_true",
                         help="Disable dense RAG even if an index is present")
+    parser.add_argument("--insecure-no-auth", action="store_true",
+                        help="Permit a non-loopback bind with no API key configured. Exposes "
+                             "run_command and the autonomous-start endpoint to anyone who can "
+                             "reach the port; only ever correct on an isolated network.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+
+    _check_bind_is_safe(parser, args)
 
     # Create data directory
     DATA_DIR.mkdir(parents=True, exist_ok=True)
