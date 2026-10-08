@@ -31,24 +31,34 @@ def _matches_any(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, networks) ->
     return None
 
 
-def _matching_suffix(host: str, suffixes) -> str | None:
+def _matching_suffix(host: str, suffixes, *, include_apex: bool) -> str | None:
     """The `*.parent` entry that covers `host`, or None.
 
-    Two properties this has to get right, because getting either wrong is a scope bypass:
+    Three properties this has to get right, because getting any of them wrong is a scope bypass:
 
     * The dot is required. `host.endswith(parent)` would match `evilexample.com` against
       `*.example.com` — the same permissive-substring class of bug that the web runtime's
       original inline scope check shipped with.
-    * The apex is NOT covered. `*.example.com` does not match `example.com`; a program that
-      includes the apex lists it separately, and inferring it here would put a host in scope
-      that the operator did not write.
-
-    The longest matching entry is returned so the rule shown to the operator is the specific
-    one, not whichever happened to be first in an unordered set.
+    * `include_apex` is NOT a convenience flag; the two directions genuinely
+      differ, and sharing one rule between them was a real bug. On the ALLOW side the apex is
+      excluded: `*.example.com` does not put `example.com` in scope, because a program that
+      includes the apex lists it separately and inferring it would authorise a host the
+      operator did not write. On the DENY side the apex is included: an operator writing
+      `*.customer.com` into a deny list to carve a domain out of a broad allow means the whole
+      domain, and excluding the apex there would block every subdomain while leaving the apex —
+      usually the most sensitive host — permitted, and recorded as a legitimate in-scope action.
+      Excluding is conservative one way round and permissive the other.
+    * The longest matching entry is returned, so the rule shown to the operator is the specific
+      one rather than whichever happened to be first in an unordered set.
     """
     best = None
     for parent in suffixes:
-        if host.endswith("." + parent) and (best is None or len(parent) > len(best)):
+        if host == parent:
+            if not include_apex:
+                continue
+        elif not host.endswith("." + parent):
+            continue
+        if best is None or len(parent) > len(best):
             best = parent
     return best
 
@@ -93,7 +103,8 @@ def validate_target(host: str, policy: Policy) -> ValidationResult:
     # host/IP also appears in the allowlist.
     if hostname_lower in policy.deny_hostnames:
         return ValidationResult(False, None, f"hostname {host!r} is on the deny list", "deny.txt:hostname")
-    denied_suffix = _matching_suffix(hostname_lower, getattr(policy, "deny_suffixes", ()) or ())
+    denied_suffix = _matching_suffix(
+        hostname_lower, getattr(policy, "deny_suffixes", ()) or (), include_apex=True)
     if denied_suffix is not None:
         return ValidationResult(
             False, None,
@@ -113,7 +124,8 @@ def validate_target(host: str, policy: Policy) -> ValidationResult:
         # to fix it (rebinding prevention), so use the first resolved candidate.
         return ValidationResult(True, candidates[0], "hostname explicitly in scope", f"scope.txt:{hostname_lower}")
 
-    allowed_suffix = _matching_suffix(hostname_lower, getattr(policy, "allow_suffixes", ()) or ())
+    allowed_suffix = _matching_suffix(
+        hostname_lower, getattr(policy, "allow_suffixes", ()) or (), include_apex=False)
     if allowed_suffix is not None:
         # Reached only after every resolved IP cleared the deny networks above, so a wildcard
         # allow cannot admit a host that resolves into denied space (cloud metadata included).

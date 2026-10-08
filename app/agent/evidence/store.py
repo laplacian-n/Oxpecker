@@ -37,7 +37,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import time
+import uuid
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -74,25 +76,154 @@ class EvidenceDeletedError(RuntimeError):
     is still queryable to show *why* and *when*, even though the content itself is gone."""
 
 
+class EvidenceKeyError(RuntimeError):
+    """The evidence key file exists but cannot be trusted. Never recovered from by generating a
+    new key: a new key does not unlock the blobs already on disk, it only makes the loss silent."""
+
+
+def _looks_like_fernet_key(raw: bytes) -> bool:
+    """Whether `raw` is plausibly the pre-M4.2 on-disk format: one urlsafe-base64 Fernet key.
+
+    A Fernet key is exactly 32 random bytes, urlsafe-base64 encoded — 44 characters ending in
+    `=`. Checking the shape matters because the legacy branch ADOPTS whatever it is given as the
+    key material, so "anything that is not JSON" was far too wide a door (see
+    `_write_key_doc_atomic` for what came through it).
+    """
+    candidate = raw.strip()
+    if len(candidate) != 44:
+        return False
+    try:
+        Fernet(candidate)
+    except Exception:
+        return False
+    return True
+
+
+def _write_key_doc_atomic(path: Path, doc: dict) -> None:
+    """Write the key document so a concurrent reader sees the old file or the new one, never a
+    partial one, and so the file is never briefly readable by other users.
+
+    This is not a theoretical hardening. `path.write_text()` truncates before it writes, and a
+    reader landing in that window got partial JSON — which `_load_or_create_keys` then treated
+    as the legacy "the file IS the key" format, adopted the fragment as key material, and WROTE
+    IT BACK OVER THE KEY FILE. The real key was then gone from disk: every evidence blob already
+    stored became permanently undecryptable and every audit entry's `content_digest` stopped
+    verifying. Reproduced before this fix by truncating the file between two loads.
+
+    The mode is set on the temp file before the replace, so there is no window in which the key
+    exists at the final path with default permissions.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    try:
+        tmp.write_text(json.dumps(doc, indent=2))
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover — the replace normally consumed it
+            pass
+
+
+def _create_key_doc_exclusive(path: Path, doc: dict) -> bool:
+    """Create the key file only if it does not exist. True if we created it, False if we lost.
+
+    `os.replace` is the wrong primitive for CREATION: it overwrites. Two processes (or threads)
+    starting against a missing key file each generated a key and each replaced the file, so the
+    last writer won and every other caller held a key that was no longer on disk — evidence
+    encrypted under it became undecryptable the moment it was written. Reproduced before this
+    fix: 24 concurrent first-loads produced 14 distinct keys.
+
+    `O_CREAT | O_EXCL` makes the create-or-lose decision atomically in the kernel, and the loser
+    re-reads the winner's file instead of imposing its own.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.new{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    try:
+        tmp.write_text(json.dumps(doc, indent=2))
+        tmp.chmod(0o600)
+        try:
+            # `os.link` is both atomic and exclusive: it fails if the target exists, and the
+            # file at `path` is fully-formed the instant it appears. `O_CREAT|O_EXCL` would also
+            # be exclusive, but it creates a ZERO-LENGTH file and then writes into it, leaving a
+            # window in which another loader reads 0 bytes and — correctly, by the rule above —
+            # refuses to touch a key file it cannot parse. Seen in the race test.
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        except (OSError, NotImplementedError):
+            # A filesystem without hardlinks. Fall back to exclusive create plus write, which
+            # reopens the zero-length window but is still exclusive; better than overwriting.
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                return False
+            with os.fdopen(fd, "w") as f:
+                json.dump(doc, f, indent=2)
+        return True
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover
+            pass
+
+
 def _load_or_create_keys(path: Path) -> tuple[dict[str, bytes], str]:
+    # Two passes: read an existing file, or create one; if creation lost a race, come back round
+    # and read what the winner wrote. More than two passes cannot help — by then the file
+    # exists, so the second pass reads or refuses.
+    for _ in range(2):
+        result = _load_or_create_keys_once(path)
+        if result is not None:
+            return result
+    raise EvidenceKeyError(  # pragma: no cover — requires losing the race and then losing the file
+        f"{path} could neither be read nor created; it appeared and disappeared between attempts"
+    )
+
+
+def _load_or_create_keys_once(path: Path) -> tuple[dict[str, bytes], str] | None:
+    """One attempt. None means "lost the creation race, try reading again"."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raw = path.read_bytes()
         try:
             doc = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # UnicodeDecodeError as well as JSONDecodeError: `json.loads` on BYTES sniffs the
+            # encoding first, so bytes that happen to look like a UTF-16 prefix raise a decode
+            # error instead — which escaped a `except json.JSONDecodeError` and propagated out
+            # of the key loader as an unhandled exception rather than the refusal below.
             # Pre-M4.2 format: the file *was* a single raw Fernet key (already base64), written
             # via path.write_bytes(key). Migrate in place rather than discard it — real evidence
             # blobs already on disk were encrypted under this exact key and must stay
-            # decryptable, not orphaned by a format change.
-            doc = {"current": DEFAULT_KEY_VERSION, "keys": {DEFAULT_KEY_VERSION: raw.decode()}}
-            path.write_text(json.dumps(doc, indent=2))
+            # decryptable, not orphaned by a format change. But migrate ONLY something that is
+            # actually a Fernet key; anything else is a damaged or half-written file, and
+            # adopting it would overwrite the real key with garbage.
+            if not _looks_like_fernet_key(raw):
+                raise EvidenceKeyError(
+                    f"{path} is neither a key document nor a legacy Fernet key "
+                    f"({len(raw)} bytes). Refusing to replace it: generating a new key would "
+                    f"not decrypt the evidence already stored under the old one, it would only "
+                    f"hide the loss. Restore the file from backup, or move it aside explicitly "
+                    f"if the evidence store is known to be empty."
+                )
+            doc = {"current": DEFAULT_KEY_VERSION,
+                   "keys": {DEFAULT_KEY_VERSION: raw.strip().decode()}}
+            _write_key_doc_atomic(path, doc)
+        if not isinstance(doc, dict) or not isinstance(doc.get("keys"), dict) \
+                or doc.get("current") not in (doc.get("keys") or {}):
+            raise EvidenceKeyError(
+                f"{path} parses but is not a usable key document (no 'keys' mapping, or "
+                f"'current' names a version it does not contain). Refusing to replace it — see "
+                f"the message above for why a fresh key is not a recovery."
+            )
         keys = {v: k.encode() for v, k in doc["keys"].items()}
         return keys, doc["current"]
     raw_key = Fernet.generate_key()
     doc = {"current": DEFAULT_KEY_VERSION, "keys": {DEFAULT_KEY_VERSION: raw_key.decode()}}
-    path.write_text(json.dumps(doc, indent=2))
-    path.chmod(0o600)
+    if not _create_key_doc_exclusive(path, doc):
+        return None  # another caller created it first; read theirs rather than impose ours
     return {DEFAULT_KEY_VERSION: raw_key}, DEFAULT_KEY_VERSION
 
 
@@ -106,7 +237,9 @@ def rotate_key(path: Path = config.EVIDENCE_KEY_PATH) -> str:
     doc = {"current": new_version, "keys": {v: k.decode() if isinstance(k, bytes) else k for v, k in keys.items()}}
     # Normalize any already-decoded bytes back to str for JSON serialization.
     doc["keys"] = {v: (k.decode() if isinstance(k, (bytes, bytearray)) else k) for v, k in keys.items()}
-    path.write_text(json.dumps(doc, indent=2))
+    # Atomic, and mode-set before the replace: rotation rewrites the file that holds EVERY key
+    # version, so a torn write here loses access to every blob in the store at once.
+    _write_key_doc_atomic(path, doc)
     return new_version
 
 

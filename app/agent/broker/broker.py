@@ -16,8 +16,11 @@ against current (possibly since-changed) state.
 from __future__ import annotations
 
 import json
+import os
 import socket
+import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Callable
@@ -67,12 +70,35 @@ REQUIRES_APPROVAL: set[str] = set()
 IDEMPOTENCY_CACHE_MAX_ENTRIES = 500
 
 
+# Strings a tool call can plausibly carry for "off". `http_recon` consumes verify_cert with a
+# plain truthiness test, so `0` and `""` already disable verification; these spellings are
+# included because a model emitting JSON-ish arguments produces them and a gate that reads them
+# as "verification on" would under-classify the action.
+_FALSEY_STRINGS = frozenset({"false", "0", "no", "off", "none", "null", ""})
+
+
+def _verification_disabled(arguments: dict) -> bool:
+    """True when this request would run with TLS verification off.
+
+    `arguments.get("verify_cert") is False` only caught the singleton False. Anything else
+    falsy — `0`, `""`, `None` — disables verification in `http_recon` (`if self._verify_cert:`)
+    while the broker classed the action as ordinary `passive_recon`: no `http_recon_insecure`
+    opt-in in the RoE, no approval, and an audit entry that does not say verification was off.
+    """
+    if "verify_cert" not in arguments:
+        return False
+    value = arguments["verify_cert"]
+    if isinstance(value, str):
+        return value.strip().lower() in _FALSEY_STRINGS
+    return not value
+
+
 def _action_class_for(request: ActionRequest) -> str | None:
     """M4.6: http_recon with verify_cert=False is a distinct, harder-gated action class —
     denied by default unless the RoE explicitly lists "http_recon_insecure" in
     allowed_action_classes (most engagements' RoE won't, by design: this needs a deliberate,
     documented opt-in, not just an approval click), and still requires approval even then."""
-    if request.tool == "http_recon" and request.arguments.get("verify_cert") is False:
+    if request.tool == "http_recon" and _verification_disabled(request.arguments):
         return "http_recon_insecure"
     return TOOL_ACTION_CLASS.get(request.tool)
 
@@ -103,6 +129,7 @@ class Broker:
         # assets, and two sessions on one engagement hitting the same host at half the cap each
         # is the same traffic the program asked us not to send.
         self._program_window: dict[str, deque] = defaultdict(deque)
+        self._idempotency_lock = threading.Lock()
         self._idempotency_path = idempotency_cache_path
         self._idempotency_path.parent.mkdir(parents=True, exist_ok=True)
         self._audit_logs: dict[str, audit_log_mod.AuditLog] = {}
@@ -127,6 +154,15 @@ class Broker:
         return {}
 
     def _save_idempotent(self, key: str, response: ActionResponse) -> None:
+        with self._idempotency_lock:
+            self._save_idempotent_locked(key, response)
+
+    def _save_idempotent_locked(self, key: str, response: ActionResponse) -> None:
+        # Held across the read-modify-write: without it two dispatches both read the cache,
+        # both add their own entry, and the second write loses the first. The lock is per
+        # Broker, which covers the concurrency this process has; two processes sharing the file
+        # still interleave, but the atomic replace means the loser loses an entry rather than
+        # corrupting the file, and a lost idempotency entry degrades to "replay not available".
         cache = self._idempotency_cache()
         cache[key] = response.to_dict()
         # Bounded, and pruned oldest-first. This file is rewritten in full on every dispatch, so
@@ -138,9 +174,23 @@ class Broker:
             # dicts keep insertion order, so the head is the oldest.
             for stale in list(cache)[: len(cache) - IDEMPOTENCY_CACHE_MAX_ENTRIES]:
                 cache.pop(stale, None)
-        tmp = self._idempotency_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cache))
-        tmp.replace(self._idempotency_path)  # atomic: a crash mid-write left it unparseable
+        # The temp name carries the pid AND a nonce. A single shared `.tmp` name meant two
+        # concurrent dispatches both wrote the same file, the first `replace()` moved it away,
+        # and the second raised FileNotFoundError — from inside `_finalize`, i.e. AFTER the
+        # action had run and after its audit entry was appended. The caller saw an exception
+        # ("it did not happen") for traffic that was sent and is recorded as succeeded. One
+        # Broker serves concurrent FastAPI requests per engagement, so this was reachable.
+        tmp = self._idempotency_path.with_name(
+            f"{self._idempotency_path.name}.tmp{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            tmp.write_text(json.dumps(cache))
+            os.replace(tmp, self._idempotency_path)  # atomic: a reader never sees a partial file
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover — the replace normally consumed it
+                pass
 
     def _finalize(self, request: ActionRequest, response: ActionResponse) -> ActionResponse:
         """Single exit path: store full raw output in the encrypted evidence store, write the
@@ -220,7 +270,12 @@ class Broker:
             return ActionResponse(**cached)
 
         if self.kill_switch.is_engaged():
-            status = self.kill_switch.status()
+            # `is_engaged()` is an existence check and `status()` re-reads the file, so an
+            # operator disengaging between the two calls made `status` None and
+            # `status.get(...)` raise an AttributeError — leaving the caller with no
+            # ActionResponse and the trail with no entry, instead of a denial. Deny either way:
+            # the switch was engaged when we looked, and that is the safe reading.
+            status = self.kill_switch.status() or {}
             return deny(f"kill switch engaged: {status.get('reason', '')}", "kill_switch")
 
         try:
@@ -292,7 +347,8 @@ class Broker:
         if (
             request.tool in REQUIRES_APPROVAL or taint_escalation or insecure_tls
         ) and not request.approval_ref:
-            note = f" [session tainted: {taint_info['reason']}]" if taint_escalation else ""
+            reason_text = (taint_info or {}).get("reason", "unknown reason")
+            note = f" [session tainted: {reason_text}]" if taint_escalation else ""
             if insecure_tls:
                 note += " [TLS certificate verification disabled]"
             reason_for_queue = f"{request.tool}({request.arguments}){note}"

@@ -106,6 +106,50 @@ def main() -> int:
     check("the apex denial is attributed to nothing matching, not to a DNS failure",
           r.policy_rule == "not_in_scope", r.policy_rule)
 
+    print("\n== a deny wildcard covers the apex too — the directions are not symmetric ==")
+    # Excluding the apex is conservative on the allow side and permissive on the deny side.
+    # Sharing one rule between them left an operator who wrote `*.customer.com` into a deny list
+    # with every subdomain blocked and the apex — usually the most sensitive host — permitted,
+    # recorded as a legitimate in-scope action.
+    broad = _policy(deny={"evil.com"}, nets=["0.0.0.0/0"])
+    with patch("socket.getaddrinfo", _resolver({})):
+        for host in ("sub.evil.com", "evil.com", "a.b.evil.com"):
+            r = scope_check.validate_target(host, broad)
+            check(f"deny '*.evil.com' blocks {host}", r.allowed is False,
+                  f"{r.allowed} ({r.policy_rule})")
+        check("and a lookalike is not swept up by the deny either",
+              scope_check.validate_target("notevil.com", broad).allowed is True)
+
+    print("\n== a hostname is validated against a charset, not by banning two characters ==")
+    # `"/" in host or " " in host` let a TAB-separated inline comment through as a hostname, so
+    # a deny entry became a string that can never match an IP: the hard deny list read as
+    # populated while being empty, and the agent could reach cloud metadata.
+    for line in ["169.254.169.254\t#metadata", "1.2.3.4\u00a0#nbsp", "-bad.com", "bad-.com",
+                 "ex ample.com", "a" * 64 + ".com", "\u4f8b\u3048.jp", "*.ex ample.com",
+                 "*.169.254.169.254\t#x"]:
+        try:
+            policy_mod.parse_scope_line(line)
+            check(f"{line!r} is refused", False, "it was accepted")
+        except policy_mod.ScopeLineError:
+            check(f"{line!r} is refused", True)
+    for line in ["localhost", "a-b.example.com", "host_1.internal", "xn--80ak6aa92e.com"]:
+        check(f"{line!r} is still accepted",
+              policy_mod.parse_scope_line(line) == ("hostname", line))
+
+    tmp_tab = Path(tempfile.mkdtemp(prefix="wc-tab-"))
+    (tmp_tab / "roe.json").write_text(
+        '{"engagement_id": "wc", "allowed_action_classes": ["active_web_request"],'
+        ' "valid_from": "2020-01-01T00:00:00Z", "valid_until": "2099-01-01T00:00:00Z"}'
+    )
+    (tmp_tab / "scope.txt").write_text("0.0.0.0/0\n")
+    (tmp_tab / "deny.txt").write_text("169.254.169.254\t#metadata\n")
+    try:
+        policy_mod.load_policy(tmp_tab)
+        check("a deny file whose entry would be dead fails closed", False, "it loaded")
+    except policy_mod.PolicyError as e:
+        check("a deny file whose entry would be dead fails closed", True)
+        check("and the error names the file", "deny.txt" in str(e), str(e)[:120])
+
     print("\n== the apex is in scope only when it is listed ==")
     pol_apex = _policy(allow={"example.com"})
     pol_apex.allow_hostnames = {"example.com"}

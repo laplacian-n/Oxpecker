@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,18 @@ _PUBLIC_SUFFIXES = frozenset({
 })
 
 
+# Labels of letters, digits, hyphen and underscore; no leading or trailing hyphen; 1-63 bytes
+# each; 253 bytes overall. Underscore is permitted because internal and SRV-style names use it.
+# Non-ASCII is refused, which means an IDN has to be given in punycode (`xn--...`) — the stricter
+# reading, and the one where two layers cannot disagree about what the name is.
+_HOSTNAME_RE = re.compile(
+    r"(?=.{1,253}\Z)"
+    r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
+    r"(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*"
+    r"\Z"
+)
+
+
 def normalize_host(host: str) -> str:
     """One spelling of a hostname, so two layers cannot disagree about whether they match.
 
@@ -116,6 +129,12 @@ def parse_scope_line(line: str):
                 f"{line!r} would put a whole top-level domain in scope; a wildcard needs at "
                 f"least a registrable domain (e.g. '*.example.com')"
             )
+        if not _HOSTNAME_RE.fullmatch(parent):
+            # Same charset rule as a bare hostname: without it `*.169.254.169.254\t#x` would
+            # become a suffix carrying a tab, i.e. a wildcard entry that can never match.
+            raise ScopeLineError(
+                f"{line!r} has a parent domain that is not a valid hostname"
+            )
         if parent in _PUBLIC_SUFFIXES:
             raise ScopeLineError(
                 f"{line!r} would put every domain under the public suffix {parent!r} in scope"
@@ -136,8 +155,18 @@ def parse_scope_line(line: str):
         pass
 
     host = normalize_host(line)
-    if not host or "/" in host or " " in host:
-        raise ScopeLineError(f"{line!r} is not a valid CIDR, IP or hostname")
+    if not _HOSTNAME_RE.fullmatch(host):
+        # Validated against a charset rather than by deny-listing a couple of characters. The
+        # deny-listing version ("/" in host or " " in host) let a TAB-separated inline comment
+        # through as a hostname: `169.254.169.254\t#metadata` became a deny entry that can never
+        # match an IP, so the hard deny list read as populated while being empty, and the agent
+        # was permitted to reach the cloud metadata endpoint with the action recorded as in
+        # scope. Any whitespace, any comment marker, and anything outside the DNS charset is a
+        # refusal now.
+        raise ScopeLineError(
+            f"{line!r} is not a valid CIDR, IP or hostname (an inline comment or stray "
+            f"whitespace is refused rather than read as part of the name)"
+        )
     return "hostname", host
 
 
