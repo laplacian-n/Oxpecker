@@ -58,13 +58,25 @@ sudo chown -R oxpecker:oxpecker /opt/oxpecker /var/lib/oxpecker
 sudo -u oxpecker git clone <your-remote> /opt/oxpecker
 sudo -u oxpecker python3 -m venv /opt/oxpecker/.venv
 sudo -u oxpecker /opt/oxpecker/.venv/bin/pip install \
-    fastapi 'uvicorn[standard]' scikit-learn numpy pyseccomp
+    fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic pyseccomp
 ```
 
 `uvicorn[standard]` rather than plain `uvicorn`: the bare package has no WebSocket
 implementation, so `/api/sessions/{id}/ws` silently stops being a WebSocket route and answers as
 plain HTTP (404). The shipped UI uses SSE and does not need it, but a client that opens the
 WebSocket will fail confusingly without it.
+
+`cryptography` is not mentioned anywhere else on this page, but it is a hard dependency:
+`agent/evidence/store.py` imports `cryptography.fernet` at module scope, `agent/audit_log.py`
+imports `evidence.store` at module scope, and `dev_server.py` imports `audit_log` at module
+scope. A venv missing it fails before `dev_server` binds a port, with
+`ModuleNotFoundError: No module named 'cryptography'` — nothing to do with the sandbox or the
+LLM provider.
+
+`pydantic` is listed for the same reason one step earlier: `dev_server.py` imports it directly
+for its request bodies, and it is present today only because fastapi happens to depend on it.
+A dependency we rely on by accident is one upstream release away from being the next
+`cryptography`. `agent/web/test_dev_server_imports.py` keeps this list honest.
 
 `pyseccomp` is what makes the seccomp filter available. Without it `bubblewrap` still gives
 namespaces and rlimits, and the tier honestly reports that no filter was loaded — the result
