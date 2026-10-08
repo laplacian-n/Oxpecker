@@ -35,6 +35,18 @@ def main() -> int:
     ws = Path(tempfile.mkdtemp(prefix="sandbox-isolation-test-"))
     ex = BubblewrapExecutor()
 
+    # Skip rather than crash when the tier cannot run here. Every other module in this package
+    # guards (test_availability asserts the bwrap-absent behaviour; test_seccomp_profile
+    # self-skips), and this one did not: it went straight to ex.run() and a missing `bwrap`
+    # surfaced as an uncaught FileNotFoundError traceback, which reads as a broken test suite
+    # rather than an absent dependency. The checks below are meaningless without a sandbox, so
+    # claiming a pass would be worse than saying why nothing ran.
+    ok, reason = ex.available()
+    if not ok:
+        print(f"SKIP: the bubblewrap tier cannot run here — {reason}")
+        print("0/0 checks passed (skipped: no sandbox on this host)")
+        return 0
+
     print("== Filesystem escape ==")
     r = ex.run(["cat", "/etc/shadow"], ws, ws, timeout=10)
     check("cannot read /etc/shadow (not bound into sandbox)", r.exit_code != 0)

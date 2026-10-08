@@ -230,4 +230,8 @@ def run(
         "duration_ms": round(result.duration_ms, 1),
         "isolation_tier": result.isolation_tier,
         "sandbox_profile_digest": result.sandbox_profile_digest,
+        # Reported alongside the tier, not folded into the digest: the digest is a hash, so a
+        # reader could not tell a seccomp-filtered run from an unfiltered one without
+        # recomputing the profile. None means the tier has no syscall-filter dimension.
+        "seccomp_active": result.seccomp_active,
     }

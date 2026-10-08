@@ -136,6 +136,44 @@ def main() -> int:
         if saved is not None:
             sys.modules["agent.sandbox.availability"] = saved
 
+    print("\n== the bubblewrap tier does not claim a seccomp filter it cannot load ==")
+    import tempfile
+    from pathlib import Path as _Path
+
+    from . import availability as avail
+    from . import seccomp_profile
+    from .executor import _profile_digest
+
+    desc = avail.TIER_DESCRIPTION[avail.TIER_BUBBLEWRAP]
+    check("the description makes the filter conditional rather than asserting it",
+          "when one can be loaded" in desc, desc)
+    host = avail.describe_host()
+    check("describe_host reports seccomp availability as its own field",
+          host.get("seccomp_available") == seccomp_profile.available(),
+          str(host.get("seccomp_available")))
+
+    print("\n== the profile digest fingerprints the filter that loaded, not the one declared ==")
+    # Runs with or without pyseccomp: _profile_digest takes the accepted list as an argument,
+    # which is the point of the change — the digest no longer asks the module what it WANTED
+    # to deny.
+    ws = _Path(tempfile.mkdtemp(prefix="avail-digest-"))
+    declared = sorted(seccomp_profile.DENIED_SYSCALLS)
+    loaded = _profile_digest(ws, True, declared)
+    check("dropping one loaded rule changes the digest",
+          _profile_digest(ws, True, declared[:-1]) != loaded)
+    check("the same loaded set is stable", _profile_digest(ws, True, list(declared)) == loaded)
+    check("order does not matter", _profile_digest(ws, True, list(reversed(declared))) == loaded)
+    check("a run with no filter differs from a filtered one",
+          _profile_digest(ws, False, None) != loaded)
+    # The real regression: before this change the digest was computed from the DECLARED list
+    # whatever actually loaded, so a partially-loaded filter was indistinguishable from a
+    # complete one. Passing None still records the declared list, but tags its source — so even
+    # with an identical syscall set the two fingerprint differently and a reader can tell which
+    # question the digest answered.
+    check("a 'declared' digest is distinguishable from a 'loaded' one with the same syscalls",
+          _profile_digest(ws, True, None) != loaded,
+          "declared and loaded sources must not collide")
+
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:
         print("FAILED:", FAIL)

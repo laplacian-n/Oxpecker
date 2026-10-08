@@ -25,23 +25,37 @@ def check(name: str, condition: bool, detail: str = ""):
 
 
 def main() -> int:
-    print("== pyseccomp availability on this system ==")
-    check(
-        "pyseccomp is available (venv)",
-        seccomp_profile.available(),
-        f"unavailable_reason={seccomp_profile.unavailable_reason()}",
-    )
+    # A missing optional dependency is a SKIP, not a failing check. Asserting
+    # `seccomp_profile.available()` made this module report "0/1 checks passed" on any host
+    # without pyseccomp, which reads as a broken suite rather than an absent package — and it
+    # buried the one thing worth saying, which is that nothing below ran.
     if not seccomp_profile.available():
-        print("  SKIPPED: remaining checks need pyseccomp; install it (venv has it) to run them")
-        print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
-        return 1 if FAIL else 0
+        print(f"SKIP: pyseccomp is not importable here "
+              f"({seccomp_profile.unavailable_reason()}); install it to run these checks")
+        print("0/0 checks passed (skipped: no pyseccomp on this host)")
+        return 0
 
-    print("\n== Filter construction ==")
-    f = seccomp_profile.build_filter()
+    print("== Filter construction ==")
+    f, accepted = seccomp_profile.build_filter()
     check("build_filter() returns a filter object", f is not None)
+    check("and the list of syscalls it actually accepted", isinstance(accepted, list) and accepted)
+    check("every accepted name is one we declared",
+          set(accepted) <= set(seccomp_profile.DENIED_SYSCALLS),
+          str(sorted(set(accepted) - set(seccomp_profile.DENIED_SYSCALLS))))
 
-    fd_a = seccomp_profile.open_bpf_fd()
-    fd_b = seccomp_profile.open_bpf_fd()
+    print("\n== the profile digest describes the filter that exists, not the one declared ==")
+    ws_d = Path(tempfile.mkdtemp(prefix="seccomp-digest-"))
+    loaded_digest = _profile_digest(ws_d, True, accepted)
+    declared_digest = _profile_digest(ws_d, True, list(seccomp_profile.DENIED_SYSCALLS))
+    partial_digest = _profile_digest(ws_d, True, accepted[:-1] if len(accepted) > 1 else [])
+    check("a filter missing a rule fingerprints differently",
+          partial_digest != loaded_digest)
+    check("and the declared list only matches when everything loaded",
+          (declared_digest == loaded_digest) == (set(accepted) == set(seccomp_profile.DENIED_SYSCALLS)),
+          f"{len(accepted)} of {len(seccomp_profile.DENIED_SYSCALLS)} loaded")
+
+    fd_a, _ = seccomp_profile.open_bpf_fd()
+    fd_b, _ = seccomp_profile.open_bpf_fd()
     try:
         size_a = os.fstat(fd_a).st_size
         check("open_bpf_fd() produces a real, non-empty compiled program", size_a > 0)
@@ -56,7 +70,7 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="seccomp-argv-test-"))
     argv_no_seccomp = BubblewrapExecutor.build_argv(["true"], tmp, tmp)
     check("no --seccomp flag when seccomp_fd is None", "--seccomp" not in argv_no_seccomp)
-    fd = seccomp_profile.open_bpf_fd()
+    fd, _ = seccomp_profile.open_bpf_fd()
     try:
         argv_with_seccomp = BubblewrapExecutor.build_argv(["true"], tmp, tmp, seccomp_fd=fd)
         check("--seccomp <fd> present when seccomp_fd is given", "--seccomp" in argv_with_seccomp and str(fd) in argv_with_seccomp)

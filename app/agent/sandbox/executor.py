@@ -23,7 +23,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .. import config
 from . import seccomp_profile
@@ -32,6 +32,7 @@ from .availability import (  # re-exported: availability.py owns the tier names,
     TIER_DIRECT,
     TIER_MICROVM,
     TIER_WSL2,
+    WSL_ULIMIT_FSIZE_MAX_BYTES,
     WSL_ULIMIT_PROLOGUE,
     IsolationUnavailableError,
     probe,
@@ -62,6 +63,11 @@ class ExecResult:
     isolation_tier: str
     sandbox_profile_digest: str | None = None
     killed_reason: str | None = None  # e.g. "resource_limit", "timeout"
+    # Whether a seccomp syscall filter was actually loaded for THIS run. None for tiers where
+    # the question does not apply (direct). Surfaced as a field because the digest is an opaque
+    # hash: a reader could not tell a filtered run from an unfiltered one without recomputing
+    # the profile, so "which protections were applied" was effectively unauditable.
+    seccomp_active: bool | None = None
 
 
 class _CappedCapture:
@@ -242,7 +248,11 @@ def _set_rlimits() -> None:
 _RO_BINDS = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/ssl", "/etc/resolv.conf"]
 
 
-def _profile_digest(workspace_root: Path, seccomp_active: bool = False) -> str:
+def _profile_digest(
+    workspace_root: Path,
+    seccomp_active: bool = False,
+    seccomp_syscalls: list[str] | None = None,
+) -> str:
     profile = {
         "ro_binds": [p for p in _RO_BINDS if Path(p).exists()],
         "rw_bind": str(workspace_root),
@@ -257,7 +267,19 @@ def _profile_digest(workspace_root: Path, seccomp_active: bool = False) -> str:
         # profile digest, rather than the audit trail implying uniform protection that wasn't
         # actually applied.
         "seccomp_active": seccomp_active,
-        "seccomp_denied_syscalls": sorted(seccomp_profile.DENIED_SYSCALLS) if seccomp_active else [],
+        # The syscalls the filter ACTUALLY carries, as reported by build_filter — not the
+        # declared deny-list. Rules are skipped per syscall when libseccomp or the kernel does
+        # not know the name, and hashing the declaration meant the digest attested rules that
+        # were never loaded (on an older libseccomp: ptrace and the whole new-mount-API family),
+        # with two materially different filters fingerprinting identically. The fallback to the
+        # declared list exists only for a caller that has not been updated; it is the wrong
+        # answer and the key says so.
+        "seccomp_denied_syscalls": sorted(seccomp_syscalls) if seccomp_syscalls is not None else (
+            sorted(seccomp_profile.DENIED_SYSCALLS) if seccomp_active else []
+        ),
+        "seccomp_syscalls_source": (
+            "loaded" if seccomp_syscalls is not None else ("declared" if seccomp_active else "none")
+        ),
     }
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
@@ -341,9 +363,10 @@ class BubblewrapExecutor:
         # protection that wasn't applied — reflected in the profile digest below either way.
         seccomp_fd = None
         seccomp_active = False
+        seccomp_syscalls: list[str] | None = None
         if seccomp_profile.available():
             try:
-                seccomp_fd = seccomp_profile.open_bpf_fd()
+                seccomp_fd, seccomp_syscalls = seccomp_profile.open_bpf_fd()
                 seccomp_active = True
             except Exception:
                 log.warning("seccomp filter failed to load, running without it", exc_info=True)
@@ -380,7 +403,9 @@ class BubblewrapExecutor:
                 timed_out=timed_out,
                 duration_ms=(time.monotonic() - start) * 1000,
                 isolation_tier=self.tier,
-                sandbox_profile_digest=_profile_digest(workspace_root, seccomp_active),
+                sandbox_profile_digest=_profile_digest(
+                    workspace_root, seccomp_active, seccomp_syscalls),
+                seccomp_active=seccomp_active,
                 killed_reason=killed_reason,
             )
         finally:
@@ -492,7 +517,13 @@ class WSL2Executor:
         for path in _WSL_RO_BINDS:
             inner += ["--ro-bind-try", path, path]
         inner += ["--clearenv"]
-        for k, v in _build_env(Path(guest_workspace)).items():
+        # PurePosixPath, not Path: on a Windows host `Path` is `WindowsPath`, which flips the
+        # guest path's separators to backslashes, so `HOME` became
+        # `\\mnt\\c\\Users\\...` — a non-existent single-component name inside the sandbox.
+        # Anything expanding `~` or writing to $HOME then wrote a literal backslash-named file
+        # or failed. Not caught by the tier's tests because they run on Linux, where `Path` is
+        # already `PosixPath`.
+        for k, v in _build_env(PurePosixPath(guest_workspace)).items():
             inner += ["--setenv", k, v]
         inner += [
             "--proc", "/proc",
@@ -529,7 +560,10 @@ class WSL2Executor:
             "mem_limit_bytes": BWRAP_MEM_LIMIT_BYTES,
             "cpu_limit_s": BWRAP_CPU_LIMIT_S,
             "nofile_limit": BWRAP_NOFILE_LIMIT,
-            "fsize_limit_bytes": BWRAP_FSIZE_LIMIT_BYTES,
+            # A MAXIMUM, not an exact figure: `ulimit -f` counts blocks whose size depends on
+            # the guest's /bin/sh (512 bytes in dash, 1024 in bash), so the real limit is this
+            # or half of it. The key name says which.
+            "fsize_limit_bytes_max": WSL_ULIMIT_FSIZE_MAX_BYTES,
             # Not an omission to be read as "unknown": the fd cannot cross wsl.exe. Recorded as
             # false so the trail says which runs had the syscall filter and which did not.
             "seccomp_active": False,
@@ -575,6 +609,7 @@ class WSL2Executor:
             isolation_tier=self.tier,
             sandbox_profile_digest=digest,
             killed_reason=killed_reason,
+            seccomp_active=False,  # the BPF fd cannot cross the wsl.exe boundary; see the class
         )
 
 

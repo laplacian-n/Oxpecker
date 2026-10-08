@@ -34,7 +34,10 @@ TIERS = (TIER_DIRECT, TIER_BUBBLEWRAP, TIER_WSL2, TIER_MICROVM)
 # shell, blocklist only) — not because it is a form of isolation.
 TIER_DESCRIPTION = {
     TIER_DIRECT: "no kernel isolation — scrubbed env and a command blocklist only",
-    TIER_BUBBLEWRAP: "kernel-enforced namespace isolation (fs/net/pid) + seccomp + rlimits",
+    TIER_BUBBLEWRAP: (
+        "kernel-enforced namespace isolation (fs/net/pid) + rlimits, and a seccomp syscall "
+        "filter when one can be loaded on this host (see the tier's `reason`)"
+    ),
     TIER_WSL2: (
         "bubblewrap inside the WSL2 guest VM — namespace isolation (fs/net/pid) + rlimits "
         "behind a hypervisor boundary, but NO seccomp (the compiled BPF program is passed to "
@@ -57,14 +60,24 @@ _USERNS_MAX_PATH = "/proc/sys/user/max_user_namespaces"
 # skipped is a limit not applied, and the executor's own digest would then claim caps that were
 # not in force. executor.py imports this so the probe and the real run use one string.
 #
-# Units differ per flag and are not interchangeable: -v is KiB, -f is 512-byte blocks, -t is
-# seconds, -n is a count. Kept in sync with the BWRAP_* constants in executor.py, which are the
-# Linux tier's and are expressed in bytes.
+# Units differ per flag and are not interchangeable: -v is KiB, -t is seconds, -n is a count,
+# and -f is in BLOCKS whose size depends on the shell — 512 bytes in dash, 1024 in bash. The
+# first version of this used `ulimit -f 102400` and the digest claimed 52428800 bytes, which was
+# true on Debian/Ubuntu (dash) and wrong by a factor of two on a guest whose /bin/sh is bash
+# (Fedora, Arch, openSUSE), where the run actually permitted 100 MiB. The probe cannot catch it:
+# it only checks the prologue is ACCEPTED, not what value it set.
+#
+# So the block count is chosen to make the claim true under either shell: 51200 blocks is 25 MiB
+# under dash and 50 MiB under bash, and the profile records 50 MiB as a MAXIMUM. An upper bound
+# that always holds beats an exact figure that is wrong on half the distributions.
+WSL_ULIMIT_FSIZE_BLOCKS = 51200
+WSL_ULIMIT_FSIZE_MAX_BYTES = WSL_ULIMIT_FSIZE_BLOCKS * 1024
+
 WSL_ULIMIT_PROLOGUE = (
-    "ulimit -v 524288 && "     # 512 MiB address space
+    "ulimit -v 524288 && "     # 512 MiB address space (KiB, unambiguous)
     "ulimit -t 10 && "          # 10 CPU-seconds
     "ulimit -n 64 && "          # 64 file descriptors
-    "ulimit -f 102400 && "      # 50 MiB max single-file write
+    f"ulimit -f {WSL_ULIMIT_FSIZE_BLOCKS} && "  # <= 50 MiB per file; see above on block size
     "exec "
 )
 
@@ -112,6 +125,25 @@ def _probe_bubblewrap(deep: bool = False) -> tuple[bool, str]:
     except (OSError, ValueError):
         pass  # Unreadable or unparseable; let the deep probe or the real run decide.
 
+    # Whether the syscall filter can be loaded is part of what this tier provides, so it
+    # belongs in the reason rather than only in a log line. The description used to assert
+    # "+ seccomp" unconditionally while the probe never consulted the filter at all: on a host
+    # without pyseccomp the capability report an operator reads said this tier provides a
+    # seccomp filter, the run did not load one, and the only machine-readable trace was an
+    # opaque digest. The tier stays AVAILABLE — namespaces and rlimits are real on their own,
+    # and refusing would be the wrong trade — but it no longer claims the filter it lacks.
+    seccomp_note = ""
+    try:
+        from . import seccomp_profile  # stdlib-only at import; the binding is a try-import
+
+        if not seccomp_profile.available():
+            seccomp_note = (
+                f"; NO seccomp syscall filter on this host "
+                f"({seccomp_profile.unavailable_reason()}) — namespaces and rlimits only"
+            )
+    except Exception as e:  # pragma: no cover — the module imports without its binding
+        seccomp_note = f"; seccomp availability could not be determined ({e})"
+
     if deep:
         try:
             proc = subprocess.run(
@@ -128,9 +160,11 @@ def _probe_bubblewrap(deep: bool = False) -> tuple[bool, str]:
                 "a trivial bwrap invocation failed: "
                 + (detail[-1] if detail else f"exit {proc.returncode}")
             )
-        return True, "verified by executing a sandboxed /bin/true"
+        return True, "verified by executing a sandboxed /bin/true" + seccomp_note
 
-    return True, "bwrap is present and user namespaces are permitted (not exec-verified)"
+    return True, (
+        "bwrap is present and user namespaces are permitted (not exec-verified)" + seccomp_note
+    )
 
 
 # How long to wait for the WSL2 guest. A cold VM start is seconds, not milliseconds, and the
@@ -292,8 +326,20 @@ def describe_host(deep: bool = False) -> dict:
     strongest = next(
         (t for t in reversed(_TIER_STRENGTH) if tiers[t]["available"]), TIER_DIRECT
     )
+    seccomp_available = None
+    try:
+        from . import seccomp_profile
+
+        seccomp_available = seccomp_profile.available()
+    except Exception:  # pragma: no cover
+        seccomp_available = None
+
     return {
         "platform": platform.system(),
+        # Surfaced as its own field, not only inside a tier's prose: a UI showing "bubblewrap"
+        # should be able to say whether the syscall filter is part of it without parsing a
+        # sentence.
+        "seccomp_available": seccomp_available,
         "tiers": tiers,
         "strongest_available": strongest,
         "kernel_isolation_available": strongest != TIER_DIRECT,
