@@ -76,14 +76,76 @@ def _build_env(workspace_root: Path) -> dict:
     }
 
 
+# Programs whose job is to run another program. Screening only argv[0] made every one of these
+# a laundering path: `["env", "curl", ...]` passed both the block list and the confirmation gate
+# while `["curl", ...]` was refused outright, and in the `direct` tier the block list is the
+# ONLY egress control there is. Verified before the fix — `env curl` completed a real HTTP
+# request with no prompt.
+_COMMAND_WRAPPERS = frozenset({
+    "env", "nice", "ionice", "nohup", "setsid", "stdbuf", "unbuffer", "timeout", "time",
+    "xargs", "watch", "flock", "taskset", "chrt", "script", "busybox", "command", "exec",
+    "strace", "ltrace", "ltrace64", "catchsegv", "proxychains", "proxychains4",
+})
+
+# `env NAME=VALUE prog` reintroduces environment this tool deliberately strips: _build_env is
+# "no inherited secret-bearing env vars (Phase-1 safety boundary)", and an assignment is how
+# that boundary is undone from inside an otherwise-innocuous argv.
+_ENV_ASSIGNMENT = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def effective_binaries(argv: list[str]) -> list[str]:
+    """Every program this argv would run, in order, seen through the wrappers.
+
+    `["env", "-i", "FOO=1", "curl", "-s", "http://x"]` -> `["env", "curl"]`. Screening checks
+    all of them, so a wrapper cannot carry a blocked program past a check that only looked at
+    the first token.
+    """
+    names: list[str] = []
+    i = 0
+    while i < len(argv):
+        name = Path(argv[i]).name
+        names.append(name)
+        if name not in _COMMAND_WRAPPERS:
+            break
+        i += 1
+        # Step over the wrapper's own flags and (for env) its assignments to reach the program.
+        while i < len(argv) and (argv[i].startswith("-") or _ENV_ASSIGNMENT.match(argv[i])):
+            i += 1
+    return names
+
+
+def has_wrapper(argv: list[str]) -> bool:
+    return bool(argv) and Path(argv[0]).name in _COMMAND_WRAPPERS
+
+
 def preflight(argv: list[str], dangerous_local: bool) -> tuple[bool, str | None]:
     """Returns (blocked, reason). Blocked=True means: refuse outright, no confirmation offered."""
     if not argv:
         return True, "empty argv"
 
-    binary = Path(argv[0]).name
-    if binary in config.BLOCKED_BINARIES and not dangerous_local:
-        return True, f"binary {binary!r} is in the default block list (network/privesc)"
+    chain = effective_binaries(argv)
+    # When a wrapper is involved, screen EVERY remaining token rather than trying to parse each
+    # wrapper's grammar. Walking the chain positionally is not enough: `timeout 5 nc -l 1` puts
+    # a positional duration before the program, so the walk stopped at "5" and `nc` went
+    # unscreened — a hole in the first version of this fix, caught by its own test table.
+    # Over-broad in one direction (a FILENAME argument that happens to be called `curl` blocks
+    # the run) and that is the right direction for a hard block; the message says which token.
+    screened = chain if not has_wrapper(argv) else chain + [Path(a).name for a in argv[1:]]
+    for binary in screened:
+        if binary in config.BLOCKED_BINARIES and not dangerous_local:
+            via = f" (reached via {chain[0]})" if has_wrapper(argv) else ""
+            return True, (
+                f"binary {binary!r} is in the default block list (network/privesc){via}"
+            )
+
+    if len(chain) > 1 and chain[0] == "env":
+        for arg in argv[1:]:
+            if _ENV_ASSIGNMENT.match(arg):
+                return True, (
+                    f"`env {arg.split('=')[0]}=...` would set an environment variable for the "
+                    f"child, and this tool runs commands with a deliberately scrubbed "
+                    f"environment. Pass the value as an argument instead."
+                )
 
     for arg in argv:
         if marker := contains_credential_path(arg, config.CREDENTIAL_PATH_MARKERS):
@@ -93,8 +155,27 @@ def preflight(argv: list[str], dangerous_local: bool) -> tuple[bool, str | None]
 
 
 def needs_confirmation(argv: list[str]) -> bool:
-    binary = Path(argv[0]).name
-    return binary not in config.COMMAND_ALLOWLIST
+    """Whether a human must approve this argv.
+
+    Two rules beyond "is the name on the allowlist":
+
+    * EVERY program in the wrapper chain has to be allowlisted, not just the first.
+    * An argv[0] carrying a path separator is never allowlisted. The gate matched on
+      `Path(argv[0]).name`, so a file the agent had just written into its own workspace and
+      named `ls` ran with no confirmation while the existence check "validated" /usr/bin/ls.
+      The allowlist names coreutils programs found on the sandbox PATH; it does not name
+      whatever happens to share a basename with one.
+    """
+    if not argv:
+        return True
+    if "/" in argv[0] or "\\" in argv[0]:
+        return True
+    if has_wrapper(argv):
+        # A wrapper is never auto-approved, even when everything in the chain is allowlisted.
+        # The agent has no need for `env ls` over `ls`, and the allowlist's job is to recognise
+        # a short list of well-understood invocations — a wrapped one is not among them.
+        return True
+    return any(b not in config.COMMAND_ALLOWLIST for b in effective_binaries(argv))
 
 
 def run(

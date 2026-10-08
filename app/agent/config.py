@@ -185,6 +185,16 @@ ANALYSIS_THINKING_REQUEST_TIMEOUT_S = 560
 
 # --- Tool execution: subprocess-level safety caps ---
 RUN_COMMAND_MAX_OUTPUT_BYTES = 100_000
+
+# How much of a sandboxed process's stdout/stderr the PARENT will hold in memory. Distinct from
+# RUN_COMMAND_MAX_OUTPUT_BYTES, which is the excerpt the caller is shown: the capture limit is
+# what stops the agent being killed by its own child. `capture_output=True` reads a pipe to EOF
+# with no bound, so a command writing 2.6 GB took the agent to 7.7 GiB RSS inside the ordinary
+# tool timeout — RLIMIT_AS caps the sandboxed process and RLIMIT_FSIZE does not apply to pipes,
+# so neither limit protected the parent. Generous enough that the caller's own cap is what
+# truncates in every normal case, and the excess is read and discarded so the child is never
+# blocked on a full pipe.
+EXEC_CAPTURE_MAX_BYTES = 4 * 1024 * 1024
 READ_FILE_MAX_BYTES = 200_000
 WRITE_FILE_MAX_BYTES = 200_000
 

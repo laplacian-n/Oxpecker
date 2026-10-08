@@ -20,10 +20,12 @@ import logging
 import os
 import shlex
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import config
 from . import seccomp_profile
 from .availability import (  # re-exported: availability.py owns the tier names, so a
     TIER_BUBBLEWRAP,         # Windows-side caller and this module cannot disagree on spelling
@@ -62,6 +64,88 @@ class ExecResult:
     killed_reason: str | None = None  # e.g. "resource_limit", "timeout"
 
 
+class _CappedCapture:
+    """What `subprocess.run(capture_output=True)` should have been for an untrusted child.
+
+    `capture_output` reads each pipe to EOF with no bound: a child writing 2.6 GB put 7.7 GiB
+    into the agent's own RSS, inside the normal tool timeout. The sandbox's own limits do not
+    help — `RLIMIT_AS` caps the child, and `RLIMIT_FSIZE` does not apply to pipes — so the
+    process we are isolating could kill the process doing the isolating.
+
+    Each stream is drained by its own thread, which keeps the first `limit` bytes and discards
+    the rest. Draining rather than closing matters: if the parent stopped reading, the child
+    would block on a full pipe and look like a hang instead of a noisy command.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.chunks: list[bytes] = []
+        self.total = 0
+        self._lock = threading.Lock()
+
+    def drain(self, stream) -> None:
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    return
+                with self._lock:
+                    if self.total < self.limit:
+                        self.chunks.append(chunk[: self.limit - self.total])
+                    self.total += len(chunk)
+        except (OSError, ValueError):  # pragma: no cover — stream closed under us
+            return
+        finally:
+            try:
+                stream.close()
+            except OSError:  # pragma: no cover
+                pass
+
+    def text(self) -> str:
+        body = b"".join(self.chunks).decode("utf-8", errors="replace")
+        if self.total > self.limit:
+            body += (
+                f"\n[...capture capped at {self.limit} bytes; the command produced "
+                f"{self.total} bytes and the rest was read and discarded]"
+            )
+        return body
+
+
+def run_capped(
+    argv: list[str], *, timeout: float, limit: int | None = None, **popen_kwargs
+) -> tuple[int | None, str, str, bool]:
+    """(exit_code, stdout, stderr, timed_out) with the parent's memory bounded.
+
+    Drop-in for `subprocess.run(..., capture_output=True, text=True, timeout=...)` in every
+    executor here. On timeout the child is killed, the readers are joined, and whatever was
+    captured before the kill is returned — the same contract `TimeoutExpired.stdout` offers,
+    without the unbounded read.
+    """
+    limit = config.EXEC_CAPTURE_MAX_BYTES if limit is None else limit
+    proc = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, **popen_kwargs
+    )
+    out, err = _CappedCapture(limit), _CappedCapture(limit)
+    readers = [
+        threading.Thread(target=out.drain, args=(proc.stdout,), daemon=True),
+        threading.Thread(target=err.drain, args=(proc.stderr,), daemon=True),
+    ]
+    for t in readers:
+        t.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+    for t in readers:
+        # The pipes are closed once the child is gone, so the readers end on their own. The
+        # bound is a safety net against a grandchild still holding the write end.
+        t.join(timeout=5.0)
+    return (None if timed_out else proc.returncode), out.text(), err.text(), timed_out
+
+
 def _build_env(workspace_root: Path) -> dict:
     return {
         "PATH": "/usr/bin:/bin",
@@ -87,34 +171,18 @@ class DirectExecutor:
         self, argv: list[str], cwd: Path, workspace_root: Path, timeout: float
     ) -> ExecResult:
         start = time.monotonic()
-        try:
-            proc = subprocess.run(
-                argv,
-                cwd=str(cwd),
-                env=_build_env(workspace_root),
-                timeout=timeout,
-                capture_output=True,
-                shell=False,
-                text=True,
-            )
-            return ExecResult(
-                exit_code=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                timed_out=False,
-                duration_ms=(time.monotonic() - start) * 1000,
-                isolation_tier=self.tier,
-            )
-        except subprocess.TimeoutExpired as e:
-            return ExecResult(
-                exit_code=None,
-                stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
-                stderr=(e.stderr or "") if isinstance(e.stderr, str) else "",
-                timed_out=True,
-                duration_ms=(time.monotonic() - start) * 1000,
-                isolation_tier=self.tier,
-                killed_reason="timeout",
-            )
+        code, stdout, stderr, timed_out = run_capped(
+            argv, timeout=timeout, cwd=str(cwd), env=_build_env(workspace_root)
+        )
+        return ExecResult(
+            exit_code=code,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=timed_out,
+            duration_ms=(time.monotonic() - start) * 1000,
+            isolation_tier=self.tier,
+            killed_reason="timeout" if timed_out else None,
+        )
 
 
 # Resource caps applied inside the sandboxed process via RLIMIT — cheap, portable, no
@@ -291,44 +359,30 @@ class BubblewrapExecutor:
             outer_env = self.outer_env(workspace_root)
 
             start = time.monotonic()
-            try:
-                proc = subprocess.run(
-                    bwrap_argv,
-                    env=outer_env,
-                    timeout=timeout,
-                    capture_output=True,
-                    shell=False,
-                    text=True,
-                    preexec_fn=_set_rlimits,
-                    pass_fds=(seccomp_fd,) if seccomp_fd is not None else (),
-                )
-                duration_ms = (time.monotonic() - start) * 1000
-                killed_reason = None
+            code, stdout, stderr, timed_out = run_capped(
+                bwrap_argv,
+                timeout=timeout,
+                env=outer_env,
+                preexec_fn=_set_rlimits,
+                pass_fds=(seccomp_fd,) if seccomp_fd is not None else (),
+            )
+            killed_reason = None
+            if timed_out:
+                killed_reason = "timeout"
+            elif code == 137:
                 # bash/coreutils convention: 128+SIGKILL(9)=137 when the OOM/RLIMIT kill lands
                 # inside the sandboxed process; bwrap itself exits with the child's real status.
-                if proc.returncode == 137:
-                    killed_reason = "resource_limit"
-                return ExecResult(
-                    exit_code=proc.returncode,
-                    stdout=proc.stdout,
-                    stderr=proc.stderr,
-                    timed_out=False,
-                    duration_ms=duration_ms,
-                    isolation_tier=self.tier,
-                    sandbox_profile_digest=_profile_digest(workspace_root, seccomp_active),
-                    killed_reason=killed_reason,
-                )
-            except subprocess.TimeoutExpired as e:
-                return ExecResult(
-                    exit_code=None,
-                    stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
-                    stderr=(e.stderr or "") if isinstance(e.stderr, str) else "",
-                    timed_out=True,
-                    duration_ms=(time.monotonic() - start) * 1000,
-                    isolation_tier=self.tier,
-                    sandbox_profile_digest=_profile_digest(workspace_root, seccomp_active),
-                    killed_reason="timeout",
-                )
+                killed_reason = "resource_limit"
+            return ExecResult(
+                exit_code=code,
+                stdout=stdout,
+                stderr=stderr,
+                timed_out=timed_out,
+                duration_ms=(time.monotonic() - start) * 1000,
+                isolation_tier=self.tier,
+                sandbox_profile_digest=_profile_digest(workspace_root, seccomp_active),
+                killed_reason=killed_reason,
+            )
         finally:
             if seccomp_fd is not None:
                 os.close(seccomp_fd)
@@ -506,35 +560,22 @@ class WSL2Executor:
 
         full_argv = self.build_argv(argv, guest_cwd, guest_workspace)
         digest = self.profile_digest(guest_workspace)
-        try:
-            proc = subprocess.run(
-                full_argv, timeout=timeout, capture_output=True, shell=False,
-            )
-            stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
-            stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
-            return ExecResult(
-                exit_code=proc.returncode,
-                stdout=stdout,
-                stderr=stderr,
-                timed_out=False,
-                duration_ms=(time.monotonic() - start) * 1000,
-                isolation_tier=self.tier,
-                sandbox_profile_digest=digest,
-                killed_reason="resource_limit" if proc.returncode == 137 else None,
-            )
-        except subprocess.TimeoutExpired as e:
-            def _dec(v):
-                if isinstance(v, bytes):
-                    return v.decode("utf-8", errors="replace")
-                return v or ""
-            return ExecResult(
-                exit_code=None, stdout=_dec(e.stdout), stderr=_dec(e.stderr),
-                timed_out=True,
-                duration_ms=(time.monotonic() - start) * 1000,
-                isolation_tier=self.tier,
-                sandbox_profile_digest=digest,
-                killed_reason="timeout",
-            )
+        code, stdout, stderr, timed_out = run_capped(full_argv, timeout=timeout)
+        killed_reason = None
+        if timed_out:
+            killed_reason = "timeout"
+        elif code == 137:
+            killed_reason = "resource_limit"
+        return ExecResult(
+            exit_code=code,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=timed_out,
+            duration_ms=(time.monotonic() - start) * 1000,
+            isolation_tier=self.tier,
+            sandbox_profile_digest=digest,
+            killed_reason=killed_reason,
+        )
 
 
 class MicroVMExecutor:
