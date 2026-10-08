@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -257,6 +258,37 @@ def main() -> int:
         "sandboxed processes — reverted rather than shipped flaky). See "
         "agent/sandbox/executor.py's comments and docs/adr/0003 for the full record."
     )
+
+    print("\n== a command the prompt advertises can actually be run in the sandbox ==")
+    # The bug this catches: _RO_BINDS bound /usr and /bin but not /etc/alternatives, and on
+    # Debian/Ubuntu `/usr/bin/python3` is a symlink to `/etc/alternatives/python3`. Inside the
+    # sandbox that first hop dangled, so bwrap answered "execvp python3: No such file or
+    # directory" for a binary that plainly exists on the host — 359 commands on the host this
+    # was found on, python3, awk, nc, cc, java and vi among them.
+    #
+    # It went unnoticed because it needs a real bwrap to see, and it is the worst case to get
+    # wrong: run_command's own schema tells the model to "pass a pipeline to python3 -c", and
+    # dev_server's HOST ENVIRONMENT blurb advertises curl, dig, ss and nc by name. So the check
+    # is not "is /etc/alternatives bound" but the thing we actually care about — a tool we tell
+    # the model it has is a tool it can run.
+    import shutil as _shutil
+
+    sandbox = BubblewrapExecutor()
+    advertised = ["python3", "curl", "dig", "ss", "nc", "awk", "sh"]
+    present = [c for c in advertised if _shutil.which(c)]
+    check("some advertised commands exist on this host to test with", bool(present), str(advertised))
+    for cmd in present:
+        ws = Path(tempfile.mkdtemp(prefix="alt-bind-test-"))
+        try:
+            # --help / --version rather than real work: the question is whether the binary
+            # resolves and execs at all, not what it does.
+            probe = ["python3", "-c", "print(1)"] if cmd == "python3" else [cmd, "--version"]
+            r = sandbox.run(probe, ws, ws, timeout=15)
+            resolved = "No such file or directory" not in (r.stderr or "")
+            check(f"{cmd} resolves and execs inside the sandbox", resolved,
+                  f"exit={r.exit_code} stderr={(r.stderr or '')[:120]!r}")
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
 
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:

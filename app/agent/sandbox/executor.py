@@ -245,7 +245,20 @@ def _set_rlimits() -> None:
 # every ExecResult (the closest bubblewrap equivalent to a "pinned image digest": there's no
 # image to pull, but the profile that defines what's visible inside is itself fixed and
 # fingerprinted, so a later change to it is detectable by diffing the digest across runs).
-_RO_BINDS = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/ssl", "/etc/resolv.conf"]
+# `/etc/alternatives` is here because without it, every command Debian and Ubuntu route through
+# the alternatives system is unreachable inside the sandbox — 359 of them on the host this was
+# found on, `python3`, `awk`, `nc`, `cc`, `java`, `vi` and `pager` among them. `/usr/bin/python3`
+# is a symlink to `/etc/alternatives/python3`, which is a symlink to the real binary; bind `/usr`
+# without `/etc/alternatives` and the first hop dangles, so bwrap reports
+# "execvp python3: No such file or directory" for a file that plainly exists on the host. That is
+# the most confusing possible error for the most likely command: run_command's own schema tells
+# the model to "pass a pipeline to python3 -c".
+#
+# It grants no new reachable content. The directory holds symlinks only, it is mounted read-only,
+# and every target already lives under /usr, /bin or /sbin, which are bound anyway — this only
+# lets an already-reachable binary be found by its canonical name.
+_RO_BINDS = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/alternatives",
+             "/etc/ssl", "/etc/resolv.conf"]
 
 
 def _profile_digest(

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from . import seccomp_profile
 from .executor import BubblewrapExecutor, _profile_digest
 
 PASS, FAIL = [], []
+#: Checks this host cannot establish either way — reported, never silently counted as a pass.
+UNPROVEN: list[str] = []
 
 
 def check(name: str, condition: bool, detail: str = ""):
@@ -138,15 +142,70 @@ def main() -> int:
         import subprocess
 
         proc = subprocess.run(argv, env=BubblewrapExecutor.outer_env(ws3), capture_output=True, text=True, timeout=15)
-        check(
-            "without the filter, ptrace(PTRACE_TRACEME) succeeds (proves the denial above is the filter, not something else)",
-            "ret=0 errno=0" in proc.stdout,
-            f"stdout={proc.stdout!r} stderr={proc.stderr[:200]!r}",
-        )
+
+        # Is the control even possible on this bubblewrap? Measured, not assumed: on
+        # bubblewrap 0.9.0 the bare host allows ptrace(PTRACE_TRACEME) while ANY bwrap
+        # invocation denies it — with no seccomp filter of ours, and with or without
+        # --unshare-all. bwrap denies it itself.
+        #
+        # That makes ptrace unable to demonstrate this filter: the "denied under the filter"
+        # check above passes whether or not the filter is loaded, which is the definition of a
+        # vacuous test. Reported as unproven rather than failed, because nothing here is broken
+        # — ptrace is simply the wrong syscall to prove it with. The unshare pair below is the
+        # one that actually proves it, and it is a hard assertion.
+        if "ret=0 errno=0" in proc.stdout:
+            check(
+                "without the filter, ptrace(PTRACE_TRACEME) succeeds (proves the denial above is the filter, not something else)",
+                True,
+            )
+        else:
+            UNPROVEN.append(
+                "ptrace cannot demonstrate this filter: bubblewrap denies ptrace itself "
+                f"(no-filter probe inside bwrap: {proc.stdout.strip()!r}), so the "
+                "'ptrace denied under the filter' check above is vacuous on this bwrap version"
+            )
+            print("  NOTE  bubblewrap denies ptrace with no filter of ours loaded "
+                  f"({proc.stdout.strip()!r}), though the bare host allows it. ptrace therefore "
+                  "cannot attribute anything to this filter here — see the unshare pair below, "
+                  "which can.")
     finally:
         shutil.rmtree(ws3, ignore_errors=True)
 
+    print("\n== The filter is proved by a syscall bubblewrap itself permits: unshare ==")
+    # This is the pair that makes the suite non-vacuous. unshare(CLONE_NEWUSER) SUCCEEDS inside
+    # bwrap with no filter of ours (bubblewrap permits nested user namespaces) and is EPERM with
+    # the filter loaded. Both halves are asserted, so neither "the filter does nothing" nor
+    # "something else was denying it" can pass unnoticed.
+    #
+    # It is also the right syscall to care about: creating a nested user namespace is the
+    # primitive for building a fresh sandbox inside this one, i.e. for stepping outside the
+    # confinement the tier claims.
+    probe = ("import ctypes\n"
+             "libc = ctypes.CDLL(None, use_errno=True)\n"
+             "ret = libc.unshare(0x10000000)\n"   # CLONE_NEWUSER
+             "print(f'ret={ret} errno={ctypes.get_errno()}')\n")
+    ws4 = Path(tempfile.mkdtemp(prefix="seccomp-unshare-test-"))
+    try:
+        with_filter = BubblewrapExecutor().run(["python3", "-c", probe], ws4, ws4, timeout=15)
+        check("unshare(CLONE_NEWUSER) is denied with EPERM under the filter",
+              "ret=-1 errno=1" in with_filter.stdout,
+              f"stdout={with_filter.stdout!r} stderr={with_filter.stderr[:160]!r}")
+
+        argv_off = BubblewrapExecutor.build_argv(
+            ["python3", "-c", probe], ws4, ws4, seccomp_fd=None)
+        without = subprocess.run(argv_off, env=BubblewrapExecutor.outer_env(ws4),
+                                 capture_output=True, text=True, timeout=15)
+        check("and SUCCEEDS without it, so the denial is this filter and nothing else",
+              "ret=0 errno=0" in without.stdout,
+              f"stdout={without.stdout!r} stderr={without.stderr[:160]!r}")
+    finally:
+        shutil.rmtree(ws4, ignore_errors=True)
+
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
+    if UNPROVEN:
+        print("UNPROVEN on this host (not failures, and not passes):")
+        for u in UNPROVEN:
+            print(f"  - {u}")
     if FAIL:
         print("FAILED:", FAIL)
         return 1
