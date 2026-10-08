@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -92,20 +93,58 @@ def main() -> int:
     )
     mock_search.assert_called_once()
 
-    print("\n== Rate-limit cooldown applies to knowledge_search/knowledge_fetch ==")
+    print("\n== Rate-limit cooldown PACES knowledge_search rather than denying it ==")
+    # The broker used to deny a back-to-back call outright. It now waits the cooldown out in
+    # place, because the cooldown is ours and is measured in seconds: denying spends a whole
+    # model round trip to communicate a two-second wait. The contract this asserts is
+    # therefore stronger than the old one — not just "the call is allowed", but "the call was
+    # allowed AND the traffic was still paced", which is the part that actually protects the
+    # target. A regression that simply dropped the cooldown would pass the first half and fail
+    # the second.
+    cooldown = config.ACTION_CLASS_COOLDOWN_S["knowledge_search"]
     with patch("agent.internet.dispatcher.knowledge_search", return_value=fake_result):
         from ..internet import dispatcher as internet_dispatcher
 
         req3 = ActionRequest(
             tool="knowledge_search", arguments={"query": "second"}, session_id=session_id, device_id="d",
         )
+        t0 = time.monotonic()
         resp3 = broker2.dispatch(
             req3, executor=lambda pol, args: {"channel": internet_dispatcher.knowledge_search(session_id, args["query"]).channel}
         )
+        elapsed = time.monotonic() - t0
     check(
-        "back-to-back knowledge_search call is rate-limited",
-        resp3.status == "denied" and resp3.policy_rule == "rate_limit",
-        f"status={resp3.status} rule={resp3.policy_rule}",
+        "back-to-back knowledge_search succeeds instead of costing a model turn",
+        resp3.status == "succeeded", f"status={resp3.status} rule={resp3.policy_rule} detail={resp3.detail}",
+    )
+    check(
+        f"...and was paced: it blocked for ~{cooldown}s rather than firing immediately",
+        elapsed >= cooldown * 0.9, f"elapsed={elapsed:.2f}s cooldown={cooldown}s",
+    )
+
+    print("\n== An operator's kill switch is seen while a dispatch is parked in a cooldown ==")
+    # The reason the wait polls instead of sleeping: a dispatch parked in a cooldown must not
+    # outlive an emergency stop. Engage the switch from another thread mid-wait and the parked
+    # dispatch must deny on kill_switch, not wake up and send.
+    with patch("agent.internet.dispatcher.knowledge_search", return_value=fake_result):
+        from ..internet import dispatcher as internet_dispatcher
+
+        req4 = ActionRequest(
+            tool="knowledge_search", arguments={"query": "third"}, session_id=session_id, device_id="d",
+        )
+        engager = threading.Timer(cooldown * 0.3, broker2.kill_switch.engage, args=("test: mid-cooldown stop",))
+        engager.start()
+        try:
+            resp4 = broker2.dispatch(
+                req4, executor=lambda pol, args: {"channel": internet_dispatcher.knowledge_search(session_id, args["query"]).channel}
+            )
+        finally:
+            engager.cancel()
+            broker2.kill_switch.disengage()
+    check(
+        "a dispatch waiting out a cooldown aborts when the kill switch is engaged",
+        resp4.status == "denied" and resp4.policy_rule == "kill_switch",
+        f"status={resp4.status} rule={resp4.policy_rule} detail={resp4.detail}",
     )
 
     print("\n== Tainted session escalates knowledge_fetch to approval ==")
@@ -175,8 +214,6 @@ def main() -> int:
         print(f"  SKIPPED  live end-to-end check (SearXNG not reachable): {e}")
 
     print("\n== Async approval-queue mode (use_approval_queue=True) ==")
-    import threading
-
     session_id3 = f"kc-async-test-{time.time_ns()}"
     TaintStore(session_id3).mark(reason="test", verdict="suspicious", source="http_recon")
     async_queue = ApprovalQueue(queue_dir=tmp / "approval_queue_async")

@@ -14,11 +14,9 @@ shortcut — `run_pending_tasks()` leaves those tasks pending and reports them a
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .. import config
 from ..broker.broker import Broker
 from ..broker.contracts import ActionRequest
 from ..findings.model import FindingsStore
@@ -219,13 +217,14 @@ def run_pending_tasks(
     phase = orch.store.get_phase()["current_phase"]
     tasks = [t for t in orch.store.list_tasks(phase=phase) if t["status"] == "pending"]
     outcomes: list[ExecutionOutcome] = []
-    # The broker rate-limits each (session_id, action_class) pair (agent/broker/broker.py's
-    # ACTION_CLASS_COOLDOWN_S) — a real, correct control for a single ad hoc call, but a batch
-    # of same-phase tasks dispatched back-to-back through one session_id would otherwise trip it
-    # on the second call. Pacing dispatches here (rather than loosening the broker's cooldown)
-    # keeps the rate limit meaningful for everything else that shares it.
-    cooldown_s = max(config.ACTION_CLASS_COOLDOWN_S.values(), default=1.0)
-    dispatched_any = False
+    # Pacing a batch of same-phase tasks used to be this function's job: the broker denied a
+    # back-to-back dispatch, so this loop slept `max(ACTION_CLASS_COOLDOWN_S)` between tasks to
+    # avoid tripping it. The broker now waits its own cooldown out in place, which is strictly
+    # better than doing it here: it waits the cooldown of the class actually being dispatched
+    # instead of the largest in the table, it waits only the time still outstanding instead of
+    # the full interval, and it does not sleep at all when enough time has already passed. So
+    # this loop no longer paces anything — one pacing mechanism, in the component that owns the
+    # limit and knows the real remaining time.
     for task in tasks:
         if max_tasks is not None and len(outcomes) >= max_tasks:
             break
@@ -241,9 +240,6 @@ def run_pending_tasks(
                 ExecutionOutcome(task["task_id"], task_type, False, f"no executor registered for task_type {task_type!r}", skipped=True)
             )
             continue
-        if dispatched_any:
-            time.sleep(cooldown_s)
-        dispatched_any = True
         orch.store.update_task(task["task_id"], expected_version=task["version"], status="running")
         outcome = executor(orch, broker, session_id, task)
         orch.store.update_task(

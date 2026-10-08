@@ -124,6 +124,10 @@ class Broker:
         self.confirm_fn = confirm_fn or (lambda prompt: input(prompt).strip().lower() == "y")
         self.kill_switch = KillSwitch()
         self._last_action_at: dict[tuple[str, str], float] = {}  # (session_id, class) -> ts
+        # Guards _last_action_at across the read-decide-claim sequence in the cooldown gate.
+        # Held only for that bookkeeping, never across the wait itself, so one session parked
+        # in a cooldown does not stall every other session's dispatch.
+        self._cooldown_lock = threading.Lock()
         # Timestamps of target-touching dispatches that were allowed through, per engagement.
         # Per ENGAGEMENT and not per session on purpose: a program's request cap applies to its
         # assets, and two sessions on one engagement hitting the same host at half the cap each
@@ -238,6 +242,22 @@ class Broker:
         self._save_idempotent(request.idempotency_key, response)
         return response
 
+    def _wait_out_cooldown(self, wait_s: float) -> bool:
+        """Block for `wait_s`, re-checking the kill switch every COOLDOWN_WAIT_POLL_S.
+
+        Returns True if the wait completed, False if the kill switch was engaged part way
+        through and the caller should deny instead. A single sleep() would have made the
+        switch's termination time depend on the longest cooldown in the table; polling keeps
+        it at one slice, which is what kill_switch.py's docstring promises callers."""
+        deadline = time.time() + wait_s
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return True
+            if self.kill_switch.is_engaged():
+                return False
+            time.sleep(min(config.COOLDOWN_WAIT_POLL_S, remaining))
+
     def dispatch(
         self, request: ActionRequest, executor: Callable[[policy_mod.Policy, dict], dict]
     ) -> ActionResponse:
@@ -326,13 +346,38 @@ class Broker:
                         policy.policy_version,
                     )
 
+        # Our own pacing, not the program's (that is `program.rate_limit` above, which still
+        # denies because its waits run to tens of seconds and the model genuinely should go do
+        # something else). These are a couple of seconds and we chose them ourselves, so the
+        # broker waits them out in place rather than spending a model round trip to say "later".
+        # The wait is interruptible: an operator's kill switch is seen within one poll slice.
         cooldown = config.ACTION_CLASS_COOLDOWN_S.get(action_class, 1.0)
         key = (request.session_id, action_class)
-        last = self._last_action_at.get(key, 0.0)
-        if time.time() - last < cooldown:
+        with self._cooldown_lock:
+            last = self._last_action_at.get(key, 0.0)
+            wait_s = cooldown - (time.time() - last)
+            if wait_s > config.ACTION_CLASS_COOLDOWN_MAX_WAIT_S:
+                return deny(
+                    f"rate limit: {action_class} actions are paced to 1 per {cooldown}s and the "
+                    f"next is allowed in {wait_s:.1f}s, which is longer than this broker will "
+                    f"block for. Nothing was sent. Do something else and come back to it.",
+                    "rate_limit",
+                    policy.policy_version,
+                )
+            if wait_s > 0:
+                # Claim the slot before releasing the lock. Without this, two dispatches that
+                # arrive together both compute the same deadline, both sleep to it, and both
+                # fire at once — which is the thing the cooldown exists to prevent. Claiming
+                # makes a concurrent dispatch queue behind this one instead. A request that a
+                # later gate denies therefore consumes a slot it never used, which errs toward
+                # less traffic and is the safe direction to err in.
+                self._last_action_at[key] = last + cooldown
+        if wait_s > 0 and not self._wait_out_cooldown(wait_s):
+            status = self.kill_switch.status() or {}
             return deny(
-                f"rate limit: {action_class} actions are cooled down to 1 per {cooldown}s",
-                "rate_limit",
+                f"kill switch engaged while waiting out the {action_class} cooldown: "
+                f"{status.get('reason', '')}",
+                "kill_switch",
                 policy.policy_version,
             )
 

@@ -93,6 +93,20 @@ ACTION_CLASS_COOLDOWN_S = {
     "browser_recon": 3.0,  # browser startup/render time alone is >1s; a tighter cooldown
                             # would just queue calls behind each other anyway
 }
+# How long the broker is willing to BLOCK waiting out a cooldown before it gives up and denies
+# instead. These cooldowns are a few seconds and self-imposed, so waiting one out costs wall
+# clock and nothing else; denying costs a whole model round trip, because the model has to be
+# told, has to decide, and has to ask again — and a model that is not told how long to wait
+# guesses, which in observed runs burned one to six turns on `sleep` before it retried.
+# Waiting is therefore the cheaper branch for anything in the table above, and the ceiling only
+# exists so that raising a cooldown to a minute does not silently turn into a minute-long stall.
+# It is deliberately just above the largest entry: a wait longer than this is a configuration
+# mistake, not a pace.
+ACTION_CLASS_COOLDOWN_MAX_WAIT_S = 5.0
+# Granularity of that wait. The broker re-checks the kill switch once per slice, so this is also
+# the worst-case added delay before an operator's emergency stop is seen by a dispatch that is
+# parked in a cooldown — kept well inside the kill switch's own stated termination target.
+COOLDOWN_WAIT_POLL_S = 0.05
 SECURITY_MCP_SERVER_MODULE = "agent.security_mcp_server"
 
 # --- Phase 4: sandboxing, evidence store, findings, reporting, eval ---
