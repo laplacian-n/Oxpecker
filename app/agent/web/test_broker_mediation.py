@@ -20,7 +20,10 @@ from __future__ import annotations
 import json
 import pathlib
 import tempfile
+import time
 from unittest.mock import patch
+
+from agent import config
 
 PASS, FAIL = [], []
 
@@ -121,14 +124,23 @@ def main() -> int:
         finally:
             eng.allow_targets = ["127.0.0.1", "localhost"]
 
-        print("\n== the per-class rate limit is enforced ==")
+        print("\n== the per-class rate limit paces the second call instead of refusing it ==")
+        # The broker waits its own cooldown out rather than denying, so a back-to-back call
+        # succeeds — but late. Asserting only "ok is True" would pass for a build with no rate
+        # limit at all, so the elapsed time is the real check here: the traffic must still be
+        # spaced by the configured cooldown.
+        cooldown = config.ACTION_CLASS_COOLDOWN_S["active_scan_light"]
         s = fresh("rate")
         d._audited_run_tool("port_discovery", {"host": "127.0.0.1", "ports": [9]}, s,
                             turn_index=0, action_rationale="")
+        t0 = time.monotonic()
         r, _ = d._audited_run_tool("port_discovery", {"host": "127.0.0.1", "ports": [9]}, s,
                                    turn_index=1, action_rationale="")
-        check("a back-to-back call of the same class is rate limited",
-              r.get("ok") is False and "rate limit" in str(r.get("error")), str(r)[:130])
+        elapsed = time.monotonic() - t0
+        check("a back-to-back call of the same class is allowed through, not refused",
+              r.get("ok") is not False, str(r)[:130])
+        check(f"...but it was paced: it took at least the {cooldown}s cooldown",
+              elapsed >= cooldown * 0.9, f"elapsed={elapsed:.2f}s cooldown={cooldown}s")
 
         print("\n== a refusal is recorded as a denial however the tool reports it ==")
         # port_discovery raises PermissionError; dev_server's http_request returns a dict. Left

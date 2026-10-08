@@ -1747,24 +1747,122 @@ MAX_INPUT_CHARS = 90000
 PER_MSG_CAP = 8000
 CTX_WINDOW = 32768
 
+# The two numbers above were derived for one local llama-server launch, and stayed hardcoded
+# when a second provider arrived. An API model with a 200k window was therefore budgeted as if
+# it had 32k and folded eight times sooner than it needed to — every fold costing a
+# summarisation call and, worse, a prompt-cache miss. Express the shipped budget as a fraction
+# of the window instead, so it generalises:
+#
+#   90000 chars / 32768 tokens of window = 2.747 chars of input per token of window
+#
+# For the documented llama launch this reproduces 90000 exactly, so nothing about the local
+# path changes — including the HTTP 400 "exceeds context size" headroom that number was chosen
+# to leave. A provider declaring a larger window simply gets proportionally more room.
+INPUT_CHARS_PER_CTX_TOKEN = MAX_INPUT_CHARS / CTX_WINDOW
+
+
+def _context_window() -> int:
+    """The current provider's declared context window, falling back to the local build's."""
+    if _llm is None:
+        return CTX_WINDOW
+    try:
+        return _llm.capabilities().context_window or CTX_WINDOW
+    except Exception:  # noqa: BLE001 — a provider that cannot answer is budgeted conservatively
+        return CTX_WINDOW
+
+
+def _input_char_budget() -> int:
+    return int(_context_window() * INPUT_CHARS_PER_CTX_TOKEN)
+
+
+def _capped(content: str) -> str:
+    """Cap one message at PER_MSG_CAP, at the moment it is written into a message list.
+
+    This used to happen inside `_fit_context`, which mutated `m["content"]` in place on every
+    call. That made a message the model had already been shown change its bytes afterwards,
+    which is the one thing a prefix-matched prompt cache cannot tolerate, and it made the
+    working list's contents depend on how many times a function had been called over it.
+    Capping on the way in means a message's bytes are fixed from the moment it exists.
+    """
+    if not isinstance(content, str):
+        # The guard the in-place version carried (`isinstance(c, str)`), kept: a record whose
+        # content is not a string must pass through rather than raise inside message assembly.
+        return content
+    if len(content) > PER_MSG_CAP:
+        return content[:PER_MSG_CAP] + "\n…[truncated]"
+    return content
+
+
+# Kept byte-for-byte constant on purpose. This note sits inside the cached prefix, so a count
+# of what was elided ("14 earlier messages removed") would change the prefix on every round
+# and invalidate the whole cache — the exact class of silent invalidator the caching section of
+# docs/API_MODE_DESIGN.md warns about. The real count goes to the debug trace, which is not
+# part of the prompt.
+_ELISION_NOTE = {
+    "role": "user",
+    "content": "[Some middle steps of this session have been elided to fit the context window. "
+               "The opening messages above and the recent messages below are complete and "
+               "verbatim; do not assume anything about what was removed.]",
+}
+# How many messages at the front are never touched. The system prompt, the condensed session
+# summary where there is one, and the first few real turns — which hold the operator's actual
+# objective and the first recon results, the context a long turn most often needs and the old
+# implementation was the most eager to throw away.
+SEALED_HEAD_MESSAGES = 4
+# ...and how many at the end, which carry the newest tool results the model is reasoning about.
+KEEP_TAIL_MESSAGES = 8
+
 
 def _fit_context(messages: list[dict]) -> list[dict]:
-    """Trim to fit the context window: hard-cap any single message, then drop the oldest
-    non-system messages until the total is under budget. The system message and the most
-    recent messages (including the current question/tool results) are always kept."""
-    for m in messages:
-        c = m.get("content")
-        if isinstance(c, str) and len(c) > PER_MSG_CAP:
-            m["content"] = c[:PER_MSG_CAP] + "\n…[truncated]"
+    """Trim to fit the context window WITHOUT disturbing the prefix the model already saw.
+
+    The previous implementation did two things that a prefix-matched prompt cache cannot
+    survive, and it did them on every tool round of every turn:
+
+      * it truncated message content **in place**, so a message already sent to the model
+        changed its bytes afterwards (now done once, on the way in — see `_capped`); and
+      * it dropped the OLDEST messages — `rest.pop(0)` — which is precisely the prefix. One
+        drop invalidates the cache entry for the whole conversation, and a long turn drops on
+        every round, so the cache never hits once a session crosses the budget. On a metered
+        API that is the difference between paying a cache-read rate for the bulk of the prompt
+        and paying full price for all of it, every round.
+
+    So elide from the MIDDLE instead, keeping a sealed head and the recent tail. As the
+    conversation grows the removed span only extends further from a fixed starting point, which
+    leaves `messages[:SEALED_HEAD_MESSAGES] + _ELISION_NOTE` byte-identical round after round —
+    a prefix the cache can match.
+
+    Dropping the middle is also the better answer on its own terms, cache aside: what the old
+    code discarded first was the operator's original objective and the first recon results,
+    which is the context a long turn most often still needs.
+    """
     if not messages:
-        return messages
-    system, rest = messages[0], messages[1:]
-    base = len(system.get("content", "") or "")
-    total = base + sum(len(m.get("content", "") or "") for m in rest)
-    while rest and total > MAX_INPUT_CHARS:
-        dropped = rest.pop(0)
-        total -= len(dropped.get("content", "") or "")
-    return [system] + rest
+        return list(messages)
+    budget = _input_char_budget()
+    sizes = [len(m.get("content") or "") for m in messages]
+    if sum(sizes) <= budget:
+        return list(messages)
+
+    head_n = min(SEALED_HEAD_MESSAGES, len(messages))
+    head, rest = messages[:head_n], messages[head_n:]
+    # The newest KEEP_TAIL_MESSAGES are sent even if that overshoots the budget: a prompt
+    # missing the tool results the model is mid-way through reasoning about is worse than a
+    # long one, and PER_MSG_CAP bounds how far the overshoot can go.
+    guaranteed = min(KEEP_TAIL_MESSAGES, len(rest))
+    used = sum(sizes[:head_n]) + len(_ELISION_NOTE["content"])
+    kept_tail = rest[len(rest) - guaranteed:] if guaranteed else []
+    used += sum(sizes[head_n + len(rest) - guaranteed:])
+    # Then walk further back, taking older messages while they still fit, so the budget is
+    # actually used rather than left on the table.
+    for i in range(len(rest) - guaranteed - 1, -1, -1):
+        size = sizes[head_n + i]
+        if used + size > budget:
+            break
+        kept_tail = [rest[i]] + kept_tail
+        used += size
+    if len(kept_tail) == len(rest):
+        return list(messages)
+    return head + [dict(_ELISION_NOTE)] + kept_tail
 
 
 COMPACT_WHEN = 24   # fold once this many messages sit beyond the last summary point
@@ -1827,9 +1925,10 @@ def _maybe_compact(session: Session):
 
 
 # Mid-turn compaction: a single turn is now uncapped, so a long tool chain can balloon the
-# working message list beyond the context window. _fit_context would silently DROP the oldest
-# messages (losing evidence); instead, once the real prompt-token count crosses this fraction
-# of the window, summarize the middle of the in-flight turn and keep going — preserving facts.
+# working message list beyond the context window. _fit_context elides the middle of it to fit,
+# which keeps the prefix cacheable but still means evidence leaves the prompt unsummarised;
+# instead, once the real prompt-token count crosses this fraction of the window, summarize the
+# middle of the in-flight turn and keep going — preserving the facts rather than the text.
 INTURN_COMPACT_FRACTION = 0.65
 INTURN_KEEP_TAIL = 6   # keep this many most-recent working messages verbatim
 
@@ -1974,7 +2073,7 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
         history = history[-20:]
     for m in history:
         role = m["role"] if m["role"] in ("user", "assistant", "system") else "user"
-        messages.append({"role": role, "content": m["content"]})
+        messages.append({"role": role, "content": _capped(m["content"])})
 
     # RAG augmentation goes LAST so the stable prefix above stays cacheable.
     rag_results = _rag.search(user_content, top_k=2)
@@ -2063,7 +2162,7 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
                 session.last_prompt_tokens = int(usage["prompt_tokens"])
                 session.push({"type": "context", "prompt_tokens": session.last_prompt_tokens,
                               "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-                              "max": CTX_WINDOW})
+                              "max": _context_window()})
 
             choices = chunk.get("choices") or [{}]
             delta = choices[0].get("delta", {})
@@ -2207,7 +2306,7 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
                 session.append("tool", result_text, extra={"tool_name": tool_name})
                 result_blocks.append(f"[{tool_name}] →\n{result_text}")
             messages.append({"role": "user",
-                             "content": "Tool results:\n\n" + "\n\n".join(result_blocks)})
+                             "content": _capped("Tool results:\n\n" + "\n\n".join(result_blocks))})
             tool_round += 1
             # Loop-detection: if the model fires the identical call 3× running, it's stuck
             # (a 4B sometimes re-sends the same request forever) — stop and let it summarize.
@@ -2220,9 +2319,9 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
                                             "DIFFERENT request or give your final answer."})
                 recent_sigs.clear()
             # Mid-turn compaction: fold the middle of this turn once the real prompt size
-            # crosses the threshold, so a long tool chain preserves evidence instead of
-            # having _fit_context silently drop the oldest messages.
-            if session.last_prompt_tokens > INTURN_COMPACT_FRACTION * CTX_WINDOW:
+            # crosses the threshold, so a long tool chain has its evidence summarised rather
+            # than merely elided by _fit_context when the prompt is assembled.
+            if session.last_prompt_tokens > INTURN_COMPACT_FRACTION * _context_window():
                 messages = _compact_working_messages(messages, session)
             continue
 

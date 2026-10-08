@@ -59,6 +59,14 @@ class ProviderCapabilities:
     server_compaction: bool = False
     server_token_count: bool = False
 
+    # How much the model will actually accept, in tokens. The runtime's context budget was a
+    # hardcoded character count sized for one local llama-server build, which is wrong in both
+    # directions once a second provider exists: it compacts a 200k-context API model after 22k
+    # tokens, and it would overrun a model with a smaller window than the one it was tuned for.
+    # The default is the smallest window any provider here plausibly has, so a provider that
+    # does not declare one is budgeted conservatively rather than optimistically.
+    context_window: int = 32768
+
     reasoning: str = "none"
     # Whether editing earlier turns invalidates prior reasoning blocks. True means the harness
     # must be append-only: the runtime's _fit_context and _maybe_compact both rewrite history,
@@ -85,6 +93,7 @@ class ProviderCapabilities:
             "prompt_caching": self.prompt_caching,
             "server_compaction": self.server_compaction,
             "server_token_count": self.server_token_count,
+            "context_window": self.context_window,
             "reasoning": self.reasoning,
             "append_only_history": self.append_only_history,
             "cost_per_mtok": list(self.cost_per_mtok) if self.cost_per_mtok else None,
