@@ -68,17 +68,37 @@ def parse_gtfobins(root: Path) -> list[dict]:
 
 
 def parse_lolbas(root: Path) -> list[dict]:
-    """One chunk per Command entry — LOLBAS's Windows-binary equivalent of GTFOBins."""
+    """One chunk per Command entry — LOLBAS's Windows-binary equivalent of GTFOBins.
+
+    LOLBAS.github.io migrated its data from a flat `yml/**/*.yml` layout to Jekyll frontmatter
+    inside `_lolbas/**/*.md` (same Name/Commands/Resources schema either way — confirmed by
+    cloning the real repo, which has no `yml/` directory at all: this parser produced zero
+    chunks against it, silently, because `test_produces_many_chunks` is the only one of the
+    four lolbas tests that doesn't pass vacuously on an empty list). Both layouts are read here
+    so this keeps working if a `yml/` export ever comes back.
+    """
     chunks = []
     yml_dir = root / "yml"
+    docs: list[tuple[dict, str]] = []
     for path in sorted(yml_dir.rglob("*.yml")):
         try:
-            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            docs.append((yaml.safe_load(path.read_text(encoding="utf-8")), path.stem))
         except yaml.YAMLError:
             continue
+    md_dir = root / "_lolbas"
+    for path in sorted(md_dir.rglob("*.md")):
+        raw = path.read_text(encoding="utf-8")
+        m = re.match(r"^---\n(.*?)\n---\n", raw, re.DOTALL)
+        if not m:
+            continue
+        try:
+            docs.append((yaml.safe_load(m.group(1)), path.stem))
+        except yaml.YAMLError:
+            continue
+    for doc, default_name in docs:
         if not doc or "Commands" not in doc:
             continue
-        name = doc.get("Name", path.stem)
+        name = doc.get("Name", default_name)
         for i, cmd in enumerate(doc.get("Commands") or []):
             command = cmd.get("Command", "")
             if not command:
