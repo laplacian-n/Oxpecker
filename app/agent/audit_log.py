@@ -200,7 +200,19 @@ def verify(session_id: str, audit_dir: Path | None = None) -> tuple[bool, str]:
         ).hexdigest()
         if stored_hash != expected_hash:
             return False, f"hash mismatch at index {i}: entry was modified"
-        if checkpoints[i]["index_hash"] != stored_hash:
+        # Indexed defensively, like the log lines above it and for the same reason stated
+        # there: a checkpoint line that will not parse IS a verification failure. Reading
+        # `checkpoints[i]["index_hash"]` blind turned a damaged checkpoint into a KeyError or a
+        # TypeError out of the verifier, so anyone who could write the file — the same threat
+        # model the file exists to detect — could deny the operator a verdict entirely instead
+        # of being caught. A crash mid-write leaving a partial line did the same.
+        checkpoint = checkpoints[i] if i < len(checkpoints) else None
+        if not isinstance(checkpoint, dict) or "index_hash" not in checkpoint:
+            return False, (
+                f"checkpoint {i} is missing or unreadable ({checkpoint!r:.60}): the checkpoint "
+                f"file cannot corroborate the log"
+            )
+        if checkpoint["index_hash"] != stored_hash:
             return False, f"checkpoint mismatch at index {i}: log and checkpoint disagree"
         prev_hash = stored_hash
 

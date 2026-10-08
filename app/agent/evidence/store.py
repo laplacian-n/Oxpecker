@@ -403,7 +403,14 @@ class EvidenceStore:
             new_record = dict(record)
             new_record["digest"] = new_digest
             new_record["migrated_from"] = digest
-            new_record["stored_at"] = time.time()
+            # stored_at is CARRIED OVER, not reset. Setting it to now restarted the retention
+            # clock: evidence already past its window survived run_retention_job() and got
+            # another full one, and the live index record claimed it had been collected today.
+            # Re-addressing a blob changes its address, not when it was collected — and
+            # "when was this collected" is the question the retention policy and any chain of
+            # custody both ask. `migrated_at` records the re-addressing separately.
+            new_record["stored_at"] = record.get("stored_at", time.time())
+            new_record["migrated_at"] = time.time()
             with self.index_path.open("a") as f:
                 f.write(json.dumps(new_record) + "\n")
 
