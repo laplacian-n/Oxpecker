@@ -63,8 +63,16 @@ def main() -> int:
                 if p.exists() else []
 
         print("\n== which tools are mediated, and which deliberately are not ==")
+        # http_recon joined this set when it was wired into this runtime. It is deliberately
+        # mediated rather than dispatched directly: the broker is what maps verify_cert=False to
+        # the `http_recon_insecure` action class, which needs an explicit RoE allowance AND
+        # approval. Dispatching it straight to the implementation would have moved that decision
+        # out of the component that records it. Kept as an exact-set assertion so adding an
+        # outward-facing tool without mediating it fails here; test_tool_parity.py additionally
+        # asserts the general rule (anything the broker classifies must be mediated).
         check("the outward-facing tools are mediated",
-              d._BROKER_MEDIATED == {"http_request", "port_discovery", "knowledge_search"},
+              d._BROKER_MEDIATED == {"http_request", "port_discovery", "knowledge_search",
+                                     "http_recon"},
               str(d._BROKER_MEDIATED))
         check("run_command is not mediated", "run_command" not in d._BROKER_MEDIATED)
         check("and the broker does not claim an action class for it",

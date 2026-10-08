@@ -694,8 +694,12 @@ function renderConfigPill(key,icon,label,color,minW){
 function renderMenuDropdown(minW){
   const items=[];
   if(S.menu==='sec'){
-    items.push({value:false,label:'Off',desc:'Only run_command / read_file / write_file',cur:!S.securityTools});
-    items.push({value:true,label:'On',desc:'http_recon, port_discovery, knowledge_search, osint_record, browser_fetch',cur:S.securityTools});
+    /* These two lines described a tool set this server does not have — the Off text omitted
+       port_discovery, http_request and knowledge_search, which are always available, and the On
+       text named osint_record and browser_fetch, which dev_server has never dispatched (they
+       belong to loop.py, the CLI runtime). What the toggle actually gates is http_recon. */
+    items.push({value:false,label:'Off',desc:'port_discovery, http_request, files, knowledge_search, and the record_* tools',cur:!S.securityTools});
+    items.push({value:true,label:'On',desc:'Adds http_recon — passive HTTP metadata, scope-checked per redirect hop',cur:S.securityTools});
   }else if(S.menu==='iso'){
     items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default) \u2014 Linux hosts',cur:S.isolation==='bubblewrap'});
     // The only tier a Windows host can run local commands under: the same bubblewrap profile,
@@ -728,7 +732,7 @@ let CTX_MAX=32768; const CTX_HISTORY=20;
 const CTX_CONV_CAP_TOK=22000;
 function estimateContext(){
   const sysTok=560;                            // system prompt + platform facts (~fixed)
-  const toolsTok=S.securityTools?680:420;      // tool schemas
+  const toolsTok=S.securityTools?1390:1190;    // tool schemas, measured from TOOL_SCHEMAS (~chars/4)
   // Prefer the REAL prompt-token count llama-server reported for the last turn.
   if(S.ctxUsage&&S.ctxUsage.prompt_tokens){
     const used=Math.min(S.ctxUsage.prompt_tokens,CTX_MAX);

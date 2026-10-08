@@ -75,6 +75,7 @@ from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..engagement.program import Program as _Program
 from ..sandbox import availability as _isolation
+from ..security_tools import http_recon as _http_recon
 from ..security_tools import port_discovery as _port_discovery
 from ..tools import run_command as _run_command
 from . import debug_trace as _debug
@@ -127,20 +128,37 @@ def _platform_facts() -> str:
         (curl, dig, ss, nc, and nmap if installed) are available. Prefer non-interactive flags.""")
 
 
+def _tool_list_block(tools: list[dict]) -> str:
+    """The prompt's "you have access to" list, generated from the schemas actually being sent.
+
+    It used to be hand-written, and had drifted three ways at once: it omitted port_discovery,
+    which is always available; it described run_command as "Execute a shell command on the host"
+    while that tool's own schema says "There is no shell: pipes, redirects, &&, ; and $( ) are
+    refused"; and it named record_hypothesis, update_hypothesis_status, record_note and
+    record_finding unconditionally although all four sat behind `use_security_tools`, which
+    defaults to False — so the normal session told the model to call four tools it had not been
+    given. A list generated from `tools` cannot disagree with `tools`.
+
+    One line per tool, first sentence of its schema description, because the full descriptions
+    are already in the tool definitions the model receives and repeating them doubles the cost
+    of the same text.
+    """
+    lines = []
+    for t in tools:
+        fn = t.get("function") or {}
+        name = fn.get("name") or "?"
+        desc = " ".join((fn.get("description") or "").split())
+        first = desc.split(". ")[0].rstrip(".")
+        lines.append(f"- {name}: {first}" if first else f"- {name}")
+    return "\n".join(lines)
+
+
 DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 You are Oxpecker, a self-hosted AI penetration testing assistant. You help security \
 professionals with reconnaissance, vulnerability analysis, exploitation, and reporting.
 
 You have access to the following tools:
-- http_request: Send an HTTP request to an in-scope target (status + headers + body). PREFER
-  this for ALL web testing — send payloads as structured fields instead of shell-quoting.
-- run_command: Execute a shell command on the host (see HOST ENVIRONMENT below)
-- read_file: Read file contents from the workspace
-- write_file: Write or create files in the workspace
-- knowledge_search: Search the local security knowledge base
-- record_hypothesis / update_hypothesis_status: track theories in the hypothesis graph
-- record_note: keep a running notebook (technique / dead-end / todo / observation)
-- record_finding: log a confirmed vulnerability with evidence
+@@TOOL_LIST@@
 
 WEB TESTING RULE: Use http_request — NOT run_command/PowerShell — to probe URLs and send
 SQLi/XSS/auth payloads. PowerShell quote-escaping wastes turns and corrupts payloads.
@@ -1242,6 +1260,34 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         except OSError as e:
             return {"ok": False, "error": f"scan failed: {e}"}
 
+    elif name == "http_recon":
+        # Passive HTTP metadata, delegated to the same implementation the CLI uses. Reaches the
+        # engagement's assets, so it is broker-mediated (see _BROKER_MEDIATED) and classified
+        # `passive_recon`; the broker, not this branch, decides whether the action class is
+        # permitted. verify_cert is passed straight through rather than being refused here,
+        # because disabling it IS a distinct, harder-gated action class — the broker maps it to
+        # `http_recon_insecure`, which needs an explicit RoE allowance AND approval. Refusing it
+        # locally would look safer and would in fact move the decision out of the component that
+        # records it.
+        url = str(args.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "url is required"}
+        eng = _engagements.get(session.engagement_id)
+        pre = _scope.check_url(url, eng)
+        if not pre.allowed:
+            return pre.as_tool_error()
+        try:
+            return _http_recon.run(url, _scope.policy_from_engagement(eng),
+                                   verify_cert=args.get("verify_cert", True) is not False)
+        except PermissionError as e:
+            # Raised per redirect hop, so this also covers a redirect that leaves scope.
+            return {"ok": False, "error": f"out of scope: {e}. This request was NOT sent.",
+                    "scope_rule": "not_in_scope"}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except OSError as e:
+            return {"ok": False, "error": f"request failed: {e}"}
+
     return {"ok": False, "error": f"unknown tool: {name}"}
 
 
@@ -1249,7 +1295,7 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 # local execution is gated by the sandbox and its preflight (see the isolation work), and
 # run_command is deliberately absent from broker.TOOL_ACTION_CLASS. read/write_file and the
 # record_* tools stay local and in-memory.
-_BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search"}
+_BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search", "http_recon"}
 
 # Output that matches an injection pattern taints the session — except from the local knowledge
 # index, which mirrors loop.py's INJECTION_SCAN_EXEMPT_TOOLS ("security_reference_search" is the
@@ -1645,14 +1691,37 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to read"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Write content to a file in the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path to write"}, "content": {"type": "string", "description": "File content"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "knowledge_search", "description": "Search the security knowledge base (GTFOBins, HackTricks, exploit-db, etc.).", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_k": {"type": "integer", "description": "Number of results", "default": 5}}, "required": ["query"]}}},
-]
 
-SECURITY_TOOL_SCHEMAS = [
+    # Bookkeeping, and therefore unconditional. These four sat in SECURITY_TOOL_SCHEMAS behind
+    # `use_security_tools`, which defaults to False in Session, in CreateSessionRequest and in
+    # the UI — so in every session the app creates, the model was never told they exist, while
+    # the system prompt above instructs it to call all four by name. record_finding is the one
+    # that matters most: it is the entire output of a hunt.
+    #
+    # They were also miscategorised. Recording a hypothesis, a note, a status or a finding sends
+    # nothing anywhere: no network, no scope decision, no contact with the target. Gating local
+    # bookkeeping behind a security toggle buys no safety and costs the graph, the notebook and
+    # the findings list, all of which the UI already has endpoints to read and could therefore
+    # only ever show as empty.
+    #
+    # This mattered less while the only provider was llama.cpp, because dev_server recovers tool
+    # calls out of prose with a JSON-block scraper, so a model that followed the prompt could
+    # reach an undeclared tool anyway. A real tool-calling API cannot: a tool absent from
+    # `tools` is uncallable, so on the API path these panels would be permanently empty.
     {"type": "function", "function": {"name": "record_hypothesis", "description": "Record a new hypothesis in the hypothesis graph.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}, "phase": {"type": "string"}, "parent_ordinal": {"type": "integer"}}, "required": ["title", "description"]}}},
     {"type": "function", "function": {"name": "update_hypothesis_status", "description": "Update hypothesis status and verdict.", "parameters": {"type": "object", "properties": {"hypothesis_id": {"type": "string"}, "status": {"type": "string"}, "verdict": {"type": "string"}, "evidence": {"type": "string"}}, "required": ["hypothesis_id", "status"]}}},
     {"type": "function", "function": {"name": "record_finding", "description": "Record a security finding.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]}, "target": {"type": "string"}, "description": {"type": "string"}, "remediation": {"type": "string"}}, "required": ["title", "severity", "description"]}}},
     {"type": "function", "function": {"name": "record_note", "description": "Jot a note in the engagement notebook: a technique that worked, a dead-end to avoid, a todo, or an observation. Keep a running lab notebook like a real red-teamer does.", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "The note"}, "category": {"type": "string", "enum": ["technique", "dead-end", "todo", "observation"], "default": "observation"}}, "required": ["text"]}}},
 ]
+
+SECURITY_TOOL_SCHEMAS = [
+    # What the "security tools" toggle gates, now that it gates something. These reach the
+    # engagement's assets, are classified by the broker, and are the ones worth a deliberate
+    # opt-in. The four recording tools that used to live here do not belong to that category and
+    # have moved into TOOL_SCHEMAS above — see the note there.
+    _http_recon.SCHEMA,
+]
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1867,7 +1936,17 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
     # Tool output is wrapped in quarantine markers before it enters context (see
     # _audited_run_tool). The addendum is what makes those markers mean something to the model
     # instead of being unexplained noise in the middle of a result.
-    system_content = DEFAULT_SYSTEM_PROMPT + "\n\n" + _injection_guard.SYSTEM_INSTRUCTION_ADDENDUM
+    # Built before the system message, which now derives its tool list from it. Still
+    # byte-stable for the prompt cache: `use_security_tools` is fixed for the life of a session,
+    # so this list — and therefore the system message — does not change between turns.
+    tools = TOOL_SCHEMAS[:]
+    if session.use_security_tools:
+        tools.extend(SECURITY_TOOL_SCHEMAS)
+
+    system_content = (
+        DEFAULT_SYSTEM_PROMPT.replace("@@TOOL_LIST@@", _tool_list_block(tools))
+        + "\n\n" + _injection_guard.SYSTEM_INSTRUCTION_ADDENDUM
+    )
     if eng:
         system_content += f"\n\nEngagement: {eng.engagement_id}\nIn-scope targets: {', '.join(eng.allow_targets)}"
     if session.guided:
@@ -1894,10 +1973,6 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
         for r in rag_results:
             rag_context += f"\n[{r['source']}] {r['title']} (relevance {r['score']})\n{r['text'][:400]}\n"
         messages.append({"role": "user", "content": rag_context})
-
-    tools = TOOL_SCHEMAS[:]
-    if session.use_security_tools:
-        tools.extend(SECURITY_TOOL_SCHEMAS)
 
     # No hard tool-round cap — the turn runs until the model stops calling tools (its natural
     # finish) or hits a safety guard. Guards (not a task limit): an absolute runaway ceiling,
