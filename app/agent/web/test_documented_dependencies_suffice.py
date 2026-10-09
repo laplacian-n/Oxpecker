@@ -56,6 +56,26 @@ _DIST_TO_MODULE = {
 }
 
 
+# Directories that are not this project's source. `knowledge_rag/corpus_src/` is the gitignored
+# clone target for the RAG corpora (PayloadsAllTheThings, GTFOBins, LOLBAS); it is third-party
+# text, not shipped code, so walking it is wrong on its own terms -- and it bites back. One of
+# those repositories ships a *directory* literally named `Configuration Python __init__.py`,
+# which `rglob("*.py")` matches happily and `read_text()` then raises IsADirectoryError on. Two
+# tests crashed outright on any host that had followed this project's own documented corpus
+# clone step, and passed everywhere else, which is why neither CI nor this container saw it.
+_NOT_OUR_SOURCE = ("corpus_src",)
+
+
+def _project_python_files(root):
+    """Every .py file of ours under `root`: real files only, vendored corpora excluded."""
+    for path in sorted(root.rglob("*.py")):
+        if not path.is_file():
+            continue  # a directory whose name ends in .py -- see _NOT_OUR_SOURCE
+        if any(part in _NOT_OUR_SOURCE for part in path.parts):
+            continue
+        yield path
+
+
 def documented_distributions() -> set[str]:
     """The uncommented `pip install` line in dev_server.py's prerequisites block.
 
@@ -87,7 +107,7 @@ def documented_modules() -> set[str]:
 def third_party_modules() -> set[str]:
     """Every top-level non-stdlib module imported by the shipped package (tests excluded)."""
     mods: set[str] = set()
-    for path in _AGENT_DIR.rglob("*.py"):
+    for path in _project_python_files(_AGENT_DIR):
         if path.name.startswith("test_"):
             continue
         try:
@@ -104,22 +124,47 @@ def third_party_modules() -> set[str]:
 
 _PROBE = r'''
 import importlib, sys
+from importlib.abc import MetaPathFinder
+
 blocked = set(sys.argv[1].split(",")) - {""}
-class Blocker:
-    def find_module(self, name, path=None):
-        top = name.split(".")[0]
-        return self if top in blocked else None
-    def load_module(self, name):
-        raise ImportError(f"No module named {name.split('.')[0]!r}")
+
+
+# `find_spec`, not `find_module`. The first version of this implemented the legacy
+# `find_module`/`load_module` finder API, removed in Python 3.12 and never consulted on 3.12+.
+# On such an interpreter the blocker blocked nothing, every import succeeded, and the
+# sufficiency test passed while verifying absolutely nothing -- it would have passed with the
+# dependency list emptied. Found on a 3.14 host; CI and the dev container run 3.11, where the
+# legacy API still works, which is exactly why it was invisible to both.
+class Blocker(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in blocked:
+            raise ImportError("No module named %r" % fullname.split(".")[0])
+        return None
+
+
 sys.meta_path.insert(0, Blocker())
+
+# Prove the blocker is live before trusting anything it does not stop. A finder that is never
+# consulted is indistinguishable from one that approves of everything, which is the exact
+# failure this probe is recovering from.
+if blocked:
+    _canary = sorted(blocked)[0]
+    try:
+        importlib.import_module(_canary)
+    except ImportError:
+        pass
+    else:
+        print("BLOCKER-INERT: importing %r succeeded although it was blocked" % _canary)
+        raise SystemExit(0)
+
 failures = []
 for mod in sys.argv[2:]:
     try:
         importlib.import_module(mod)
     except ImportError as e:
-        failures.append(f"{mod}: {e}")
+        failures.append("%s: %s" % (mod, e))
     except Exception as e:
-        failures.append(f"{mod}: {type(e).__name__}: {e}")
+        failures.append("%s: %s: %s" % (mod, type(e).__name__, e))
 print("\n".join(failures))
 '''
 
@@ -127,7 +172,7 @@ print("\n".join(failures))
 def shipped_modules() -> list[str]:
     """Every importable module in the package, tests and __init__ aside."""
     mods = []
-    for path in sorted(_AGENT_DIR.rglob("*.py")):
+    for path in _project_python_files(_AGENT_DIR):
         if path.name.startswith("test_") or path.name == "__init__.py":
             continue
         mods.append(".".join(path.relative_to(_AGENT_DIR.parent).with_suffix("").parts))
@@ -142,7 +187,13 @@ def _import_with_only(allowed_extra_blocked: set[str], targets=None) -> str:
     )
     if proc.returncode != 0:
         raise AssertionError(f"probe itself failed: {proc.stderr.strip()[-2000:]}")
-    return proc.stdout.strip()
+    out = proc.stdout.strip()
+    if out.startswith("BLOCKER-INERT:"):
+        raise AssertionError(
+            f"{out}\nThe import blocker is not being consulted on this interpreter, so every "
+            "assertion built on it is vacuous. Fix the finder before reading any result from it."
+        )
+    return out
 
 
 class DocumentedDependenciesSuffice(unittest.TestCase):
