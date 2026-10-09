@@ -1,6 +1,8 @@
 import { useRef } from "react";
 import { EngagementSubscription } from "../subscription";
 import { useEngagement } from "../useEngagement";
+import { ApprovalsPanel } from "./ApprovalsPanel";
+import { ApiOptions } from "../api";
 
 // Chat — the primary, always-present surface (CLIENT_UI_DESIGN.md §6.1). In the skeleton it shows
 // the live event feed and the control input; the directives/approvals/strategist content are
@@ -11,7 +13,13 @@ import { useEngagement } from "../useEngagement";
 // grows — can never drop a character or move the caret. This is the exact trade §2 says the old
 // index.html could not make: it kept typing intact only by refusing to render while someone
 // typed; here rendering and typing are both uninterrupted because they do not share a value.
-export function Chat({ subscription }: { subscription: EngagementSubscription }) {
+export function Chat({
+  subscription,
+  apiOptions = {},
+}: {
+  subscription: EngagementSubscription;
+  apiOptions?: ApiOptions;
+}) {
   const projection = useEngagement(subscription);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -25,6 +33,10 @@ export function Chat({ subscription }: { subscription: EngagementSubscription })
           </span>
         )}
       </header>
+
+      {/* §7: approvals surface in chat too, because chat is the surface the operator is actually
+          looking at. One request, one state — resolving here clears it everywhere. */}
+      <ApprovalsPanel projection={projection} apiOptions={apiOptions} />
 
       {/* Keyed by identity (seq), never by position (§2.1 rule 4): an event arriving mid-list
           never recreates the rows below it. */}

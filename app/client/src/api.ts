@@ -27,6 +27,17 @@ async function getJson(path: string, opts: ApiOptions): Promise<any> {
   return resp.json();
 }
 
+async function postJson(path: string, body: unknown, opts: ApiOptions): Promise<any> {
+  const f = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const resp = await f(`${opts.baseUrl ?? ""}${path}?${query(opts.apiKey)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`${path} failed (${resp.status})`);
+  return resp.json();
+}
+
 export const api = {
   hypothesisGraph: (engagementId: string, opts: ApiOptions = {}) =>
     getJson(`/api/engagements/${engagementId}/hypothesis-graph`, opts),
@@ -34,4 +45,8 @@ export const api = {
     getJson(`/api/engagements/${engagementId}/notebook`, opts),
   findings: (engagementId: string, opts: ApiOptions = {}) =>
     getJson(`/api/engagements/${engagementId}/findings`, opts),
+  // Resolve an approval (§7). The endpoint is keyed by request id — the same id the
+  // approval_required event carried — and commands go over REST, not the one-way event stream.
+  resolveApproval: (requestId: string, approved: boolean, opts: ApiOptions = {}) =>
+    postJson(`/api/approvals/${requestId}/resolve`, { approved, resolved_by: "web-ui" }, opts),
 };
