@@ -1,3 +1,7 @@
+// DragProbe — the §2.1 rule-2 guard for "a drag is never dropped under load". It stands in for
+// the flow canvas in tests: jsdom cannot drive React Flow's pointer interaction, and React Flow
+// keeps the drag transform out of React state by design (§5), so this minimal node — position in a
+// ref, written straight to the DOM — is a faithful, conservative proxy for the same rule.
 import { useLayoutEffect, useRef } from "react";
 import { EngagementSubscription } from "../subscription";
 import { useEngagement } from "../useEngagement";
@@ -10,7 +14,7 @@ import { useEngagement } from "../useEngagement";
 // pointer is never dropped mid-gesture and the node ends where it was released, while events
 // stream the whole time. When React Flow lands this test re-targets its canvas; the rule it
 // guards is the same.
-export function Flow({ subscription }: { subscription: EngagementSubscription }) {
+export function DragProbe({ subscription }: { subscription: EngagementSubscription }) {
   const projection = useEngagement(subscription);
   const nodeRef = useRef<HTMLDivElement>(null);
   const pos = useRef({ x: 20, y: 20 });

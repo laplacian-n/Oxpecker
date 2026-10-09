@@ -18,7 +18,7 @@ import { render, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 import { Chat } from "./surfaces/Chat";
-import { Flow } from "./surfaces/Flow";
+import { DragProbe } from "./surfaces/DragProbe";
 import { EngagementSubscription } from "./subscription";
 
 afterEach(cleanup);
@@ -94,7 +94,7 @@ test("typing is never interrupted by a flood of events, and the flood is proven 
 test("a node drag is never dropped by a flood, and the flood is proven to have arrived", async () => {
   const sub = await startedSubscription();
   const source = FakeEventSource.last!;
-  const screen = render(<Flow subscription={sub} />);
+  const screen = render(<DragProbe subscription={sub} />);
   const node = screen.getByTestId("flow-node") as HTMLDivElement;
 
   let pushed = 0;

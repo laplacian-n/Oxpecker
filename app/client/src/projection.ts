@@ -20,8 +20,16 @@ export interface Projection {
   // Kept in arrival order and keyed by `seq` when rendered, never by position (§2.1 rule 4), so an
   // event arriving mid-list never recreates the rows below it.
   events: EngagementEvent[];
-  workers: Record<string, Record<string, unknown>>;
-  graphNodes: Record<string, Record<string, unknown>>;
+  workers: Record<string, Record<string, any>>;
+  graphNodes: Record<string, Record<string, any>>;
+  // In-flight tool calls keyed by call id: a finished call is removed, so what remains is
+  // "running now" — what the flow view and rail draw (mirrors the server fold).
+  toolCalls: Record<string, Record<string, any>>;
+  // Keyed by model id: the flow view's model roster (§6.3), accumulated from model_call events.
+  modelRoster: Record<string, { model_id: string; role?: string; calls: number; prompt_tokens: number; completion_tokens: number; cost: number }>;
+  // Where each worker's output went (§4.2 artifact_stored / §6.3.1): a list, not collapsed, so the
+  // flow view can draw an edge per artifact and a node whose output goes nowhere stays visible.
+  artifacts: { seq: number; worker?: string; artifact?: string; store?: string; ref?: string }[];
   counts: { note_added: number; finding_recorded: number };
   budget: Record<string, unknown>;
 }
@@ -34,6 +42,9 @@ export function emptyProjection(): Projection {
     events: [],
     workers: {},
     graphNodes: {},
+    toolCalls: {},
+    modelRoster: {},
+    artifacts: [],
     counts: { note_added: 0, finding_recorded: 0 },
     budget: {},
   };
@@ -48,6 +59,9 @@ export function fromSnapshot(snapshot: Record<string, any>): Projection {
   p.latestSeq = snapshot.latest_seq ?? 0;
   for (const w of snapshot.workers ?? []) p.workers[String(w.worker_id)] = w;
   for (const n of snapshot.graph_nodes ?? []) p.graphNodes[String(n.node)] = n;
+  for (const c of snapshot.tool_calls_in_flight ?? []) p.toolCalls[String(c.call_id)] = c;
+  for (const m of snapshot.model_roster ?? []) p.modelRoster[String(m.model_id)] = { calls: 0, prompt_tokens: 0, completion_tokens: 0, cost: 0, ...m };
+  p.artifacts = [...(snapshot.artifacts ?? [])];
   if (snapshot.counts) p.counts = { ...p.counts, ...snapshot.counts };
   if (snapshot.budget) p.budget = snapshot.budget;
   return p;
@@ -75,6 +89,34 @@ export function applyEvent(prev: Projection, event: EngagementEvent): Projection
         ...prev.workers,
         [String(p.worker_id)]: { ...(prev.workers[String(p.worker_id)] ?? {}), ...p, status: "finished" },
       };
+      break;
+    case "tool_call_started":
+      next.toolCalls = { ...prev.toolCalls, [String(p.call_id)]: p };
+      break;
+    case "tool_call_finished": {
+      // Drop the finished call from the in-flight set (what remains is "running now").
+      const { [String(p.call_id)]: _done, ...rest } = prev.toolCalls;
+      next.toolCalls = rest;
+      break;
+    }
+    case "model_call": {
+      const id = String(p.model_id);
+      const m = prev.modelRoster[id] ?? { model_id: id, calls: 0, prompt_tokens: 0, completion_tokens: 0, cost: 0 };
+      next.modelRoster = {
+        ...prev.modelRoster,
+        [id]: {
+          ...m,
+          role: p.role ?? m.role,
+          calls: m.calls + 1,
+          prompt_tokens: m.prompt_tokens + (Number(p.prompt_tokens) || 0),
+          completion_tokens: m.completion_tokens + (Number(p.completion_tokens) || 0),
+          cost: m.cost + (Number(p.cost) || 0),
+        },
+      };
+      break;
+    }
+    case "artifact_stored":
+      next.artifacts = [...prev.artifacts, { seq: event.seq, worker: p.worker, artifact: p.artifact, store: p.store, ref: p.ref }];
       break;
     case "graph_node_changed":
       next.graphNodes = { ...prev.graphNodes, [String(p.node)]: p };

@@ -2,7 +2,7 @@ import { useEffect, useMemo } from "react";
 import { HashRouter, Routes, Route, Navigate, NavLink, useParams } from "react-router-dom";
 import { EngagementSubscription } from "./subscription";
 import { Chat } from "./surfaces/Chat";
-import { Flow } from "./surfaces/Flow";
+import { FlowView } from "./surfaces/FlowView";
 import { Placeholder } from "./surfaces/Placeholder";
 
 // HashRouter, not BrowserRouter: the built client is loaded from a file:// URL by the Electron
@@ -52,7 +52,7 @@ function ChatRoute() {
   return <SurfaceFrame><Chat subscription={useRouteSubscription()} /></SurfaceFrame>;
 }
 function FlowRoute() {
-  return <SurfaceFrame><Flow subscription={useRouteSubscription()} /></SurfaceFrame>;
+  return <SurfaceFrame><FlowView subscription={useRouteSubscription()} /></SurfaceFrame>;
 }
 function WorkRoute() {
   return <SurfaceFrame><Placeholder name="Work" subscription={useRouteSubscription()} /></SurfaceFrame>;
