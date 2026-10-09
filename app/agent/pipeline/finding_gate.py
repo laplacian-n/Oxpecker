@@ -38,7 +38,7 @@ from pathlib import Path
 from .. import config
 from ..findings.model import FindingsStore
 from .verifier import (
-    VERDICT_NOT_REPRODUCIBLE,
+    VERDICT_COULD_NOT_REFUTE,
     VERDICT_REFUTED,
     Verifier,
 )
@@ -100,13 +100,16 @@ class FindingGate:
                 results.append({"finding_id": finding.finding_id, "error": f"{type(e).__name__}: {e}"})
                 continue
             new_status = self._status_for(verdict.verdict)
+            confirmed_by = self._confirmed_by_for(verdict.verdict)
             self.store.record_verification(
                 finding.finding_id, verdict=verdict.verdict, reason=verdict.reason,
                 rationale=verdict.rationale, by=self.verified_by, new_status=new_status,
+                confirmed_by=confirmed_by,
             )
             results.append({
                 "finding_id": finding.finding_id, "verdict": verdict.verdict,
                 "reason": verdict.reason, "status": new_status or finding.status,
+                "confirmed_by": confirmed_by,
             })
         return results
 
@@ -119,6 +122,18 @@ class FindingGate:
         if verdict == VERDICT_REFUTED:
             return "false_positive"
         return None  # could_not_refute / confirmed_not_reproducible: status unchanged
+
+    @staticmethod
+    def _confirmed_by_for(verdict: str) -> str | None:
+        """A verifier that is a *different model family* (the gate guarantees it, §2.3) and could
+        not refute the finding is a **differential** pass (§8.6.4 ladder / §14.1): an independent
+        instance agreed, so the assurance rises from the `model` floor to `differential` — enough to
+        cross the submission boundary on its own (§8.6.5 #1). A refutation shelves the finding
+        instead, and 'not reproducible' leaves assurance where it was. record_verification only ever
+        raises, so this never lowers an already-higher level."""
+        if verdict == VERDICT_COULD_NOT_REFUTE:
+            return "differential"
+        return None
 
 
 def build_finding_gate(

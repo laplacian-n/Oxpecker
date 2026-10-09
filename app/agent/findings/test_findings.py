@@ -8,7 +8,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .model import Finding, FindingNotFoundError, FindingsStore
+from .model import (
+    CONFIRMED_BY_FLOOR,
+    Finding,
+    FindingNotFoundError,
+    FindingsStore,
+    assurance_rank,
+    can_submit,
+    submission_blocker,
+    unsubmittable,
+)
 from .report import render_markdown
 from .sarif import render_sarif
 
@@ -127,6 +136,88 @@ class TestSarifReviewStatus(unittest.TestCase):
         sarif = render_sarif([_finding()])
         props = sarif["runs"][0]["results"][0]["properties"]
         self.assertIsNone(props["reviewed_by"])
+
+
+class TestConfirmedByLadder(unittest.TestCase):
+    def test_a_finding_defaults_to_the_model_floor(self):
+        self.assertEqual(_finding().confirmed_by, CONFIRMED_BY_FLOOR)
+        self.assertIsNone(_finding().rule_disagreed)
+
+    def test_an_unknown_confirmed_by_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _finding(confirmed_by="vibes")
+
+    def test_the_ladder_order_is_low_to_high(self):
+        self.assertLess(assurance_rank("model"), assurance_rank("rule"))
+        self.assertLess(assurance_rank("rule"), assurance_rank("differential"))
+        self.assertLess(assurance_rank("differential"), assurance_rank("downstream"))
+        self.assertLess(assurance_rank("downstream"), assurance_rank("human"))
+
+    def test_rank_rejects_an_unknown_level(self):
+        with self.assertRaises(ValueError):
+            assurance_rank("nonsense")
+
+    def test_confirmed_by_round_trips_through_the_store(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        store = FindingsStore("e1", findings_dir=tmp)
+        store.add(_finding(confirmed_by="differential", rule_disagreed="xss-reflected@3"))
+        back = store.list_all()[0]
+        self.assertEqual(back.confirmed_by, "differential")
+        self.assertEqual(back.rule_disagreed, "xss-reflected@3")
+
+
+class TestSubmissionBoundary(unittest.TestCase):
+    """§8.6.5 #1 — model-only findings cannot cross unseen; above-model crosses on its own."""
+
+    def test_model_only_unreviewed_is_blocked(self):
+        f = _finding(confirmed_by="model")
+        self.assertFalse(can_submit(f))
+        self.assertIn("§8.6.5 #1", submission_blocker(f))
+
+    def test_model_confirmed_crosses_once_a_person_reviews_it(self):
+        f = _finding(confirmed_by="model")
+        f.reviewed_by = "alice"
+        self.assertTrue(can_submit(f))
+
+    def test_above_the_model_floor_crosses_without_review(self):
+        for level in ("rule", "differential", "downstream", "human"):
+            f = _finding(confirmed_by=level)
+            self.assertTrue(can_submit(f), f"{level} should cross on its own")
+
+    def test_a_shelved_finding_is_never_submittable(self):
+        self.assertFalse(can_submit(_finding(confirmed_by="human", status="false_positive")))
+        self.assertFalse(can_submit(_finding(confirmed_by="differential", status="wont_fix")))
+
+    def test_unsubmittable_lists_each_blocked_finding_with_a_reason(self):
+        ok = _finding(confirmed_by="differential")
+        blocked = _finding(confirmed_by="model")  # model-only, unreviewed
+        reasons = unsubmittable([ok, blocked])
+        self.assertEqual([f.finding_id for f, _ in reasons], [blocked.finding_id])
+        self.assertTrue(reasons[0][1])  # a non-empty reason
+
+
+class TestVerificationRaisesAssurance(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.store = FindingsStore("e1", findings_dir=self.tmp)
+
+    def test_record_verification_raises_model_to_differential(self):
+        f = self.store.add(_finding(confirmed_by="model"))
+        self.store.record_verification(
+            f.finding_id, verdict="could_not_refute", reason=None, rationale="holds",
+            by="verifier", confirmed_by="differential",
+        )
+        self.assertEqual(self.store.get(f.finding_id).confirmed_by, "differential")
+
+    def test_record_verification_never_lowers_an_earned_assurance(self):
+        f = self.store.add(_finding(confirmed_by="downstream"))
+        self.store.record_verification(
+            f.finding_id, verdict="could_not_refute", reason=None, rationale="holds",
+            by="verifier", confirmed_by="differential",  # weaker than downstream
+        )
+        self.assertEqual(self.store.get(f.finding_id).confirmed_by, "downstream")  # unchanged
 
 
 if __name__ == "__main__":
