@@ -137,8 +137,12 @@ class AgentLoop:
         on_reasoning_stream=None,
         force_no_think: bool = False,
         stop_event=None,
+        client=None,
     ):
-        self.client = LlamaClient()
+        # Default to the local llama-server (unchanged behaviour); a caller — notably a wave
+        # worker that must not touch the GPU — may inject an OpenRouter-backed client instead
+        # (agent/llm/openrouter_loop_client.py), which satisfies the same interface.
+        self.client = client if client is not None else LlamaClient()
         # force_no_think: suppress thinking mode even in THINKING_ENABLED_PHASES. For callers
         # whose turn *must* end in a tool call (the autonomous driver's judgment tasks) — see
         # the comment in _run_safe_default where this is applied.
