@@ -16,17 +16,34 @@ from pathlib import Path
 
 from . import engine
 from .store import GraphValidationError, HypothesisGraphStore, NotFoundError
+from ..engagement import emit as event_emit
 
 
 class HypothesisGraphService:
     def __init__(self, engagement_dir: Path):
         self.store = HypothesisGraphStore(engagement_dir)
+        self.engagement_id = Path(engagement_dir).name
+
+    def _emit_node_changed(self, hid: str) -> None:
+        """§4.2 graph_node_changed — so the Work tree's glow and auto-refetch see a node change
+        live. Best-effort: a failed read or append never breaks the mutation it describes."""
+        try:
+            h = self.store.get_hypothesis(hid)
+        except Exception:  # noqa: BLE001
+            return
+        event_emit.emit(
+            self.engagement_id,
+            "graph_node_changed",
+            {"node": h.get("ordinal"), "status": h.get("lifecycle_status") or h.get("status"),
+             "verdict": h.get("verdict")},
+        )
 
     # -- mutations the agent calls (mirrored by the MCP tools) -------------------------------
 
     def add_hypothesis(self, **kwargs) -> dict:
         hid = self.store.create_hypothesis(**kwargs)
         h = self.store.get_hypothesis(hid)
+        self._emit_node_changed(hid)
         return {"hypothesis_id": hid, "ordinal": h["ordinal"]}
 
     def start_attempt(self, hypothesis_ref: str, **kwargs) -> dict:
@@ -78,6 +95,7 @@ class HypothesisGraphService:
         v = self.store.set_verdict(
             hid, h["version"], verdict, confidence_band=confidence_band, confidence_reason=confidence_reason
         )
+        self._emit_node_changed(hid)
         return {"hypothesis_id": hid, "version": v}
 
     def set_confidence(self, hypothesis_ref: str, band: str, reason: str) -> dict:
@@ -92,19 +110,25 @@ class HypothesisGraphService:
         # not the model — the model then sees it parked and stops spending effort on it.
         if actor == "operator" and reason and not reason.startswith("[operator]"):
             reason = f"[operator] {reason}"
-        return {"version": self.store.set_lifecycle_status(
+        result = {"version": self.store.set_lifecycle_status(
             hid, h["version"], "parked", reason=reason, actor=actor)}
+        self._emit_node_changed(hid)
+        return result
 
     def abandon(self, hypothesis_ref: str, reason: str, *, actor: str = "agent") -> dict:
         hid = self._resolve(hypothesis_ref)
         h = self.store.get_hypothesis(hid)
-        return {"version": self.store.set_lifecycle_status(
+        result = {"version": self.store.set_lifecycle_status(
             hid, h["version"], "abandoned", reason=reason, actor=actor)}
+        self._emit_node_changed(hid)
+        return result
 
     def reopen(self, hypothesis_ref: str, *, actor: str = "agent") -> dict:
         hid = self._resolve(hypothesis_ref)
         h = self.store.get_hypothesis(hid)
-        return {"version": self.store.set_lifecycle_status(hid, h["version"], "open", actor=actor)}
+        result = {"version": self.store.set_lifecycle_status(hid, h["version"], "open", actor=actor)}
+        self._emit_node_changed(hid)
+        return result
 
     def add_note(self, hypothesis_ref: str, text: str, *, actor: str = "operator") -> dict:
         hid = self._resolve(hypothesis_ref)

@@ -13,3 +13,7 @@ output/
 checkpoints/
 *.log
 .DS_Store
+
+# Runtime engagement state (ENGAGEMENTS_ROOT) — created by runs and tests, never committed.
+/app/engagements/
+/engagements/

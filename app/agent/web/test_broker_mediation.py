@@ -38,7 +38,8 @@ def main() -> int:
     with patch("agent.config.AUDIT_DIR", tmp / "audit"), \
          patch("agent.config.EVIDENCE_KEY_PATH", tmp / "key.bin"), \
          patch("agent.config.EVIDENCE_DIR", tmp / "evidence"), \
-         patch("agent.config.IDEMPOTENCY_CACHE_PATH", tmp / "idem.json"):
+         patch("agent.config.IDEMPOTENCY_CACHE_PATH", tmp / "idem.json"), \
+         patch("agent.config.ENGAGEMENTS_ROOT", tmp / "engagements"):
         from .. import audit_log as al
         from ..broker import broker as broker_mod
         from . import debug_trace as dt

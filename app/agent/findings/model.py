@@ -113,11 +113,16 @@ class Finding:
 class FindingsStore:
     def __init__(self, engagement_id: str, findings_dir: Path = config.FINDINGS_DIR):
         findings_dir.mkdir(parents=True, exist_ok=True)
+        self.engagement_id = engagement_id
         self.path = findings_dir / f"{engagement_id}.jsonl"
 
     def add(self, finding: Finding) -> Finding:
         with self.path.open("a") as f:
             f.write(json.dumps(finding.to_dict()) + "\n")
+        # §4.2 finding_recorded — the findings tab's count reacts to this. Imported lazily to
+        # keep this leaf model module free of an engagement-package import at module load.
+        from ..engagement import emit as event_emit
+        event_emit.emit(self.engagement_id, "finding_recorded", {"finding_id": finding.finding_id})
         return finding
 
     def list_all(self) -> list[Finding]:

@@ -75,6 +75,9 @@ class BehavioralParityTest(unittest.TestCase):
             patch("agent.config.EVIDENCE_DIR", self.tmp / "evidence"),
             patch("agent.config.EVIDENCE_KEY_PATH", self.tmp / "key.bin"),
             patch("agent.config.IDEMPOTENCY_CACHE_PATH", self.tmp / "idem.json"),
+            # The broker now emits §4.2 events to ENGAGEMENTS_ROOT/<id>/events.db on dispatch;
+            # isolate it so these dispatches do not write into the real engagements dir.
+            patch("agent.config.ENGAGEMENTS_ROOT", self.tmp / "engagements"),
         ]
         for p in self._patches:
             p.start()
