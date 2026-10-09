@@ -24,24 +24,80 @@ from .. import config
 TAINT_WINDOW_S = 300  # 5 minutes of elevated scrutiny after a suspicious/malicious/unknown scan
 SAFE_WHILE_TAINTED = {"passive_recon"}  # action classes still allowed without extra approval
 
+# AGENT_ARCHITECTURE.md §14.1 C: taint is per session, but some state is shared across all of an
+# engagement's workers. The tools whose tainted output can reach another worker through that
+# shared state — so their taint must escalate to the whole engagement, not stay on one session.
+# Today that is the browser: §6.1 shares one browser profile (cookie jar, storage) per
+# engagement, so content that tainted worker A's browser session is carried by worker B, which
+# is untainted, through the same jar. `write_file`/`run_command` join this set once the workspace
+# is engagement-shared too; today each session gets a fresh temp workspace, so their taint is
+# genuinely session-local and must not over-escalate.
+ENGAGEMENT_SHARED_TAINT_SOURCES = {"browser_fetch"}
+
 
 class TaintStore:
-    def __init__(self, session_id: str, taint_dir: Path = config.STATE_DIR / "broker" / "taint"):
+    """Session taint, and — when an `engagement_id` is supplied and a mark is `shared` —
+    engagement taint too (§14.1 C). A session is treated as tainted if its own record is active
+    OR its engagement's is, because the engagement-shared vector (the browser profile) carries
+    the attacker-controlled material between workers regardless of which session first saw it.
+
+    Constructed with `session_id` alone, it behaves exactly as before — no engagement file is
+    read or written — so every pre-§14.1-C caller is unchanged."""
+
+    def __init__(
+        self,
+        session_id: str,
+        engagement_id: str | None = None,
+        taint_dir: Path = config.STATE_DIR / "broker" / "taint",
+    ):
         self.session_id = session_id
+        self.engagement_id = engagement_id
         self.path = taint_dir / f"{session_id}.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Engagement records live in their own subdir so an engagement_id can never collide with a
+        # session_id in the same namespace.
+        if engagement_id is not None:
+            self.engagement_path: Path | None = taint_dir / "engagement" / f"{engagement_id}.json"
+            self.engagement_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            self.engagement_path = None
 
-    def mark(self, *, reason: str, verdict: str, source: str) -> None:
+    def mark(self, *, reason: str, verdict: str, source: str, shared: bool = False) -> None:
+        """Mark the session tainted. When `shared` is true and this store knows its engagement,
+        also mark the engagement tainted — so a sibling worker sharing the browser profile is
+        scrutinised even though its own session never saw the content. `shared` is the caller's
+        statement that the tainting vector is engagement-shared state (see
+        `ENGAGEMENT_SHARED_TAINT_SOURCES`); a plain session-local read leaves it false."""
+        self._mark_path(self.path, reason=reason, verdict=verdict, source=source)
+        if shared and self.engagement_path is not None:
+            self._mark_path(self.engagement_path, reason=reason, verdict=verdict, source=source)
+
+    def _mark_path(self, path: Path, *, reason: str, verdict: str, source: str) -> None:
         now = time.time()
-        record, _ = self._read()
+        record, _ = self._read_path(path)
         record["tainted_until"] = now + TAINT_WINDOW_S
         record.setdefault("history", []).append(
             {"reason": reason, "verdict": verdict, "source": source, "at": now}
         )
-        self._write(record)
+        self._write_path(path, record)
 
     def is_tainted(self) -> tuple[bool, dict | None]:
-        record, unreadable = self._read()
+        """Tainted if this session's record is active, or — when an engagement is known — the
+        engagement's is. The session is checked first so its reason is the one reported when both
+        apply; the engagement check is what catches the §14.1 C cross-worker carry."""
+        tainted, info = self._check_path(self.path)
+        if tainted:
+            return True, info
+        if self.engagement_path is not None:
+            eng_tainted, eng_info = self._check_path(self.engagement_path)
+            if eng_tainted:
+                if eng_info is not None and "reason" in eng_info:
+                    eng_info = {**eng_info, "scope": "engagement"}
+                return True, eng_info
+        return False, None
+
+    def _check_path(self, path: Path) -> tuple[bool, dict | None]:
+        record, unreadable = self._read_path(path)
         if unreadable:
             # Fail closed. A taint file that exists but cannot be parsed is not evidence that
             # the session is clean — it is the absence of evidence either way, and the whole
@@ -77,9 +133,12 @@ class TaintStore:
         }
 
     def clear(self) -> None:
-        self._write({})
+        """Clear this session's taint. The engagement record is deliberately NOT cleared here: it
+        is shared, and one session deciding it is done does not make the shared browser profile
+        clean for the others. The engagement window expires on its own."""
+        self._write_path(self.path, {})
 
-    def _write(self, record: dict) -> None:
+    def _write_path(self, path: Path, record: dict) -> None:
         """Write-to-temp-then-replace, with the pid in the temp name.
 
         `os.replace` is atomic, so a reader sees either the old file or the new one and never a
@@ -87,23 +146,23 @@ class TaintStore:
         replace itself and one of them gets FileNotFoundError — the bug the broker's idempotency
         cache had. `approval_queue._write_atomic` already does it this way; this store did not.
         """
-        tmp = self.path.with_name(f"{self.path.name}.tmp{os.getpid()}")
+        tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
         try:
             tmp.write_text(json.dumps(record))
-            os.replace(tmp, self.path)
+            os.replace(tmp, path)
         finally:
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:  # pragma: no cover — the replace normally consumed it
                 pass
 
-    def _read(self) -> tuple[dict, bool]:
+    def _read_path(self, path: Path) -> tuple[dict, bool]:
         """(record, unreadable). `unreadable` separates "there is no record" from "there is a
         record and we cannot read it" — the first is a clean session, the second is not."""
-        if not self.path.exists():
+        if not path.exists():
             return {}, False
         try:
-            raw = self.path.read_text()
+            raw = path.read_text()
         except OSError:
             return {}, True
         if not raw.strip():
