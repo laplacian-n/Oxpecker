@@ -27,13 +27,17 @@ jobs:
         # httpx is test-only: the FastAPI TestClient needs it, the app does not.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic httpx
+          python -m pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML httpx
 
       - name: Run the agent suite
         working-directory: app
         # -t . matters: the tests import by package path, and discovering from the repo root
         # fails every module with "attempted relative import with no known parent package".
         run: |
+          # pipefail, or bash reports tee's exit status and a FAILED suite passes this step.
+          # That is exactly what happened on this workflow's first run: 21 import errors, the
+          # step green, and only the skip gate below caught it.
+          set -o pipefail
           python -m unittest discover -t . -s agent -p 'test_*.py' 2>&1 | tee ../test-output.txt
 
       - name: Check that the suite was not hollowed out by skips

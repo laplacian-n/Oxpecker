@@ -20,7 +20,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError as _e:  # pragma: no cover - environment-dependent
+    # A missing test-only dependency is a SKIP, not an ERROR. As an ImportError this module
+    # failed loudly in any environment without playwright -- including CI -- and a loader error
+    # is indistinguishable at a glance from a real breakage in the code under test.
+    raise unittest.SkipTest(f"playwright not installed, so the browser suite cannot run: {_e}")
 
 from .. import config
 
