@@ -15,6 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .. import config
 from . import seccomp_profile
 from .executor import BubblewrapExecutor, _profile_digest
 
@@ -90,27 +91,100 @@ def main() -> int:
     shutil.rmtree(tmp2, ignore_errors=True)
 
     print("\n== (a) Allowlisted commands still work under the real seccomp+bubblewrap tier ==")
+    # Every member of config.COMMAND_ALLOWLIST, not a hand-picked sample of four. The sample
+    # covered ls/cat/echo/python3 and reported "PASS" on a host where 18 of the 22 allowlisted
+    # commands — including `tree` — were never actually invoked under the filter in this check.
+    # That is the same shape as the bug `test_dev_server_imports.py` and
+    # `test_electron_install_hint.py` close for the install line: a check whose name claims an
+    # invariant over a real registry, verified against a separate, hand-maintained copy that can
+    # silently stop covering new (or, here, most existing) members. Running the real list here
+    # is what actually found that `tree` is allowlisted but not installed by any documented
+    # step — see docs/DEPLOY_UBUNTU.md's apt line and TOOL_PARITY.md if that changes.
     executor = BubblewrapExecutor()
-    allowlisted_cases = [
-        ("ls /", ["ls", "/"]),
-        # /etc/resolv.conf is one of the paths actually bind-mounted into the sandbox
-        # (_RO_BINDS) — /etc/hostname is not, so cat-ing it would fail for an unrelated reason
-        # (file doesn't exist in the sandbox) and say nothing about seccomp specifically.
-        ("cat /etc/resolv.conf", ["cat", "/etc/resolv.conf"]),
-        ("echo hello", ["echo", "hello"]),
-        ("python3 -c print", ["python3", "-c", "print('seccomp-ok')"]),
-    ]
-    for label, argv in allowlisted_cases:
+
+    def _argv_for(cmd: str, fixture: Path) -> list[str] | None:
+        # /etc/resolv.conf and the workspace are the only readable/writable paths inside the
+        # sandbox (_RO_BINDS plus the bound workspace) — anything else fails for an unrelated
+        # reason (file doesn't exist in the sandbox) and says nothing about seccomp specifically.
+        return {
+            "ls": ["ls", "/"],
+            "cat": ["cat", "/etc/resolv.conf"],
+            "pwd": ["pwd"],
+            "echo": ["echo", "hello"],
+            "head": ["head", str(fixture)],
+            "tail": ["tail", str(fixture)],
+            "wc": ["wc", "-l", str(fixture)],
+            "grep": ["grep", "-c", "beta", str(fixture)],
+            "find": ["find", str(fixture)],
+            "sort": ["sort", str(fixture)],
+            "uniq": ["uniq", str(fixture)],
+            "diff": ["diff", str(fixture), str(fixture)],
+            "mkdir": ["mkdir", "-p", str(fixture.parent / "sub")],
+            "touch": ["touch", str(fixture.parent / "touched")],
+            "file": ["file", str(fixture)],
+            "stat": ["stat", str(fixture)],
+            "tree": ["tree", str(fixture.parent)],
+            "cut": ["cut", "-d", "\n", "-f1", str(fixture)],
+            "sed": ["sed", "s/alpha/ALPHA/", str(fixture)],
+            "awk": ["awk", "{print}", str(fixture)],
+            "python3": ["python3", "-c", "print('seccomp-ok')"],
+            "date": ["date"],
+            "env": ["env"],
+        }.get(cmd)
+
+    exercised = 0
+    for cmd in sorted(config.COMMAND_ALLOWLIST):
+        if shutil.which(cmd) is None:
+            # A skip, not a failure: a missing binary says nothing about the filter, and
+            # whether every allowlisted command is actually installable is asserted
+            # host-independently by test_command_allowlist_installable.py, which is where that
+            # question belongs. Which is also why the count below matters -- skipping is the
+            # one way this loop can report success having tested nothing.
+            print(f"  SKIPPED  {cmd}: not installed on this host (not a seccomp question)")
+            continue
+        argv = _argv_for(cmd, Path("/"))
+        if argv is None:
+            # A command was added to the allowlist without a probe here. Report it and keep
+            # going: `[cmd]` on the dict raised a bare KeyError instead, which aborted the whole
+            # module before sections (b) and the unshare pair ran -- so adding one command to
+            # the allowlist silently cost the proof that the filter denies anything at all.
+            # A missing probe is a real failure (that command is untested under the filter) and
+            # must not also take the rest of the file down with it.
+            check(f"{cmd} has an argv probe in this test", False,
+                  f"{cmd!r} is in config.COMMAND_ALLOWLIST and present on this host, but "
+                  f"_argv_for has no entry for it, so it has never been run under the filter. "
+                  f"Add one.")
+            continue
+        exercised += 1
         ws = Path(tempfile.mkdtemp(prefix="seccomp-cmd-test-"))
         try:
+            fixture = ws / "probe.txt"
+            fixture.write_text("alpha\nbeta\ngamma\n")
+            argv = _argv_for(cmd, fixture)
+            assert argv is not None  # established above, before the workspace was made
             result = executor.run(argv, ws, ws, timeout=15)
             check(
-                f"{label} succeeds under seccomp filter",
+                f"{' '.join(argv)} succeeds under seccomp filter",
                 result.exit_code == 0 and not result.timed_out,
                 f"exit_code={result.exit_code} stderr={result.stderr[:200]!r}",
             )
         finally:
             shutil.rmtree(ws, ignore_errors=True)
+
+    # Anti-vacuity floor. Every command above can skip, so on a host with few of the tools
+    # installed this whole section would print nothing but SKIPPED and still report all-pass --
+    # the same "a loop that iterates over nothing asserts nothing" failure the corpus parser
+    # tests were fixed for. Two thirds is deliberately generous: it lets a host legitimately
+    # miss a few tools while still failing a run that proves nothing about the filter.
+    floor = 2 * len(config.COMMAND_ALLOWLIST) // 3
+    check(
+        f"the loop actually ran commands under the filter ({exercised} of "
+        f"{len(config.COMMAND_ALLOWLIST)} allowlisted, floor {floor})",
+        exercised >= floor,
+        f"only {exercised} allowlisted commands were present on this host, so the checks above "
+        f"demonstrate almost nothing about the seccomp filter. Install the tools in "
+        f"docs/DEPLOY_UBUNTU.md's apt line before trusting a pass here.",
+    )
 
     print("\n== (b) A denied syscall (ptrace) is actually stopped, not just documented ==")
     ws2 = Path(tempfile.mkdtemp(prefix="seccomp-ptrace-test-"))
