@@ -32,6 +32,9 @@ export interface Projection {
   artifacts: { seq: number; worker?: string; artifact?: string; store?: string; ref?: string }[];
   counts: { note_added: number; finding_recorded: number };
   budget: Record<string, unknown>;
+  // The engagement's orchestration tier (§2.6.2), carried on the snapshot so the client offers
+  // exactly the surfaces that tier has (§8). "high" until a snapshot says otherwise.
+  tier: string;
 }
 
 export function emptyProjection(): Projection {
@@ -47,6 +50,7 @@ export function emptyProjection(): Projection {
     artifacts: [],
     counts: { note_added: 0, finding_recorded: 0 },
     budget: {},
+    tier: "high",
   };
 }
 
@@ -64,6 +68,7 @@ export function fromSnapshot(snapshot: Record<string, any>): Projection {
   p.artifacts = [...(snapshot.artifacts ?? [])];
   if (snapshot.counts) p.counts = { ...p.counts, ...snapshot.counts };
   if (snapshot.budget) p.budget = snapshot.budget;
+  if (snapshot.tier) p.tier = String(snapshot.tier);
   return p;
 }
 

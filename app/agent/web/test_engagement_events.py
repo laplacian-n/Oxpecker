@@ -104,6 +104,12 @@ class SnapshotEndpointTest(EngagementEventsBase):
     def test_snapshot_of_a_nonexistent_engagement_is_404(self):
         self.assertEqual(self.client.get("/api/engagements/ghost/snapshot").status_code, 404)
 
+    def test_snapshot_carries_the_engagement_tier_for_surfacing(self):
+        # §8: the client offers exactly the surfaces the tier has, so the tier must ride along on
+        # the snapshot. An engagement with no declared tier defaults to high (agent.tiers).
+        self._create_engagement("eng1")
+        self.assertEqual(self.client.get("/api/engagements/eng1/snapshot").json()["tier"], "high")
+
 
 class EventStreamTest(EngagementEventsBase):
     def test_catch_up_delivers_every_event_with_its_sequence_as_the_sse_id(self):
