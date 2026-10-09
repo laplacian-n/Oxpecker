@@ -172,12 +172,50 @@ Note `-m agent.web.dev_server`, not the path to `dev_server.py`. The module uses
 package-relative imports, so running it as a script file fails at import with "attempted
 relative import with no known parent package" before it binds anything.
 
-**Do not add the usual systemd hardening directives to `oxpecker.service` without checking the
-sandbox afterwards.** `RestrictNamespaces=`, `PrivateUsers=yes` and friends are exactly the
-settings that stop `bwrap` from creating the namespaces the isolation tier is made of. The
-failure is quiet: tool runs fall back to a weaker tier or refuse. If you harden this unit,
-re-run the `describe_host()` check above *under the unit* and confirm `bubblewrap` is still
-available. Hardening that disables the sandbox is a net loss.
+**The usual systemd hardening directives disable this project's sandbox.**
+`RestrictNamespaces=`, `PrivateUsers=yes` and friends are exactly the settings that stop
+`bwrap` from creating the namespaces the isolation tier is made of. Verified on real hardware
+with `systemd-run --user -p RestrictNamespaces=yes` and `-p PrivateUsers=yes` against this
+project's own executor, rather than assumed:
+
+    bwrap: No permissions to create a new namespace, likely because the kernel does not allow
+    non-privileged user namespaces.
+
+This page used to tell you to re-run the `describe_host()` check under the hardened unit to
+catch that. **That advice did not work**, and the reason is worth stating because it is the
+same shape as the defect it hid. `describe_host()` checks the platform, the `bwrap` binary on
+PATH and the `user.max_user_namespaces` sysctl. Under both directives all three still pass --
+the restriction lives in the unit's namespace policy and only bites when `bwrap` calls
+`unshare(2)`. So the check reported `"available": true` on a host where the sandbox could not
+run, which is worse than no check: it is a check that answers the wrong question confidently.
+
+**This is now caught by the server itself.** Before the first command runs on a tier, the
+runtime execs a sandboxed `/bin/true` and caches the result for the life of the process
+(`availability.verify_once`), so the honest answer costs one short-lived process per tier
+rather than one per command. A hardened unit now produces a refusal that names the cause:
+
+    isolation tier 'bubblewrap' passed the static check but failed when actually exercised:
+    ... On a systemd deployment this is usually RestrictNamespaces= or PrivateUsers=yes on the
+    unit (see docs/DEPLOY_UBUNTU.md).
+
+and the command does not run. Nothing substitutes a weaker tier silently -- `resolve_tier()`
+refuses to do that unless the operator selects `direct` explicitly.
+
+To check a unit before putting load on it, ask for the exec-verified answer directly:
+
+```bash
+cd /opt/oxpecker/app
+/opt/oxpecker/.venv/bin/python -c \
+  "from agent.sandbox import availability as a; print(a.verify_once('bubblewrap'))"
+```
+
+Run *that* under the hardened unit, not `describe_host()`. A session's `/api/sessions/{id}`
+response also carries an `isolation_verified` field alongside the static `isolation` block, for
+the same reason: the static one cannot see this class of failure.
+
+Hardening that disables the sandbox is a net loss. If you want both, leave the namespace
+directives off and harden elsewhere (`ProtectSystem=`, `NoNewPrivileges=` and the filesystem
+directives do not interfere with `bwrap`'s unshare).
 
 ## Reaching it from Windows
 

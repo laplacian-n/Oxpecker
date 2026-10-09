@@ -993,6 +993,23 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             # needed: resolve_tier returns direct when direct was asked for, and raises when a
             # stronger tier was asked for and cannot run. It never silently downgrades.
             tier, tier_reason = _isolation.resolve_tier(requested_tier)
+            # The static probe above is not the last word. A systemd unit hardened with
+            # RestrictNamespaces= or PrivateUsers=yes leaves bwrap installed and the sysctl
+            # permissive, so resolve_tier says yes and the exec then dies with a raw kernel
+            # message naming neither systemd nor the tier. verify_once execs a sandboxed
+            # /bin/true and caches the answer, so the first command on a tier pays one short
+            # process and the rest pay nothing -- which is what makes the honest check
+            # affordable per command instead of static-only. `direct` has nothing to verify.
+            if tier != _isolation.TIER_DIRECT:
+                verified, verify_reason = _isolation.verify_once(tier)
+                if not verified:
+                    raise _isolation.IsolationUnavailableError(
+                        f"isolation tier {tier!r} passed the static check but failed when "
+                        f"actually exercised: {verify_reason}. On a systemd deployment this is "
+                        f"usually RestrictNamespaces= or PrivateUsers=yes on the unit (see "
+                        f"docs/DEPLOY_UBUNTU.md)."
+                    )
+                tier_reason = verify_reason
         except _isolation.IsolationUnavailableError as e:
             session.effective_isolation_tier = None
             return {"ok": False, "error": (
@@ -2817,6 +2834,14 @@ def get_session(session_id: str):
         "isolation_tier": s.isolation_tier,
         "effective_isolation_tier": s.effective_isolation_tier,
         "isolation": _isolation.describe_host(),
+        # The exec-verified answer for the tier this session asked for, alongside the static
+        # one. describe_host() is static by construction and reports `available: true` under a
+        # namespace-restricted systemd unit; this row is the one that has actually run bwrap.
+        # None for `direct`, which has no namespace to verify.
+        "isolation_verified": (
+            None if s.isolation_tier == _isolation.TIER_DIRECT
+            else dict(zip(("ok", "reason"), _isolation.verify_once(s.isolation_tier)))
+        ),
         "messages": [{"role": m["role"], "content": m["content"], "message_id": m.get("message_id"),
                       "reasoning_content": m.get("reasoning_content"),
                       "tool_calls": m.get("tool_calls"), "tool_name": m.get("tool_name")}
