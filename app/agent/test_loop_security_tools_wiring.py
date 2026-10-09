@@ -59,6 +59,54 @@ class TestToolSetMembership(unittest.TestCase):
             self.assertIn(name, LOCAL_BOOKKEEPING_TOOLS)
             self.assertNotIn(name, BROKER_MEDIATED_TOOLS)
 
+    def test_the_three_registries_form_an_exact_partition(self):
+        """The three tests above name nine tools one by one, and named checks keep passing just
+        as happily when a tenth tool is added to a registry and this file is not updated. That
+        is not hypothetical here: this module's own docstring describes it happening, when
+        record_hypothesis/update_hypothesis_status/record_finding were added to
+        SECURITY_MCP_TOOLS but _dispatch() only special-cased the literal "osint_record", so all
+        three fell through to "unknown tool".
+
+        A fourth hand-maintained list of names would only move where that mistake can happen,
+        so this compares the three real registries against each other. The invariant is a
+        partition -- SECURITY_MCP_TOOLS == BROKER_MEDIATED_TOOLS | LOCAL_BOOKKEEPING_TOOLS, with
+        the two halves disjoint -- and it is checked in all three directions, because each one
+        breaks differently and silently.
+        """
+        uncovered = SECURITY_MCP_TOOLS - (BROKER_MEDIATED_TOOLS | LOCAL_BOOKKEEPING_TOOLS)
+        self.assertEqual(
+            uncovered, set(),
+            f"these tools are exposed to the model but dispatched through neither boundary: "
+            f"{sorted(uncovered)}. _dispatch() falls through to 'unknown tool' and rejects the "
+            "call -- the exact incident described in this module's docstring.",
+        )
+
+        overlap = BROKER_MEDIATED_TOOLS & LOCAL_BOOKKEEPING_TOOLS
+        self.assertEqual(
+            overlap, set(),
+            f"these tools are classified as both broker-mediated and local bookkeeping: "
+            f"{sorted(overlap)}. _dispatch() routes one way, so one registration is wrong, and "
+            "the audit behaviour differs between the two: a broker-mediated tool skips "
+            "loop.py's generic audit entry because the broker writes a richer one, while a "
+            "local one gets that generic entry as its ONLY record.",
+        )
+
+        # The direction the reported version of this test left out. _dispatch() gates on
+        # `tool_name in SECURITY_MCP_TOOLS` before it ever consults the other two sets, and the
+        # schemas the model is offered come from the same place -- so a tool classified for
+        # dispatch but missing from SECURITY_MCP_TOOLS is unreachable: fully implemented,
+        # correctly routed, and never offered to the model. That is this project's single most
+        # recurring defect (the four record_* tools gated off by default, the four web tools in
+        # the wrong schema list, the Electron launcher that could not start the backend), and it
+        # fails silently in precisely the same way the other two directions do.
+        orphaned = (BROKER_MEDIATED_TOOLS | LOCAL_BOOKKEEPING_TOOLS) - SECURITY_MCP_TOOLS
+        self.assertEqual(
+            orphaned, set(),
+            f"these tools are classified for dispatch but are not in SECURITY_MCP_TOOLS: "
+            f"{sorted(orphaned)}. _dispatch() gates on that set first, so they can never be "
+            "reached and are never offered to the model -- implemented and wired nowhere.",
+        )
+
 
 class TestSchemaVisibility(TestSecurityToolsWiringBase):
     def test_all_six_tools_visible_when_security_tools_enabled(self):
