@@ -51,11 +51,17 @@ class EveryMCPServerLoadsAndRegisters(unittest.TestCase):
         import pathlib
 
         agent_dir = pathlib.Path(__file__).resolve().parent
+        # Real files only, and never the gitignored RAG corpus clones: PayloadsAllTheThings
+        # ships a directory named `Configuration Python __init__.py`, which rglob("*.py")
+        # matches and read_text() then raises IsADirectoryError on. This crashed on every host
+        # that had actually followed the documented corpus clone step, and nowhere else.
         offenders = [
             str(p.relative_to(agent_dir))
-            for p in agent_dir.rglob("*.py")
-            if not p.name.startswith("test_")
-            and "from mcp.server.mcpserver import" in p.read_text()
+            for p in sorted(agent_dir.rglob("*.py"))
+            if p.is_file()
+            and "corpus_src" not in p.parts
+            and not p.name.startswith("test_")
+            and "from mcp.server.mcpserver import" in p.read_text(errors="replace")
         ]
         self.assertEqual(offenders, [], "these import a path no released mcp 1.x provides")
 

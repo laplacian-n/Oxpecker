@@ -277,7 +277,8 @@ def probe(tier: str, deep: bool = False) -> tuple[bool, str]:
 
 # Exec-verification results, cached per process and per tier. See `verify_once`.
 _verified: dict[str, tuple[bool, str]] = {}
-_verify_lock = threading.Lock()
+_verify_lock = threading.Lock()          # guards _verified and _tier_locks
+_tier_locks: dict[str, threading.Lock] = {}
 
 
 def verify_once(tier: str) -> tuple[bool, str]:
@@ -307,18 +308,31 @@ def verify_once(tier: str) -> tuple[bool, str]:
     process was started, and it cannot change under a running process.
     """
     with _verify_lock:
+        lock = _tier_locks.setdefault(tier, threading.Lock())
+    # Held across check-compute-set, which is the whole point. An earlier version took the
+    # lock for the check, released it for the probe, and took it again for the store -- a
+    # check-then-act window that let every concurrent first caller run its own probe. Measured
+    # on real hardware: 20 threads on a cold cache produced 100 `bwrap` execs across 5 trials
+    # instead of 5. All callers still agreed on the answer, so nothing was incorrect; it simply
+    # did not do the one thing it exists to do.
+    #
+    # The lock is per tier rather than global so a slow probe cannot stall an unrelated one --
+    # `_probe_wsl2` makes three round trips into the guest, which is not a wait to impose on a
+    # caller asking about bubblewrap.
+    with lock:
         if tier in _verified:
             return _verified[tier]
-    result = probe(tier, deep=True)
-    with _verify_lock:
-        _verified.setdefault(tier, result)
-        return _verified[tier]
+        result = probe(tier, deep=True)
+        with _verify_lock:
+            _verified[tier] = result
+        return result
 
 
 def reset_verification_cache() -> None:
     """Test-only. Production never clears it -- see `verify_once` on why that is correct."""
     with _verify_lock:
         _verified.clear()
+        _tier_locks.clear()
 
 
 def resolve_tier(

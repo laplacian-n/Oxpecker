@@ -14,6 +14,7 @@ against the code as it stood before `verify_once` existed.
 """
 from __future__ import annotations
 
+import time
 import unittest
 from unittest.mock import patch
 
@@ -57,6 +58,80 @@ class VerifyOnceIsExecVerifiedAndCached(unittest.TestCase):
                 availability.verify_once(availability.TIER_BUBBLEWRAP)
 
         self.assertEqual(calls.count(True), 1, f"deep probe ran {calls.count(True)} times, want 1")
+
+    def test_concurrent_first_callers_still_produce_exactly_one_probe(self):
+        """The sequential version of this test passed while the lock was wrong.
+
+        The first implementation took the lock to check the cache, released it to run the
+        probe, and took it again to store the result. Every caller that arrived during that
+        window therefore ran its own probe. Measured on real hardware before this fix: 20
+        threads on a cold cache, 5 trials, 100 real `bwrap` execs instead of 5.
+
+        Nothing was incorrect -- every caller agreed on the answer -- so a correctness test
+        could not see it. Only counting the work can, which is why this asserts the count and
+        not the value. It is the same check-then-act shape as the broker cooldown and the spend
+        budget; the lesson keeps arriving in a new costume.
+        """
+        import threading as _t
+
+        probe_calls = []
+        entered = _t.Barrier(8)
+
+        def slow_probe(tier, deep=False):
+            if deep:
+                probe_calls.append(tier)
+                time.sleep(0.05)  # widen the window a correct lock must already close
+            return True, "ok"
+
+        results = []
+        with patch.object(availability, "probe", side_effect=slow_probe):
+            def worker():
+                entered.wait()  # every thread arrives on a cold cache together
+                results.append(availability.verify_once(availability.TIER_BUBBLEWRAP))
+
+            threads = [_t.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        self.assertEqual(
+            len(probe_calls), 1,
+            f"{len(probe_calls)} concurrent callers each ran the probe; the cache serialises "
+            "the first one and the rest must read its result",
+        )
+        self.assertEqual(len(results), 8)
+        self.assertEqual(len(set(results)), 1, "callers disagreed about the tier")
+
+    def test_a_slow_probe_for_one_tier_does_not_block_another(self):
+        """Why the lock is per tier. `_probe_wsl2` makes three round trips into the guest, and
+        that is not a wait to impose on a caller asking about bubblewrap."""
+        import threading as _t
+
+        wsl_started = _t.Event()
+        release_wsl = _t.Event()
+
+        def blocking_probe(tier, deep=False):
+            if deep and tier == availability.TIER_WSL2:
+                wsl_started.set()
+                release_wsl.wait(timeout=5)
+            return True, "ok"
+
+        with patch.object(availability, "probe", side_effect=blocking_probe):
+            slow = _t.Thread(target=availability.verify_once, args=(availability.TIER_WSL2,))
+            slow.start()
+            self.assertTrue(wsl_started.wait(timeout=5), "fixture never entered the slow probe")
+
+            done = _t.Event()
+            _t.Thread(
+                target=lambda: (availability.verify_once(availability.TIER_BUBBLEWRAP),
+                                done.set()),
+            ).start()
+            unblocked = done.wait(timeout=2)
+            release_wsl.set()
+            slow.join(timeout=5)
+
+        self.assertTrue(unblocked, "bubblewrap waited on the wsl2 probe -- the lock is global")
 
     def test_each_tier_is_verified_separately(self):
         seen = []
