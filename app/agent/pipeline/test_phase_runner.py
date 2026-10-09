@@ -51,6 +51,11 @@ class RunnerSelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner_for(_FakeDriver("high"), "RECON")  # high RECON is graph; no store supplied
 
+    def test_runner_for_forwards_the_engagement_model(self):
+        runner = runner_for(_FakeDriver("high"), "ANALYSIS", graph_store=self.graph,
+                            scope_entries=["a.com"], model="openai/gpt-4o-mini")
+        self.assertEqual(runner.model, "openai/gpt-4o-mini")  # reaches the graph runner's wave
+
 
 class GraphReconTest(unittest.TestCase):
     def setUp(self):

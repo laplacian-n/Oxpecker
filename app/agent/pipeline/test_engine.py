@@ -142,6 +142,24 @@ class BuildWaveEngineTest(unittest.TestCase):
         self.assertEqual(driver.strategist.max_experiments, 3)
 
 
+class ResolveWaveClientsTest(unittest.TestCase):
+    def test_a_bare_or_absent_model_uses_the_engine_defaults(self):
+        # No OpenRouter id -> (None, None); build_wave_engine/make_agent_loop_worker fall back to
+        # their registry/local defaults. Must not construct any provider (no key needed).
+        self.assertEqual(engine.resolve_wave_clients(None), (None, None))
+        self.assertEqual(engine.resolve_wave_clients(""), (None, None))
+        self.assertEqual(engine.resolve_wave_clients("llama.cpp"), (None, None))
+
+    @unittest.skipUnless(_HAS_KEY, "no OpenRouter key — constructing the provider needs the key")
+    def test_an_openrouter_model_resolves_to_openrouter_clients(self):
+        from agent.llm.openrouter import OpenRouterProvider
+        from agent.llm.openrouter_loop_client import OpenRouterLoopClient
+
+        provider, client_factory = engine.resolve_wave_clients("openai/gpt-4o-mini")
+        self.assertIsInstance(provider, OpenRouterProvider)
+        self.assertIsInstance(client_factory(), OpenRouterLoopClient)  # workers run on OpenRouter
+
+
 @unittest.skipUnless(_HAS_KEY, "no OpenRouter key — skipping the live engine build")
 class LiveBuildWaveEngineTest(unittest.TestCase):
     def test_build_from_engagement_id_and_run_one_real_wave(self):
@@ -166,6 +184,28 @@ class LiveBuildWaveEngineTest(unittest.TestCase):
         summary = driver.run()
         self.assertEqual(summary["waves"], 1)
         self.assertEqual(summary["status"], "wave_cap")
+
+    def test_the_engagement_model_path_drives_a_real_wave_on_openrouter(self):
+        # The engagement-model wiring end to end: resolve an OpenRouter model to the strategist
+        # provider, build the engine with it and a no-op worker, and run one real wave. Proves a
+        # high-tier engagement configured with an OpenRouter model runs on OpenRouter — GPU
+        # untouched — without this test naming the provider class itself.
+        provider, _client_factory = engine.resolve_wave_clients("openai/gpt-4o-mini")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        store = HypothesisGraphStore(root / "model-eng")
+        store.create_hypothesis(
+            title="SQL injection on the login form", claim="the login form is injectable",
+            phase_created="ANALYSIS", rationale="r", origin_type="tool_observation", impact=4,
+            confidence_band="medium", confidence_reason="x", surface="/login",
+        )
+        noop = lambda hid, method, stop, deadline: WorkerResult(outcome="completed", verdict="refuted")
+        driver = engine.build_wave_engine(
+            "model-eng", provider=provider, worker_runner=noop, emit=lambda *a, **k: None,
+            engagements_root=root, max_waves=1,
+        )
+        self.assertEqual(driver.run()["waves"], 1)
 
 
 if __name__ == "__main__":

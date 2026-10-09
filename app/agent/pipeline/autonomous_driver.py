@@ -313,7 +313,7 @@ class AutonomousDriver:
         the orchestrator uses, so production and planning/advancement can never disagree."""
         if tiers.uses_graph(phase, self.tier):
             return runner_for(self, phase, graph_store=self._graph_store(),
-                              scope_entries=self._scope_entries())
+                              scope_entries=self._scope_entries(), model=self._proposer_model())
         return runner_for(self, phase)
 
     def _proposer_model(self) -> str:

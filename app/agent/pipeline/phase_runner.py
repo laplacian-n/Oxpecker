@@ -114,11 +114,16 @@ class GraphPhaseRunner:
     wave engine and a real recon worker.
     """
 
-    def __init__(self, driver, *, graph_store, scope_entries, wave_engine_factory=None,
-                 recon_runner=None):
+    def __init__(self, driver, *, graph_store, scope_entries, model=None,
+                 wave_engine_factory=None, recon_runner=None):
         self.d = driver
         self.graph = graph_store
         self.scope_entries = list(scope_entries)
+        # The engagement's model (roe.json), translated to the strategist provider and the worker
+        # client once, here — so a high-tier engagement on an OpenRouter model runs its wave on
+        # OpenRouter (GPU untouched) and a default one runs local, without this class naming a
+        # provider. (None, None) means "use the engine's own defaults".
+        self.model = model
         self._wave_engine_factory = wave_engine_factory
         self._recon_runner = recon_runner
 
@@ -148,20 +153,25 @@ class GraphPhaseRunner:
     def _default_recon_runner(self):
         # One wave dispatching the per-root recon experiments in parallel (the walkthrough's
         # "send several workers to recon"). Built lazily so importing this module needs no model
-        # stack.
-        from .engine import build_wave_engine  # noqa: F401 - imported for parity with ANALYSIS path
+        # stack. Workers run on the engagement's model (OpenRouter when configured, so no GPU).
+        from .engine import resolve_wave_clients
         from .wave import WaveOrchestrator
         from .wave_worker import make_agent_loop_worker
 
-        worker = make_agent_loop_worker(self.d.engagement_id)
+        _, client_factory = resolve_wave_clients(self.model)
+        worker = make_agent_loop_worker(self.d.engagement_id, client_factory=client_factory)
         orch = WaveOrchestrator(self.d.engagement_id, self.graph, worker)
         return lambda dispatch: orch.run_wave(1, dispatch)
 
     # -- ANALYSIS / VALIDATION ----------------------------------------------------------------
     def _run_strategist_waves(self) -> bool:
-        from .engine import build_wave_engine
+        from .engine import build_wave_engine, resolve_wave_clients
 
-        factory = self._wave_engine_factory or (lambda: build_wave_engine(self.d.engagement_id))
+        provider, client_factory = resolve_wave_clients(self.model)
+        factory = self._wave_engine_factory or (
+            lambda: build_wave_engine(self.d.engagement_id, provider=provider,
+                                      client_factory=client_factory)
+        )
         engine = factory()
         summary = engine.run()
         return summary.get("waves", 0) > 0
@@ -188,7 +198,7 @@ class GraphPhaseRunner:
         return not cs.open_hypotheses_excluding_roots(self.graph)
 
 
-def runner_for(driver, phase: str, *, graph_store=None, scope_entries=None,
+def runner_for(driver, phase: str, *, graph_store=None, scope_entries=None, model=None,
                wave_engine_factory=None, recon_runner=None):
     """Select the runner for `(phase, driver.tier)` — the ONE place the mode is decided for work
     production, and it decides it with the same `tiers.uses_graph` that `plan_tasks` and
@@ -201,7 +211,7 @@ def runner_for(driver, phase: str, *, graph_store=None, scope_entries=None,
                 f"graph-mode phase {phase!r} needs a graph store and scope entries; none supplied"
             )
         return GraphPhaseRunner(
-            driver, graph_store=graph_store, scope_entries=scope_entries,
+            driver, graph_store=graph_store, scope_entries=scope_entries, model=model,
             wave_engine_factory=wave_engine_factory, recon_runner=recon_runner,
         )
     return FlatPhaseRunner(driver)
