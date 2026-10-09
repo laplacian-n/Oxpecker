@@ -140,6 +140,41 @@ class FindingsStore:
                 return f
         raise FindingNotFoundError(f"no finding {finding_id!r} in {self.path}")
 
+    def record_verification(
+        self, finding_id: str, *, verdict: str, reason: str | None, rationale: str,
+        by: str, new_status: str | None = None,
+    ) -> Finding:
+        """Record a verifier's verdict on a finding (§2.3). Unlike `mark_reviewed` (a *human* gate),
+        this is the independent verifier's result: it stamps `verifier`/`last_verified`, appends the
+        verdict to `limitations` so the report carries *why* the finding stands or fell, and — only
+        when the verdict calls for it — moves `status` (a refutation to `false_positive`). It never
+        touches `reviewed_by`: a verifier pass is not a human review, and must not look like one.
+        Same atomic whole-file rewrite as mark_reviewed, for the same reason (JSONL has no in-place
+        update)."""
+        if not by or not by.strip():
+            raise ValueError("verifier identity (`by`) must be non-empty, not silently 'someone'")
+        if new_status is not None and new_status not in VALID_STATUS:
+            raise ValueError(f"new_status must be one of {VALID_STATUS}, got {new_status!r}")
+        findings = self.list_all()
+        updated = None
+        rewritten = []
+        note = f"[verifier:{verdict}" + (f"/{reason}" if reason else "") + "]"
+        if rationale and rationale.strip():
+            note = f"{note} {rationale.strip()}"
+        for f in findings:
+            if f.finding_id == finding_id:
+                f.verifier = by.strip()
+                f.last_verified = time.time()
+                f.limitations = f"{f.limitations} | {note}" if f.limitations else note
+                if new_status is not None:
+                    f.status = new_status
+                updated = f
+            rewritten.append(f)
+        if updated is None:
+            raise FindingNotFoundError(f"no finding {finding_id!r} in {self.path}")
+        _write_atomic(self.path, "".join(json.dumps(f.to_dict()) + "\n" for f in rewritten))
+        return updated
+
     def mark_reviewed(self, finding_id: str, reviewed_by: str) -> Finding:
         """The human review gate (see Finding.reviewed_by's own comment) — an operator action,
         never something the model-facing record_finding tool calls itself. JSONL has no
