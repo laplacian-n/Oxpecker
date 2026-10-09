@@ -256,6 +256,17 @@ WORKSPACE_PREFIX = "agent-workspace-"
 WEB_UI_HOST = os.environ.get("AGENT_WEB_HOST", "127.0.0.1")
 WEB_UI_PORT = int(os.environ.get("AGENT_WEB_PORT", "8765"))
 WEB_UI_API_KEY_FILE = STATE_DIR / "web_ui_api_key.txt"
+# Optional multi-account key map for AGENT_ARCHITECTURE.md §5.3 ("one account may share
+# everything; a different account nothing"). A JSON object {account_id: api_key}. When it exists
+# it is the authority on which keys are valid and whose each one is, and the engagement event
+# stream (the largest read in the system) is owner-filtered against it. When it does NOT exist,
+# identity collapses to the single operator "local-operator" — the single-key and no-key cases
+# are unchanged, so the §5.3 boundary ships off by default and is enabled by writing this file.
+WEB_UI_ACCOUNTS_FILE = STATE_DIR / "web_ui_accounts.json"
+# The account every pre-§5.3 engagement and the single-key/no-key deployment belong to. An
+# engagement whose roe.json carries no "owner" is this operator's, so adding ownership did not
+# orphan a single existing engagement.
+WEB_UI_DEFAULT_ACCOUNT = "local-operator"
 WEB_UI_CORS_ORIGINS: list[str] = [
     o.strip() for o in os.environ.get("AGENT_WEB_CORS_ORIGINS", "").split(",") if o.strip()
 ]
