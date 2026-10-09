@@ -440,12 +440,26 @@ class Broker:
                 session_id=request.session_id, tool=request.tool,
                 arguments=request.arguments, reason=reason_for_queue,
             )
+            # §4.2 approval_required — surfaces in chat, the approvals drawer and (eventually) the
+            # flow node (§7). The raw arguments are NOT put on the stream (they may carry secrets);
+            # the tool, a non-sensitive note and the same argument digest the tool_call events use
+            # are enough to identify the request. blocked_workers is empty until the wave model
+            # knows what a request blocks.
+            event_emit.emit(
+                request.engagement_id,
+                "approval_required",
+                {"request_id": request_id, "tool": request.tool, "worker": request.session_id,
+                 "argument_digest": _argument_digest(request.arguments), "note": note.strip(),
+                 "blocked_workers": []},
+            )
             if self.use_approval_queue:
                 try:
                     record = self.approval_queue.wait_for_resolution(
                         request_id, timeout_s=config.APPROVAL_QUEUE_TIMEOUT_S
                     )
                 except TimeoutError:
+                    event_emit.emit(request.engagement_id, "approval_resolved",
+                                    {"request_id": request_id, "status": "timeout"})
                     return deny(
                         f"approval request timed out waiting in queue{note}",
                         "approval_timeout", policy.policy_version,
@@ -458,6 +472,8 @@ class Broker:
                 )
                 self.approval_queue.resolve(request_id, approved=approved, resolved_by="cli-operator")
                 approval_ref = f"cli-approved-{time.time()}"
+            event_emit.emit(request.engagement_id, "approval_resolved",
+                            {"request_id": request_id, "status": "approved" if approved else "denied"})
             if not approved:
                 reason = "human declined approval" + note
                 rule = "approval_required_taint" if taint_escalation else "approval_required"

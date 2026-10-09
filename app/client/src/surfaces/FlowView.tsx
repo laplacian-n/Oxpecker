@@ -4,6 +4,8 @@ import "@xyflow/react/dist/style.css";
 import { EngagementSubscription } from "../subscription";
 import { useEngagement } from "../useEngagement";
 import { buildGraph } from "../flow/graph";
+import { ApprovalsPanel } from "./ApprovalsPanel";
+import { ApiOptions } from "../api";
 
 // Flow — the architecture in motion (CLIENT_UI_DESIGN.md §6.3), built on React Flow (the design's
 // §5 choice: pan/zoom/hit-testing/viewport culling, and crucially the viewport transform stays out
@@ -11,8 +13,15 @@ import { buildGraph } from "../flow/graph";
 // the worker instances and the traffic on the wires are live, mapped from the projection by the
 // pure buildGraph(). Read-only except for stop-worker / approve (§6.3) — those write paths are
 // backend actions not yet wired, so they are shown, not yet actionable.
-export function FlowView({ subscription }: { subscription: EngagementSubscription }) {
+export function FlowView({
+  subscription,
+  apiOptions = {},
+}: {
+  subscription: EngagementSubscription;
+  apiOptions?: ApiOptions;
+}) {
   const projection = useEngagement(subscription);
+  void apiOptions; // the flow rendering is the count only (§7); resolving happens in chat/drawer
   const { nodes, edges } = useMemo(() => buildGraph(projection), [projection]);
 
   const rfNodes = nodes.map((n) => ({
@@ -42,6 +51,11 @@ export function FlowView({ subscription }: { subscription: EngagementSubscriptio
               so far. Price per million tokens comes from the OpenRouter probe (agent/llm/
               openrouter.py), a source this engagement stream does not carry — so the roster shows
               usage and spend from the stream and leaves price to that separate source. */}
+          {/* §7 flow-node rendering: the count of what is blocked, which is what decides how
+              urgent an approval is — one worker waiting vs the wave stalled. */}
+          <Panel position="top-left">
+            <ApprovalsPanel projection={projection} compact />
+          </Panel>
           <Panel position="top-right">
             <div data-testid="model-roster" className="roster">
               <h2>Models</h2>
