@@ -67,6 +67,34 @@ export function fromSnapshot(snapshot: Record<string, any>): Projection {
   return p;
 }
 
+// Re-fold the held events up to and including `atSeq` — the time scrubber (§6.5), which is "the
+// same projection replayed to an earlier sequence number, not a second data path" (§3). A window
+// holds its events, so dragging the scrubber back is a pure re-fold of what it already has; only
+// ranges older than the in-memory window need a server snapshot. Pure, so a given `atSeq` always
+// yields the same past.
+export function projectionAt(events: EngagementEvent[], atSeq: number): Projection {
+  let p = emptyProjection();
+  for (const e of events) {
+    if (e.seq > atSeq) break; // events arrive in order
+    p = applyEvent(p, e);
+  }
+  return p;
+}
+
+// What one worker is doing, at whatever projection is passed (now, or a scrubbed-to past). The
+// same selector feeds the rail, the tear-off window and the flow-node summary — "one component,
+// three mounts" (§6.5); only the level of detail differs, not the data path.
+export function workerView(projection: Projection, workerId: string) {
+  return {
+    worker: projection.workers[workerId] ?? { worker_id: workerId },
+    inFlightTool: Object.values(projection.toolCalls).find((c) => String(c.worker) === String(workerId)) ?? null,
+    toolHistory: projection.events.filter(
+      (e) => e.kind === "tool_call_started" && String((e.payload as any).worker) === String(workerId),
+    ),
+    artifacts: projection.artifacts.filter((a) => String(a.worker) === String(workerId)),
+  };
+}
+
 // Apply one streamed event. Pure in its inputs: returns a new Projection (never mutates) so React
 // can compare references. Unknown kinds are still appended to `events` — a producer emitting a
 // kind this fold has not learned yet still rides the stream and the counts, never silently
