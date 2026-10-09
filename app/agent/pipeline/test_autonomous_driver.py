@@ -65,6 +65,9 @@ class AutonomousDriverTestBase(unittest.TestCase):
         )
 
     def _make_driver(self, mode: str = "autonomous", **kwargs) -> AutonomousDriver:
+        # These exercise the flat (sequential) engine, so fix the tier to medium rather than
+        # inheriting the tier-less default (which is 'high' = the graph wave engine).
+        kwargs.setdefault("tier", "medium")
         return AutonomousDriver(
             engagement_id=self.engagement_id, profile_name="web_api", mode=mode,
             session_id=f"session-{self.engagement_id}", on_event=self.events.append, **kwargs,

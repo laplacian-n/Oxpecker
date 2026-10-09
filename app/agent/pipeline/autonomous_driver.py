@@ -32,14 +32,16 @@ from typing import Callable
 
 from .. import config
 from ..broker.broker import Broker
+from .. import tiers
 from ..broker.consult_queue import ConsultQueue
 from ..broker.kill_switch import KillSwitch
 from ..engagement.bootstrap import bootstrap_engagement
 from ..engagement.locks import engagement_lock
-from ..engagement.store import EngagementStore
+from ..engagement.store import PHASES, EngagementStore
 from ..loop import AgentLoop
-from .executor import TASKS_REQUIRING_MODEL, run_pending_tasks
+from .executor import TASKS_REQUIRING_MODEL
 from .orchestrator import PipelineOrchestrator
+from .phase_runner import runner_for
 
 log = logging.getLogger("agent.pipeline.autonomous_driver")
 
@@ -78,12 +80,17 @@ def _deny_all(prompt: str) -> bool:
 
 
 class AutonomousDriver:
+    # Exposed on the instance so the phase runner (which applies this policy while producing a
+    # flat phase's judgment tasks) reads one source of truth rather than re-importing the constant.
+    MAX_JUDGMENT_TASK_ATTEMPTS = MAX_JUDGMENT_TASK_ATTEMPTS
+
     def __init__(
         self, engagement_id: str, profile_name: str, mode: str, session_id: str,
         device_id: str = "autonomous-driver", on_event: Callable[[dict], None] | None = None,
         max_wall_clock_s: float = DEFAULT_MAX_WALL_CLOCK_S,
         consult_timeout_s: float = CONSULT_TIMEOUT_S,
         stop_event: threading.Event | None = None,
+        tier: str | None = None,
     ):
         # Checked once per loop iteration (same cadence as the wall-clock/hard-blocker checks) —
         # an explicit "stop this run" request from a caller driving it in a background thread
@@ -102,9 +109,19 @@ class AutonomousDriver:
         self.max_wall_clock_s = max_wall_clock_s
         self.consult_timeout_s = consult_timeout_s
         self.store = EngagementStore(self.engagement_dir)
-        self.orch = PipelineOrchestrator(self.store, profile_name)
+        # The orchestration tier (§2.6.2, per engagement from roe.json). One driver serves every
+        # tier; the tier only changes which phase runner produces a phase's work (flat task machine
+        # vs the graph wave engine) — never the invariants below (lock, bootstrap, wall-clock,
+        # advancement, events, broker/audit/evidence). The orchestrator is told the tier so its
+        # own plan_tasks/check_transition agree with the runner selection (all three go through
+        # tiers.uses_graph — the one decider). An explicit `tier` overrides the per-engagement
+        # read: the server passes none (production reads roe.json), while a caller that already
+        # knows the tier — or a test fixing the flat engine — passes it.
+        self.tier = tiers.normalize_tier(tier) if tier else tiers.engagement_tier(engagement_id)
+        self.orch = PipelineOrchestrator(self.store, profile_name, tier=self.tier)
         self.broker = Broker(engagement_dir=self.engagement_dir, confirm_fn=_deny_all)
         self._pending_operator_note: str | None = None
+        self._graph_store_cache = None  # lazily opened only for a graph-tier phase
 
     def _emit(self, event_type: str, **fields) -> None:
         self.on_event({
@@ -276,6 +293,44 @@ class AutonomousDriver:
             on_event=lambda event: self._emit(event["type"], detail=event.get("detail", "")),
         )
 
+    def _graph_store(self):
+        """The engagement's hypothesis graph, opened once and only when a graph-tier phase needs
+        it (a flat engagement never touches it)."""
+        if self._graph_store_cache is None:
+            from ..hypothesis_graph.store import HypothesisGraphStore
+
+            self._graph_store_cache = HypothesisGraphStore(self.engagement_dir)
+        return self._graph_store_cache
+
+    def _scope_entries(self) -> list[str]:
+        """The authorized scope entries a RECON wave roots on — the engagement's assets, which
+        bootstrap seeds from the RoE. The set of recon roots equals this set (§14.1 G invariant 1)."""
+        return [a["identifier"] for a in self.store.list_assets()]
+
+    def _runner_for_phase(self, phase: str):
+        """Build the phase runner for `phase`. Graph phases get the graph store and scope entries;
+        the selection itself goes through `tiers.uses_graph` inside `runner_for` — the same decider
+        the orchestrator uses, so production and planning/advancement can never disagree."""
+        if tiers.uses_graph(phase, self.tier):
+            return runner_for(self, phase, graph_store=self._graph_store(),
+                              scope_entries=self._scope_entries())
+        return runner_for(self, phase)
+
+    def _advance_graph_phase(self, phase: str, reason_prefix: str) -> bool:
+        """Advance a graph-mode phase explicitly: its orchestrator check_transition deliberately
+        defers (a graph phase has no flat task list to read), so when the runner reports the wave
+        concluded, the driver — which owns phase advancement — performs the transition here."""
+        phase_row = self.store.get_phase()
+        idx = PHASES.index(phase_row["current_phase"])
+        if idx >= len(PHASES) - 1:
+            return False
+        next_phase = PHASES[idx + 1]
+        self.store.transition_phase(
+            next_phase, f"{reason_prefix}graph phase concluded: wave dispatched nothing further",
+            expected_version=phase_row["version"],
+        )
+        return True
+
     def run(self) -> AutonomousRunResult:
         # Serialize whole runs against the same engagement — same lock AgentLoop.run_task()
         # takes (agent/engagement/locks.py), for the same reason: an assistant session and an
@@ -319,57 +374,32 @@ class AutonomousDriver:
             phase = self.store.get_phase()["current_phase"]
             self._emit("phase_entered", phase=phase)
 
-            self.orch.plan_tasks()
-            deterministic_outcomes = run_pending_tasks(self.orch, self.broker, self.session_id)
-            for o in deterministic_outcomes:
-                self._emit(
-                    "deterministic_task_done", task_type=o.task_type, ok=o.ok, detail=o.detail,
+            # How this phase produces its work is the one thing the tier changes; everything around
+            # it here is invariant. The runner (flat task machine or graph wave engine) is chosen by
+            # the same tiers.uses_graph the orchestrator uses, so production and advancement agree.
+            runner = self._runner_for_phase(phase)
+            production = runner.produce(phase, attempts)
+
+            if production.run_complete:
+                self._emit("run_complete", phase="CLOSEOUT")
+                return AutonomousRunResult(
+                    "closed_out", "engagement closed out", phases_completed, "CLOSEOUT",
                 )
+            if production.blocker:
+                return AutonomousRunResult("blocked", production.blocker, phases_completed, phase)
 
-            if phase == "CLOSEOUT":
-                closeout_task = next(
-                    (t for t in self.store.list_tasks(phase="CLOSEOUT") if t["task_type"] == "closeout"),
-                    None,
-                )
-                if closeout_task and closeout_task["status"] == "done":
-                    self._emit("run_complete", phase="CLOSEOUT")
-                    return AutonomousRunResult(
-                        "closed_out", "engagement closed out", phases_completed, "CLOSEOUT",
-                    )
-
-            judgment_outcomes = self._run_judgment_tasks(phase)
-            blocked_on_task = False
-            for outcome in judgment_outcomes:
-                task = outcome["task"]
-                task_row = next(t for t in self.store.list_tasks(phase=phase) if t["task_id"] == task["task_id"])
-                if outcome["changed"]:
-                    self.store.update_task(task_row["task_id"], expected_version=task_row["version"], status="done")
-                    attempts.pop(task["task_id"], None)
-                    continue
-                attempts[task["task_id"]] = attempts.get(task["task_id"], 0) + 1
-                if attempts[task["task_id"]] >= MAX_JUDGMENT_TASK_ATTEMPTS:
-                    self.store.update_task(
-                        task_row["task_id"], expected_version=task_row["version"], status="failed",
-                        result={"detail": f"no progress after {MAX_JUDGMENT_TASK_ATTEMPTS} attempts"},
-                    )
-                    reason = (
-                        f"{task['task_type']} task {task['task_id']} made no progress after "
-                        f"{MAX_JUDGMENT_TASK_ATTEMPTS} attempts"
-                    )
-                    self._emit("blocked", reason=reason)
-                    blocked_on_task = reason
-                else:
-                    self.store.update_task(task_row["task_id"], expected_version=task_row["version"], status="pending")
-            if blocked_on_task:
-                return AutonomousRunResult("blocked", blocked_on_task, phases_completed, phase)
-
-            advanced = self.orch.advance_if_ready(f"autonomous-driver ({self.mode}): ")
+            reason_prefix = f"autonomous-driver ({self.mode}): "
+            advanced = self.orch.advance_if_ready(reason_prefix)
+            if not advanced and runner.wave_concluded(phase):
+                # Graph phase: check_transition defers to the wave, so the driver advances it here
+                # once the runner reports the wave concluded. Flat runners never report this.
+                advanced = self._advance_graph_phase(phase, reason_prefix)
             if advanced:
                 new_phase = self.store.get_phase()["current_phase"]
                 phases_completed.append(phase)
                 self._emit("phase_advanced", from_phase=phase, to_phase=new_phase)
 
-            if not advanced and not judgment_outcomes and not deterministic_outcomes:
+            if not advanced and not production.made_progress:
                 reason = f"phase {phase} made no progress and is not ready to advance"
                 self._emit("blocked", reason=reason)
                 return AutonomousRunResult("blocked", reason, phases_completed, phase)
