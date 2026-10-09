@@ -16,7 +16,7 @@ Implements the FULL API surface that agent/web/static/index.html expects, with:
   - WebSocket support for bidirectional comms
 
 Prerequisites:
-  pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 mcp playwright
+  pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 'mcp<2' playwright
   # Linux, for a real sandbox:  apt install bubblewrap  &&  pip install pyseccomp
   # `uvicorn[standard]` not bare `uvicorn`: the bare package has no WebSocket implementation,
   # so /api/sessions/{id}/ws stops being a WebSocket route and answers as plain HTTP.

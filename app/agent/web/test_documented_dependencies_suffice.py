@@ -59,7 +59,17 @@ def documented_distributions() -> set[str]:
         stripped = line.strip()
         if stripped.startswith("pip install"):
             names = stripped[len("pip install"):].split()
-            return {re.sub(r"\[.*?\]", "", n).strip("'\"").lower() for n in names}
+            cleaned = set()
+            for raw in names:
+                # Strip the quoting, the extras and the version specifier: "'mcp<2'" is the
+                # distribution mcp, and an earlier version of this parser handled only the
+                # extras, so a pinned entry read as a distribution literally named "mcp<2".
+                name = raw.strip("'\"")
+                name = re.sub(r"\[.*?\]", "", name)
+                name = re.split(r"[<>=!~]", name, maxsplit=1)[0]
+                if name:
+                    cleaned.add(name.strip().lower())
+            return cleaned
     raise AssertionError("no uncommented 'pip install' line in dev_server.py's prerequisites")
 
 
@@ -85,11 +95,21 @@ def third_party_modules() -> set[str]:
     return {m for m in mods if m not in sys.stdlib_module_names and m != "agent"}
 
 
-# Three modules cannot be imported in ANY environment, documented install or not: they do
-# `from mcp.server.mcpserver import MCPServer`, and no such path exists in the mcp SDK (1.28
-# has fastmcp, lowlevel, sse, stdio and no mcpserver). They have been this way since the commit
-# that first added app/, so these MCP servers have never started. security_mcp_server.py uses
-# the real `from mcp.server import FastMCP` and imports fine.
+# This repository holds MCP code written against two incompatible generations of the SDK, and
+# no single installed version satisfies both. Verified by installing each in a clean venv:
+#
+#   mcp 1.28.1  mcp.server.FastMCP exists;  mcp.server.mcpserver does NOT
+#   mcp 2.3.0   mcp.server.FastMCP is GONE; mcp.server.mcpserver DOES exist
+#
+# security_mcp_server.py uses the 1.x spelling and is the one the runtime actually imports
+# (loop.py pulls it in for the security tools). dev_mcp_server.py, mcp_tools_server.py and
+# oxpecker_control_mcp.py use the 2.x spelling and are standalone servers launched from
+# .mcp.json, which nothing imports.
+#
+# So the documented list pins "mcp<2": the live path works, installs stop depending on the day
+# they were run, and the three standalone servers stay unimportable until someone ports them --
+# which is the state every developer machine has been in anyway, undetected, because the split
+# only shows up on a machine that installs fresh.
 #
 # They are listed rather than quietly excluded, and the second test below asserts the list is
 # EXACT: fix one and this test tells you to take it off the list, so the carve-out cannot

@@ -182,7 +182,7 @@ async function startEverything() {
   // (a real, load-bearing import since agent/evidence/store.py landed) and `uvicorn[standard]`
   // (the bare package has no WebSocket implementation). A user who hit this dialog and followed
   // it verbatim would still not have a working venv.
-  if (!okDev) return fail('The Oxpecker backend (dev_server.py) did not start. Is Python installed? Try: py -m pip install fastapi "uvicorn[standard]" scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 mcp playwright');
+  if (!okDev) return fail('The Oxpecker backend (dev_server.py) did not start. Is Python installed? Try: py -m pip install fastapi "uvicorn[standard]" scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 "mcp<2" playwright');
 
   setStatus('Ready');
   mainWindow.loadURL(appUrl);

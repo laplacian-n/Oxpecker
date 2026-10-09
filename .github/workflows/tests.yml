@@ -27,7 +27,7 @@ jobs:
         # httpx is test-only: the FastAPI TestClient needs it, the app does not.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 mcp playwright httpx
+          python -m pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 'mcp<2' playwright httpx
 
       - name: Run the agent suite
         working-directory: app
