@@ -432,6 +432,68 @@ class HypothesisGraphStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # -- experiment claims (§2.5 wave dispatch) ----------------------------------------------
+
+    def claim_experiment(self, hypothesis_id: str, method: str, worker: str) -> str | None:
+        """Atomically claim the experiment (hypothesis_id, method) for `worker`.
+
+        Returns the claim id, or None if another worker already holds an active claim on that
+        exact experiment. The claim is NOT read-then-write: the `idx_experiment_active_claim`
+        partial unique index is the one serialization point, so two workers dispatched against the
+        same (hypothesis, method) in the same instant resolve to exactly one winner — the loser's
+        INSERT raises IntegrityError and is told None, never a duplicate claim (§14.1 E′). The
+        hypothesis is checked first so a genuinely missing one is a NotFoundError, not mistaken for
+        a claim conflict."""
+        if not method.strip():
+            raise GraphValidationError("a claim needs a non-empty method")
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)).fetchone() is None:
+                raise NotFoundError(hypothesis_id)
+            claim_id = _new_id("c")
+            try:
+                conn.execute(
+                    "INSERT INTO experiment_claims (claim_id, hypothesis_id, method, worker, "
+                    "status, claimed_at) VALUES (?,?,?,?,'claimed',?)",
+                    (claim_id, hypothesis_id, method.strip(), worker, _now()),
+                )
+            except sqlite3.IntegrityError:
+                return None  # another worker holds the active claim on this experiment
+            return claim_id
+
+    def release_claim(self, claim_id: str) -> bool:
+        """Release an active claim (the worker was stopped, or is retrying). Returns whether a
+        claim was actually released. Releasing frees the (hypothesis, method) for a later claim,
+        because the partial unique index only counts status='claimed'."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE experiment_claims SET status='released', released_at=? "
+                "WHERE claim_id=? AND status='claimed'",
+                (_now(), claim_id),
+            )
+            return cur.rowcount > 0
+
+    def complete_claim(self, claim_id: str) -> bool:
+        """Mark a claim's experiment finished. Like release it frees the slot for a retry, but
+        records that the work ran rather than was abandoned."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE experiment_claims SET status='completed', released_at=? "
+                "WHERE claim_id=? AND status='claimed'",
+                (_now(), claim_id),
+            )
+            return cur.rowcount > 0
+
+    def active_claims(self, hypothesis_id: str | None = None) -> list[dict]:
+        """The experiments currently claimed (what each worker is running now). Optionally scoped
+        to one hypothesis."""
+        q = "SELECT * FROM experiment_claims WHERE status='claimed'"
+        params: tuple = ()
+        if hypothesis_id is not None:
+            q += " AND hypothesis_id=?"
+            params = (hypothesis_id,)
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(q + " ORDER BY claimed_at", params).fetchall()]
+
     # -- observations ------------------------------------------------------------------------
 
     def add_observation(
