@@ -54,6 +54,24 @@ _KIND_BY_TIER = {
 }
 
 
+def resolve_wave_clients(model: str | None):
+    """Map an engagement's model string to the `(strategist_provider, worker_client_factory)` a
+    wave should run on. An OpenRouter ``vendor/model`` id (``openai/gpt-4o-mini``) returns an
+    `OpenRouterProvider` for the strategist and an `OpenRouterLoopClient` factory for the workers,
+    so a high-tier engagement configured with an OpenRouter model runs **entirely on OpenRouter and
+    never touches the local GPU** — the owner's hard constraint. A bare name or None returns
+    ``(None, None)``, letting `build_wave_engine`/`make_agent_loop_worker` fall back to their
+    registry/local defaults (the production llama.cpp path). The engine still names no provider of
+    its own; this only translates the engagement's declared model into the two client seams."""
+    m = str(model) if model else ""
+    if "/" in m:  # an OpenRouter vendor/model id, not a bare local model name
+        from ..llm.openrouter import OpenRouterProvider
+        from ..llm.openrouter_loop_client import OpenRouterLoopClient
+
+        return OpenRouterProvider(model=m), (lambda: OpenRouterLoopClient(m))
+    return None, None
+
+
 def tier_engine_kind(engagement_id: str, *, engagements_root: Path | None = None) -> str:
     """The engine kind an engagement's tier calls for (`operator` / `sequential` / `wave`). Reads
     the tier through `tiers.engagement_tier`, so an engagement with no tier runs the default's
