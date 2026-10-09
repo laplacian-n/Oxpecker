@@ -135,6 +135,7 @@ class AgentLoop:
         on_stream=None,
         on_reasoning_stream=None,
         force_no_think: bool = False,
+        stop_event=None,
     ):
         self.client = LlamaClient()
         # force_no_think: suppress thinking mode even in THINKING_ENABLED_PHASES. For callers
@@ -159,6 +160,11 @@ class AgentLoop:
         self.dangerous_local = dangerous_local
         self.isolation_tier = isolation_tier
         self.seed = seed
+        # A cooperative stop, checked once per iteration. A wave worker (§2.5) is an AgentLoop
+        # given the orchestrator's stop event; when the wall-clock is hit the orchestrator sets it
+        # and the loop returns a 'cancelled' result at the next turn boundary, rather than being
+        # force-killed mid-generation (a thread cannot be). What it had already recorded stays.
+        self.stop_event = stop_event
         self.engagement_id = engagement_id
         self.prompt_version: str | None = None  # set on first _system_message() call
         # Injected so main.py can supply input(); tests can supply an auto-yes/no stub.
@@ -529,6 +535,11 @@ class AgentLoop:
         iteration = 0
         while True:
             iteration += 1
+            if self.stop_event is not None and self.stop_event.is_set():
+                # Cooperative hard stop (§2.5 / A6): the wave's wall-clock fired, or an operator
+                # cancelled. Return at the turn boundary so the partial work already recorded this
+                # run stays on the trajectory.
+                return finish(TaskResult("cancelled", "stop requested"))
             if iteration > config.MAX_ITERATIONS:
                 return finish(TaskResult("budget_exhausted", "max iterations exceeded"))
             if time.monotonic() - start > config.TASK_WALL_CLOCK_S:
