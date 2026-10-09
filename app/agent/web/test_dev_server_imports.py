@@ -152,6 +152,33 @@ def _documented_tokens() -> set[str]:
     return tokens
 
 
+def _required_install_tokens() -> set[str]:
+    """Only the packages the UNCONDITIONAL `pip install` line names, with extras stripped.
+
+    `_documented_tokens()` above deliberately sweeps up every `pip install` in the block,
+    including the one inside the commented, Linux-and-sandbox-only line, because its job is to
+    answer "is this import documented anywhere". That makes it the wrong set to compare a
+    platform-independent install hint against: it contains `pyseccomp`, which a Windows user
+    following a startup-failure dialog has no business installing.
+
+    This is the other question — "what must someone install for dev_server to start at all" —
+    and it is the set an independent copy of that advice has to match exactly.
+    """
+    text = ENTRY.read_text(encoding="utf-8")
+    block = re.search(r"Prerequisites:\n(.*?)\n\nUsage:", text, re.DOTALL)
+    assert block, "dev_server.py lost its Prerequisites docstring block"
+    tokens: set[str] = set()
+    for line in block.group(1).splitlines():
+        head, _, _comment = line.partition("#")
+        m = re.search(r"pip install (.+)", head)
+        if not m:
+            continue
+        for a, b in re.findall(r"'([^']+)'|(\S+)", m.group(1)):
+            tokens.add(_normalize(re.sub(r"\[.*\]$", "", a or b)))
+    assert tokens, "dev_server.py's Prerequisites block lost its unconditional pip install line"
+    return tokens
+
+
 class TestDevServerImportsAreDocumented(unittest.TestCase):
     def test_every_module_scope_dependency_is_in_the_install_line(self):
         third_party, seen_in, _ = _walk_our_imports(ENTRY)
