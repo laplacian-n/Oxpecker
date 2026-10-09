@@ -15,6 +15,7 @@ against current (possibly since-changed) state.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -27,6 +28,7 @@ from typing import Callable
 
 from .. import audit_log as audit_log_mod
 from .. import config
+from ..engagement import emit as event_emit
 from ..evidence.store import EvidenceStore
 from . import policy as policy_mod
 from .approval_queue import ApprovalQueue
@@ -91,6 +93,18 @@ def _verification_disabled(arguments: dict) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in _FALSEY_STRINGS
     return not value
+
+
+def _argument_digest(arguments: dict) -> str:
+    """A short, stable digest of a tool call's arguments for the event stream (§4.2's
+    "argument digest"). A hash, not the arguments themselves — so the flow view can show that two
+    calls differ without the stream carrying secrets or payloads (those live in the evidence store,
+    reachable by ref)."""
+    try:
+        canonical = json.dumps(arguments, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        canonical = repr(arguments)
+    return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 def _action_class_for(request: ActionRequest) -> str | None:
@@ -240,6 +254,26 @@ class Broker:
         # cross-reference a reader can verify independently, not just a matching-by-convention.
         assert entry["content_digest"] == evidence_digest, "audit/evidence digest mismatch"
         self._save_idempotent(request.idempotency_key, response)
+
+        # §4.2 telemetry, after the evidence and audit are safely written (never before — a
+        # stream event must not claim an action the record does not). tool_call_finished closes
+        # only the calls that actually ran (started above); a denial/approval-block never started,
+        # so it is not finished here. artifact_stored fires only on a real stored output, which is
+        # what lets the flow view draw where a worker's output went (§6.3.1).
+        if response.status in ("succeeded", "failed", "timed_out", "cancelled"):
+            event_emit.emit(
+                request.engagement_id,
+                "tool_call_finished",
+                {"call_id": request.action_id, "worker": request.session_id, "tool": request.tool,
+                 "latency": response.duration_ms, "status": response.status},
+            )
+        if response.status == "succeeded" and response.output:
+            event_emit.emit(
+                request.engagement_id,
+                "artifact_stored",
+                {"worker": request.session_id, "artifact": request.tool, "store": "evidence",
+                 "ref": evidence_digest},
+            )
         return response
 
     def _wait_out_cooldown(self, wait_s: float) -> bool:
@@ -436,6 +470,20 @@ class Broker:
             # that actually went out rather than ones that were refused.
             self._program_window[request.engagement_id or policy.engagement_id].append(time.time())
 
+        # §4.2 tool_call_started: emitted here, past every gate and right before the tool runs,
+        # so the stream marks calls that actually went out (a denied or approval-blocked request
+        # never reaches this line, and so never pairs a spurious started/finished). call_id is the
+        # action_id, which tool_call_finished in _finalize carries back to close the pair.
+        event_emit.emit(
+            request.engagement_id,
+            "tool_call_started",
+            {
+                "call_id": request.action_id,
+                "worker": request.session_id,
+                "tool": request.tool,
+                "argument_digest": _argument_digest(request.arguments),
+            },
+        )
         try:
             raw_result = executor(policy, request.arguments)
         except PermissionError as e:

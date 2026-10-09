@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from .. import config
+from ..engagement import emit as event_emit
 from .schema import LIFECYCLE_CATEGORIES, Category, NoteStatus
 from .store import NotebookStore, NotFoundError, NotebookValidationError
 from .technique_kb import TechniqueKB
@@ -51,6 +52,9 @@ class NotebookService:
 
     def add_note(self, **kwargs) -> dict:
         r = self.store.add_note(**kwargs)
+        # §4.2 note_added — the notebook tab's count and auto-refetch react to this.
+        event_emit.emit(self.engagement_id, "note_added",
+                        {"note_id": r.get("note_id"), "category": kwargs.get("category")})
         # a 'technique' note is reusable by definition — overflow it into the global KB so a
         # later engagement can recall it (docs/working-notebook-spec.md §7).
         if kwargs.get("category") == Category.TECHNIQUE.value:
@@ -76,10 +80,13 @@ class NotebookService:
         Stored as a 'misc' note tagged 'operator' so build_context_block pins it in its own
         section every turn: it's the operator's only channel for mid-run steering that isn't a
         chat message, and it must not scroll out of the digest behind newer model notes."""
-        return self.store.add_note(
+        r = self.store.add_note(
             category=Category.MISC.value, note=text.strip(),
             tags=[self.OPERATOR_TAG], surface=surface, refs=list(refs or []),
         )
+        event_emit.emit(self.engagement_id, "note_added",
+                        {"note_id": r.get("note_id"), "category": Category.MISC.value})
+        return r
 
     def recall_techniques(self, query: str = "", surface: str | None = None) -> list[dict]:
         # semantic_recall needs something to vectorize; a bare call (browse everything) has

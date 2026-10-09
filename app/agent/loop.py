@@ -20,6 +20,7 @@ from . import budget as budget_mod
 from . import config
 from . import injection_guard
 from . import session as session_mod
+from .engagement import emit as event_emit
 from .engagement.locks import engagement_lock
 from .llama_client import LlamaClient
 from .loop_control.steer import SteerChannel
@@ -568,6 +569,16 @@ class AgentLoop:
                 on_reasoning_delta=self.on_reasoning_stream,
             )
             latency_ms = (time.monotonic() - call_start) * 1000
+            # §4.2 model_call — feeds the flow view's model roster (§6.3). Cost comes from the
+            # OpenRouter price probe, a source this path does not hold, so usage is emitted and
+            # price is left to the roster's own source; role is the profile this loop runs under.
+            _usage = resp.get("usage") or {}
+            event_emit.emit(self.engagement_id, "model_call", {
+                "model_id": resp.get("model") or "model",
+                "role": self.profile,
+                "prompt_tokens": _usage.get("prompt_tokens", 0),
+                "completion_tokens": _usage.get("completion_tokens", 0),
+            })
             choice = resp["choices"][0]["message"]
             content = choice.get("content") or ""
             # See _run_diagnostic's comment: llama-server returns thinking-mode output in its own
