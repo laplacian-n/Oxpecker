@@ -6,8 +6,10 @@ Graph established).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from .. import config
 from .schema import LIFECYCLE_CATEGORIES, Category, NoteStatus
 from .store import NotebookStore, NotFoundError, NotebookValidationError
 from .technique_kb import TechniqueKB
@@ -16,11 +18,34 @@ DIGEST_RECENT = 12
 DIGEST_MAX_LINES = 30
 
 
+def _owner_of(engagement_dir: Path) -> str:
+    """Who owns this engagement, for technique-KB scoping (AGENT_ARCHITECTURE.md §14.1 B).
+
+    Mirrors `web/engagement_access.py`'s `engagement_owner()` (same default-on-absence rule) by
+    reading `roe.json` directly rather than importing it: the notebook is used from the CLI and
+    the MCP tool server too, neither of which should have to pull in the web layer just to find
+    out whose KB to use.
+    """
+    roe_path = Path(engagement_dir) / "roe.json"
+    try:
+        roe = json.loads(roe_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return config.WEB_UI_DEFAULT_ACCOUNT
+    owner = roe.get("owner") if isinstance(roe, dict) else None
+    return owner if isinstance(owner, str) and owner else config.WEB_UI_DEFAULT_ACCOUNT
+
+
 class NotebookService:
     def __init__(self, engagement_dir: Path, *, kb: TechniqueKB | None = None):
         self.store = NotebookStore(engagement_dir)
         self.engagement_id = Path(engagement_dir).name
-        self.kb = kb if kb is not None else TechniqueKB()
+        # §14.1 B: the technique KB is scoped to whichever account owns this engagement, not the
+        # single global file — otherwise build_context_block()'s every-turn semantic_recall()
+        # call would hand one account's past techniques to another account's run (§5.3). The
+        # `kb=` seam above is untouched so tests can still inject a throwaway KB directly.
+        self.kb = kb if kb is not None else TechniqueKB(
+            db_path=config.technique_kb_path_for(_owner_of(engagement_dir))
+        )
 
     # -- mutations the agent calls -------------------------------------------------------------
 

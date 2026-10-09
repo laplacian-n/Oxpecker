@@ -665,12 +665,16 @@ class AgentLoop:
             # M4.5: mark the session tainted so the broker escalates subsequent
             # beyond-passive-recon actions to human approval for a bounded window — stdlib-only
             # import, safe on plain system Python (see broker/taint.py's own docstring).
-            from .broker.taint import TaintStore
+            from .broker.taint import ENGAGEMENT_SHARED_TAINT_SOURCES, TaintStore
 
-            TaintStore(self.session_id).mark(
+            # §14.1 C: a flagged tool whose vector is engagement-shared state (the browser
+            # profile) escalates taint to the whole engagement, so a sibling worker sharing that
+            # profile is scrutinised too; a session-local read stays on this session.
+            TaintStore(self.session_id, engagement_id=self.engagement_id).mark(
                 reason=", ".join(scan_result.reasons),
                 verdict=scan_result.verdict,
                 source=tool_name,
+                shared=tool_name in ENGAGEMENT_SHARED_TAINT_SOURCES,
             )
 
         if tool_name not in BROKER_MEDIATED_TOOLS:

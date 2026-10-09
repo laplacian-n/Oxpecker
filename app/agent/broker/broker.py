@@ -386,7 +386,12 @@ class Broker:
         # module's docstring) gets escalated to human approval for anything beyond passive
         # recon, for a bounded window — not a precise per-argument taint trace (not
         # observable), a deliberately conservative session-wide precaution instead.
-        tainted, taint_info = TaintStore(request.session_id).is_tainted()
+        # engagement_id passed so the check also sees an engagement-scoped taint (§14.1 C): a
+        # sibling worker that tainted the shared browser profile escalates this session too, even
+        # though this session's own record is clean.
+        tainted, taint_info = TaintStore(
+            request.session_id, engagement_id=request.engagement_id
+        ).is_tainted()
         taint_escalation = tainted and action_class not in SAFE_WHILE_TAINTED
         insecure_tls = action_class == "http_recon_insecure"
         if (

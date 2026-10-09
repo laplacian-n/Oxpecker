@@ -22,7 +22,6 @@ same out-of-band mode. One `/api/approvals` surface handles both.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import queue
@@ -43,8 +42,10 @@ from .. import config
 from .. import session as session_mod
 from ..broker.approval_queue import ApprovalQueue
 from ..broker.consult_queue import ConsultQueue
+from ..engagement.event_log import EngagementEventLog
 from ..engagement.intake import EngagementIntake, IntakeValidationError, create_engagement
 from ..engagement.store import EngagementStore
+from . import engagement_access
 from ..findings.model import FindingNotFoundError, FindingsStore
 from ..hypothesis_graph.service import HypothesisGraphService
 from ..hypothesis_graph.store import ConflictError, GraphValidationError, NotFoundError
@@ -95,6 +96,91 @@ class SessionHandle:
 _sessions: dict[str, SessionHandle] = {}
 _approval_queue = ApprovalQueue()
 _consult_queue = ConsultQueue()
+
+# One EngagementEventLog per engagement_id, created on first append. A dict guarded by a lock so
+# two concurrent requests for the same engagement share one log object (and therefore one
+# process-local view) rather than racing to open two — the log's own on-disk append is already
+# cross-process safe, this just avoids churning connections.
+_event_logs: dict[str, EngagementEventLog] = {}
+_event_logs_lock = threading.Lock()
+
+
+def _engagement_event_log(engagement_id: str, *, create: bool) -> EngagementEventLog | None:
+    """The engagement's event log. With create=False, returns None when the engagement has
+    emitted nothing yet (no events.db), so a read does not bring a log into existence as a side
+    effect — the same don't-create-on-a-GET guard the hypothesis-graph and notebook GETs use."""
+    with _event_logs_lock:
+        log_obj = _event_logs.get(engagement_id)
+        if log_obj is not None:
+            return log_obj
+        engagement_dir = config.ENGAGEMENTS_ROOT / engagement_id
+        log_obj = (
+            EngagementEventLog(engagement_dir) if create
+            else EngagementEventLog.open_if_exists(engagement_dir)
+        )
+        if log_obj is not None:
+            _event_logs[engagement_id] = log_obj
+        return log_obj
+
+
+def _compose_sinks(*sinks):
+    """Fan one event out to several callables; one sink raising never robs the others. The
+    session queue and the engagement log are both fed from the driver's single `on_event`."""
+    def composed(event: dict) -> None:
+        for s in sinks:
+            try:
+                s(event)
+            except Exception:  # noqa: BLE001
+                log.warning("an event sink raised", exc_info=True)
+    return composed
+
+
+def _engagement_event_sink(engagement_id: str):
+    """A callable that appends a pipeline event to this engagement's event log. The driver's own
+    event dicts carry a `type`; it becomes the log `kind`, the rest becomes the payload. Until
+    the wave model (§2.5) emits the typed §4.2 kinds directly, these land on the projection's raw
+    timeline rather than a typed slice — recorded and replayable, not interpreted — which is the
+    honest state of a pipe that exists before all its producers do."""
+    def sink(event: dict) -> None:
+        try:
+            kind = event.get("type", "pipeline_event")
+            payload = {k: v for k, v in event.items() if k != "type"}
+            _engagement_event_log(engagement_id, create=True).append(kind, payload)
+        except Exception:  # noqa: BLE001 - a telemetry append must never take down a run
+            log.warning("failed to append pipeline event to the engagement log", exc_info=True)
+
+    return sink
+
+
+def _authorize_engagement_read(request: Request, engagement_id: str) -> None:
+    """The §5.3 account boundary for every engagement read. Raises 404 when there is no such
+    engagement (so another account's engagement is not even confirmed to exist), 403 when the
+    caller's account does not own it. Called by both new endpoints, on connect and — because a
+    reconnect is just another GET — again on resume, which is what `CLIENT_UI_DESIGN.md` §4.1.2
+    requires: a reconnect with a `Last-Event-ID` for an engagement the caller no longer owns is
+    refused, not resumed."""
+    account = engagement_access.resolve_account(_presented_key(request))
+    decision = engagement_access.owns(account, engagement_id)
+    if decision is None:
+        raise HTTPException(404, f"no engagement {engagement_id!r}")
+    if not decision:
+        raise HTTPException(403, f"engagement {engagement_id!r} belongs to another account")
+
+
+def _check_api_version(request: Request) -> None:
+    """§4.3: the client sends its API version; a server that cannot serve it says so plainly and
+    the client refuses to run, rather than an old client half-working against a new server. The
+    major version is the compatibility unit. Absent (an older client, or a test) is allowed, so
+    this is additive — enforcement begins the moment a client actually declares a version."""
+    declared = request.headers.get("x-api-version") or request.query_params.get("api_version")
+    if not declared:
+        return
+    if declared.split(".")[0] != API_VERSION.split(".")[0]:
+        raise HTTPException(
+            409,
+            f"client API version {declared} is incompatible with server {API_VERSION}; "
+            "this endpoint will not serve a different major version",
+        )
 
 
 def _make_web_confirm_fn(session_id: str):
@@ -180,11 +266,27 @@ def _web_ui_key() -> str | None:
     return None
 
 
+def _presented_key(request: Request) -> str:
+    """The key the caller supplied — the Bearer header, or the `?key=` query param that
+    EventSource must fall back to because it cannot set headers."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.removeprefix("Bearer ").strip()
+    return request.query_params.get("key", "")
+
+
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
-    """Gates every /api/* route behind config.WEB_UI_API_KEY_FILE, when it exists — unset (the
-    default) means unauthenticated, exactly Phase 1's original loopback-is-the-boundary posture,
-    so every existing test (none of which send an Authorization header) keeps passing unchanged.
+    """Gates every /api/* route behind the configured accounts, when any exist — none configured
+    (no key file, no accounts file) means unauthenticated, exactly Phase 1's original
+    loopback-is-the-boundary posture, so every existing test (none of which send an Authorization
+    header) keeps passing unchanged.
+
+    Validity is decided by `engagement_access.resolve_account`, which accepts the single
+    `WEB_UI_API_KEY_FILE` key *and* any key listed in a `web_ui_accounts.json` — so a second
+    account's valid key reaches its route (where the per-engagement owner check in §5.3 decides
+    what it may read) instead of being turned away at the door as if it were a bad key. The
+    single-key and no-key cases are unchanged.
 
     The static "/" page and its assets are never gated — the page shell itself carries no data,
     every real action goes through /api/*, and gating "/" too would need a full login redirect
@@ -193,14 +295,11 @@ async def require_api_key(request: Request, call_next):
 
     EventSource (the SSE stream) can't set custom headers, so its one route additionally accepts
     the key as a `?key=` query param — a deliberate, narrow exception, not a general bypass (a
-    bearer header still works there too; the middleware checks both).
+    bearer header still works there too; `_presented_key` checks both).
     """
-    key = _web_ui_key()
-    if key is None or not request.url.path.startswith("/api/"):
+    if not engagement_access.valid_accounts() or not request.url.path.startswith("/api/"):
         return await call_next(request)
-    auth = request.headers.get("authorization", "")
-    supplied = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else request.query_params.get("key", "")
-    if not hmac.compare_digest(supplied or "", key):
+    if engagement_access.resolve_account(_presented_key(request)) is None:
         return JSONResponse({"detail": "missing or invalid API key"}, status_code=401)
     return await call_next(request)
 
@@ -430,10 +529,9 @@ async def websocket_events(websocket: WebSocket, session_id: str):
     """Bidirectional WebSocket for Electron/desktop clients. Sends the same events as the SSE
     endpoint, and accepts JSON commands: {"type": "message", "content": "..."} to send a chat
     message, {"type": "steer", "message": "..."} to steer a running task."""
-    key = _web_ui_key()
-    if key is not None:
+    if engagement_access.valid_accounts():
         supplied = websocket.query_params.get("key", "")
-        if not hmac.compare_digest(supplied or "", key):
+        if engagement_access.resolve_account(supplied) is None:
             await websocket.close(code=4001, reason="missing or invalid API key")
             return
 
@@ -527,7 +625,7 @@ def resolve_consult(request_id: str, req: ConsultResolveRequest) -> dict:
 
 
 @app.post("/api/engagements")
-def create_engagement_endpoint(req: CreateEngagementRequest) -> dict:
+def create_engagement_endpoint(req: CreateEngagementRequest, request: Request) -> dict:
     now = time.time()
     intake = EngagementIntake(
         engagement_id=req.engagement_id,
@@ -546,6 +644,16 @@ def create_engagement_endpoint(req: CreateEngagementRequest) -> dict:
     except IntakeValidationError as e:
         raise HTTPException(400, str(e)) from e
 
+    # §5.3: an owner on every engagement. The creator owns what they create — resolved from the
+    # key on this request, which is the single default operator unless a multi-account map is
+    # configured. Written into roe.json (where engagement_access.engagement_owner reads it) right
+    # after create_engagement, so a freshly made engagement is owner-filtered from its first read.
+    owner = engagement_access.resolve_account(_presented_key(request)) or config.WEB_UI_DEFAULT_ACCOUNT
+    roe_path = eng_dir / "roe.json"
+    roe = json.loads(roe_path.read_text())
+    roe["owner"] = owner
+    roe_path.write_text(json.dumps(roe, indent=2))
+
     # roe.json/scope.txt/deny.txt alone give the *policy* the pipeline can use — the
     # orchestrator plans work from EngagementStore assets, a separate structure this endpoint
     # didn't create at all until found live: an engagement made through this form had zero
@@ -558,7 +666,7 @@ def create_engagement_endpoint(req: CreateEngagementRequest) -> dict:
         if "/" not in target:
             store.upsert_asset("host", target)
 
-    return {"engagement_id": req.engagement_id, "engagement_dir": str(eng_dir)}
+    return {"engagement_id": req.engagement_id, "engagement_dir": str(eng_dir), "owner": owner}
 
 
 @app.get("/api/engagements")
@@ -580,6 +688,84 @@ def list_engagements() -> list[dict]:
                 "allowed_action_classes": roe.get("allowed_action_classes", []),
             })
     return out
+
+
+@app.get("/api/engagements/{engagement_id}/snapshot")
+def engagement_snapshot(engagement_id: str, request: Request, at: int | None = None) -> dict:
+    """The read-model projection (§4.2) as of sequence number `at` (default: the latest), so a
+    new window does not replay an eight-hour engagement from zero, and the time scrubber (§6.5)
+    can ask for the state at an earlier point. §5.3-filtered like every read; §4.3 version-gated.
+
+    Empty (never 404 for an existing engagement) when nothing has been emitted yet, so a surface
+    can render a clean empty state — the same not-created-on-a-GET guard the other engagement
+    GETs use."""
+    _check_api_version(request)
+    _authorize_engagement_read(request, engagement_id)
+    # The orchestration tier (§2.6.2, set per engagement) rides along on the snapshot so the client
+    # can offer exactly the surfaces that tier has (§8) — a surface with nothing in it is worse
+    # than one that is not offered, and the client needs the tier to decide which to show.
+    from .. import tiers
+    tier = tiers.engagement_tier(engagement_id)
+    event_log = _engagement_event_log(engagement_id, create=False)
+    if event_log is None:
+        from ..engagement.event_log import project
+        return {**project([], at_seq=0, latest_seq=0), "tier": tier}
+    return {**event_log.snapshot(at_seq=at), "tier": tier}
+
+
+async def _sse_event_stream(engagement_id: str, after: int, is_disconnected, *, poll: float = 0.1):
+    """The SSE body for `engagement_events`, factored out so the catch-up/resume/tail logic can
+    be tested directly — Starlette's TestClient buffers a whole response before returning, so an
+    infinite SSE generator cannot be consumed through it. `is_disconnected` is an async callable
+    (the live request's `request.is_disconnected` in production, a fake in the test) and is the
+    only thing that ends the loop, which is the correct lifetime: the stream lives as long as the
+    client is connected.
+
+    A control event goes first so the client can state the gap (§5.5 "you missed N events")
+    without a second request. Then everything after `after` is replayed (a fresh subscriber uses
+    0 — the whole log) and new events are tailed as they are appended, from this process or
+    another; each carries its sequence number as the SSE `id:`, which the browser echoes back as
+    `Last-Event-ID` on reconnect."""
+    event_log = _engagement_event_log(engagement_id, create=False)
+    latest = event_log.latest_seq() if event_log is not None else 0
+    missed = max(latest - after, 0) if after else 0
+    hello = {"seq": 0, "kind": "subscription_resumed",
+             "payload": {"resumed_after": after, "latest_seq": latest, "missed": missed}}
+    yield f"event: control\ndata: {json.dumps(hello)}\n\n"
+
+    sent = after
+    while True:
+        if event_log is None:  # the log may not exist yet at connect; pick it up once it does
+            event_log = _engagement_event_log(engagement_id, create=False)
+        if event_log is not None:
+            for ev in event_log.read_since(sent):
+                sent = ev["seq"]
+                yield f"id: {ev['seq']}\ndata: {json.dumps(ev)}\n\n"
+        if await is_disconnected():
+            break
+        await asyncio.sleep(poll)  # poll: sees a cross-process append within one slice
+
+
+@app.get("/api/engagements/{engagement_id}/events")
+async def engagement_events(engagement_id: str, request: Request, last_event_id: int | None = None):
+    """The engagement-level event stream (`CLIENT_UI_DESIGN.md` §4), Server-Sent Events.
+
+    One-way is all that is needed — commands go over REST — and `EventSource` gives reconnection
+    and `Last-Event-ID` for free. On connect (and, since a reconnect is just another GET, again
+    on resume) the subscription is authorised against the caller's account — §4.1.2's
+    refuse-don't-resume boundary, enforced here *before* the stream body begins, so a reconnect
+    carrying a `Last-Event-ID` for an engagement the caller no longer owns is refused, not
+    resumed."""
+    _check_api_version(request)
+    _authorize_engagement_read(request, engagement_id)
+    # Last-Event-ID header wins (that is the browser's reconnect path); the query param is the
+    # explicit non-browser equivalent.
+    header_id = request.headers.get("last-event-id")
+    after = int(header_id) if header_id and header_id.isdigit() else (last_event_id or 0)
+    return StreamingResponse(
+        _sse_event_stream(engagement_id, after, request.is_disconnected),
+        media_type="text/event-stream",
+    )
 
 
 def _hypothesis_graph_dir(engagement_id: str) -> Path | None:
@@ -635,16 +821,22 @@ def notebook_overview(engagement_id: str) -> dict:
 
 
 @app.get("/api/technique-kb")
-def technique_kb() -> dict:
-    """The global cross-engagement technique library (docs/working-notebook-spec.md §7).
-    Not engagement-scoped — it's the operator's accumulated know-how."""
-    kb = TechniqueKB()
+def technique_kb(request: Request) -> dict:
+    """The cross-engagement technique library (docs/working-notebook-spec.md §7) — cross-
+    *engagement*, not cross-account: AGENT_ARCHITECTURE.md §14.1 B scopes it per account so one
+    operator's accumulated know-how is never handed to a different account (§5.3)."""
+    # resolve_account can only return None if the require_api_key middleware would already have
+    # 401'd the request before this handler ran — the fallback is defensive, not load-bearing.
+    account = engagement_access.resolve_account(_presented_key(request)) or config.WEB_UI_DEFAULT_ACCOUNT
+    kb = TechniqueKB(db_path=config.technique_kb_path_for(account))
     return {"techniques": kb.all(), "count": kb.count()}
 
 
 @app.delete("/api/technique-kb/{ordinal}")
-def technique_kb_forget(ordinal: int) -> dict:
-    return {"deleted": TechniqueKB().delete(ordinal)}
+def technique_kb_forget(ordinal: int, request: Request) -> dict:
+    account = engagement_access.resolve_account(_presented_key(request)) or config.WEB_UI_DEFAULT_ACCOUNT
+    kb = TechniqueKB(db_path=config.technique_kb_path_for(account))
+    return {"deleted": kb.delete(ordinal)}
 
 
 @app.post("/api/engagements/{engagement_id}/notebook/notes/{ordinal}/resolve")
@@ -765,7 +957,14 @@ def start_autonomous(session_id: str, req: AutonomousStartRequest) -> dict:
             # already carry their own "type" key (e.g. "phase_entered"), which would silently
             # clobber the outer "autonomous_event" envelope type if flattened together into one
             # dict. Found while wiring the frontend's dispatch, before it ever shipped.
-            on_event=lambda event: handle.push({"type": "autonomous_event", "event": event}),
+            #
+            # The same event also lands in the engagement-level event log (§4): the session queue
+            # is per-session and in-memory, the engagement log is the one ordered, persistent,
+            # engagement-wide stream every client surface subscribes to.
+            on_event=_compose_sinks(
+                lambda event: handle.push({"type": "autonomous_event", "event": event}),
+                _engagement_event_sink(req.engagement_id),
+            ),
         )
         handle.autonomous_driver = driver
         handle.autonomous_result = None

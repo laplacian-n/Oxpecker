@@ -7,6 +7,7 @@ Phase 1 was loopback-only, unauthenticated. Phase 2 (§6) turns on llama-server'
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -118,8 +119,35 @@ FINDINGS_DIR = STATE_DIR / "findings"
 EVAL_RESULTS_DIR = STATE_DIR / "eval_results"
 # The Working Notebook is per-engagement; `technique` notes also overflow into this ONE global
 # store so a reusable trick learned on engagement A is recallable on engagement B
-# (docs/working-notebook-spec.md §7). Not engagement-scoped on purpose.
+# (docs/working-notebook-spec.md §7).
+# AGENT_ARCHITECTURE.md §14.1 B: "not engagement-scoped on purpose" was fine while there was only
+# one account, but §5.3's rule ("the same account may share everything; a different account
+# nothing") makes a single global KB a cross-account leak the moment a second account exists —
+# NotebookService.build_context_block() calls semantic_recall() every turn, so account B's run
+# would get account A's past techniques auto-injected with no ask involved. The fix chosen there
+# is "scope the KB per account" (cheap, correct now), via technique_kb_path_for() below.
 TECHNIQUE_KB_PATH = STATE_DIR / "technique_kb.db"
+TECHNIQUE_KB_DIR = STATE_DIR / "technique_kb"
+
+
+def technique_kb_path_for(account: str) -> Path:
+    """The technique KB file for one account (§14.1 B).
+
+    The default account (`WEB_UI_DEFAULT_ACCOUNT`) is special-cased to the legacy
+    `TECHNIQUE_KB_PATH` — not `TECHNIQUE_KB_DIR / "local-operator.db"` — so the single operator's
+    existing KB (every technique saved before accounts existed) is still the file this resolves
+    to, rather than being silently orphaned under a new path the first time this runs.
+
+    Any other account gets its own file under `TECHNIQUE_KB_DIR`. The account id is attacker-
+    reachable indirectly (it comes from whoever owns an engagement, `roe.json`'s `owner` field —
+    see `web/engagement_access.py`), so it is sanitized rather than trusted as a path component:
+    anything that isn't alphanumeric/`-`/`_` is dropped, which in particular removes `/` and `\\`
+    and defeats a `../` traversal attempt without needing to special-case `..` itself.
+    """
+    if account == WEB_UI_DEFAULT_ACCOUNT:
+        return TECHNIQUE_KB_PATH
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", account) or "unknown"
+    return TECHNIQUE_KB_DIR / f"{safe}.db"
 
 # --- General-knowledge RAG (agent/knowledge_rag/) — GTFOBins/LOLBAS/PayloadsAllTheThings,
 # embedded offline, served by a dedicated CPU-only llama-server instance so it never competes
@@ -256,6 +284,17 @@ WORKSPACE_PREFIX = "agent-workspace-"
 WEB_UI_HOST = os.environ.get("AGENT_WEB_HOST", "127.0.0.1")
 WEB_UI_PORT = int(os.environ.get("AGENT_WEB_PORT", "8765"))
 WEB_UI_API_KEY_FILE = STATE_DIR / "web_ui_api_key.txt"
+# Optional multi-account key map for AGENT_ARCHITECTURE.md §5.3 ("one account may share
+# everything; a different account nothing"). A JSON object {account_id: api_key}. When it exists
+# it is the authority on which keys are valid and whose each one is, and the engagement event
+# stream (the largest read in the system) is owner-filtered against it. When it does NOT exist,
+# identity collapses to the single operator "local-operator" — the single-key and no-key cases
+# are unchanged, so the §5.3 boundary ships off by default and is enabled by writing this file.
+WEB_UI_ACCOUNTS_FILE = STATE_DIR / "web_ui_accounts.json"
+# The account every pre-§5.3 engagement and the single-key/no-key deployment belong to. An
+# engagement whose roe.json carries no "owner" is this operator's, so adding ownership did not
+# orphan a single existing engagement.
+WEB_UI_DEFAULT_ACCOUNT = "local-operator"
 WEB_UI_CORS_ORIGINS: list[str] = [
     o.strip() for o in os.environ.get("AGENT_WEB_CORS_ORIGINS", "").split(",") if o.strip()
 ]
