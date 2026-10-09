@@ -316,6 +316,43 @@ class AutonomousDriver:
                               scope_entries=self._scope_entries())
         return runner_for(self, phase)
 
+    def _proposer_model(self) -> str:
+        """The model the workers ran on — the proposer, for the finding gate's independence check
+        (§2.3). Read from roe.json's `model` (the engagement's model), defaulting to the registry's
+        default provider when the engagement named none. The verifier (roe.json `verifier.model`)
+        must be a different family from this; the gate enforces it."""
+        import json as _json
+
+        from ..llm import registry
+
+        roe_path = self.engagement_dir / "roe.json"
+        if roe_path.exists():
+            try:
+                model = _json.loads(roe_path.read_text()).get("model")
+                if model:
+                    return str(model)
+            except (OSError, ValueError):
+                pass
+        return registry.DEFAULT_PROVIDER
+
+    def _run_finding_gate(self) -> None:
+        """At the VALIDATION->REPORT boundary of a graph run, verify every candidate finding before
+        it can reach the report — the §8.6.5 #1 checkpoint, the one place a `confirmed_by: model`
+        finding cannot cross into a submission unseen. Best-effort on configuration: an engagement
+        with no verifier in roe.json leaves its findings model-confirmed (the human-review gate
+        still sits downstream), emitted rather than silently skipped; a verifier error on one
+        finding never sinks the run (the gate isolates it)."""
+        from .finding_gate import NoVerifierConfiguredError, build_finding_gate
+
+        try:
+            gate = build_finding_gate(self.engagement_id, proposer_model=self._proposer_model())
+        except NoVerifierConfiguredError:
+            self._emit("finding_gate_skipped", reason="no verifier configured in roe.json")
+            return
+        results = gate.run()
+        refuted = sum(1 for r in results if r.get("verdict") == "refuted")
+        self._emit("finding_gate_done", verified=len(results), refuted=refuted)
+
     def _advance_graph_phase(self, phase: str, reason_prefix: str) -> bool:
         """Advance a graph-mode phase explicitly: its orchestrator check_transition deliberately
         defers (a graph phase has no flat task list to read), so when the runner reports the wave
@@ -398,6 +435,11 @@ class AutonomousDriver:
                 new_phase = self.store.get_phase()["current_phase"]
                 phases_completed.append(phase)
                 self._emit("phase_advanced", from_phase=phase, to_phase=new_phase)
+                # §8.6.5 #1: in a graph run, verify candidate findings as VALIDATION hands off to
+                # REPORT — the one enforceable gate before a finding reaches a submission. Flat runs
+                # keep today's behaviour (the finding gate is a graph-tier, pre-report step).
+                if phase == "VALIDATION" and tiers.uses_graph("VALIDATION", self.tier):
+                    self._run_finding_gate()
 
             if not advanced and not production.made_progress:
                 reason = f"phase {phase} made no progress and is not ready to advance"
