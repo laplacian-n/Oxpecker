@@ -58,7 +58,7 @@ sudo chown -R oxpecker:oxpecker /opt/oxpecker /var/lib/oxpecker
 sudo -u oxpecker git clone <your-remote> /opt/oxpecker
 sudo -u oxpecker python3 -m venv /opt/oxpecker/.venv
 sudo -u oxpecker /opt/oxpecker/.venv/bin/pip install \
-    fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML pyseccomp
+    fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 mcp playwright pyseccomp
 ```
 
 `uvicorn[standard]` rather than plain `uvicorn`: the bare package has no WebSocket

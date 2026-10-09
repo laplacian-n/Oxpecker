@@ -26,14 +26,21 @@ from pathlib import Path
 _AGENT_DIR = Path(__file__).resolve().parent.parent
 _DEV_SERVER = _AGENT_DIR / "web" / "dev_server.py"
 
-# The entry points a documented install has to be able to start. dev_server is the desktop/server
-# backend; agent.main is the CLI runtime README calls the reference implementation of the safety
-# controls, so an install that cannot import it is a broken install even if the web UI comes up.
-ENTRY_POINTS = ("agent.main", "agent.web.dev_server")
+# EVERY shipped module, not a chosen few. An earlier version of this test named two entry
+# points, agent.main and agent.web.dev_server, and so declared fpdf2 and mcp "optional" -- while
+# agent/pipeline/executor.py imports findings.report (fpdf) at module scope and loop.py's
+# security tools reach security_mcp_server (mcp). The second CI run found all three. Picking a
+# subset of the surface is how a sufficiency test becomes a sufficiency-for-what test, so the
+# subset is gone: a documented install must import everything the package ships.
+#
+# Modules that guard their own optional import in a try/except are not exempted here, because
+# they do not fail -- the guard is what this exercises. seccomp/pyseccomp and
+# sentence_transformers are in that group, and stay blocked so the guards keep being tested.
 
 # pip distribution name -> the name you actually `import`. Only the ones that differ.
 _DIST_TO_MODULE = {
     "scikit-learn": "sklearn",
+    "fpdf2": "fpdf",
     "pyyaml": "yaml",
     "pillow": "PIL",
     "python-multipart": "multipart",
@@ -78,6 +85,21 @@ def third_party_modules() -> set[str]:
     return {m for m in mods if m not in sys.stdlib_module_names and m != "agent"}
 
 
+# Three modules cannot be imported in ANY environment, documented install or not: they do
+# `from mcp.server.mcpserver import MCPServer`, and no such path exists in the mcp SDK (1.28
+# has fastmcp, lowlevel, sse, stdio and no mcpserver). They have been this way since the commit
+# that first added app/, so these MCP servers have never started. security_mcp_server.py uses
+# the real `from mcp.server import FastMCP` and imports fine.
+#
+# They are listed rather than quietly excluded, and the second test below asserts the list is
+# EXACT: fix one and this test tells you to take it off the list, so the carve-out cannot
+# outlive the defect or grow to cover a new one.
+KNOWN_BROKEN_IMPORTS = {
+    "agent.dev_mcp_server",
+    "agent.mcp_tools_server",
+    "agent.oxpecker_control_mcp",
+}
+
 _PROBE = r'''
 import importlib, sys
 blocked = set(sys.argv[1].split(",")) - {""}
@@ -100,9 +122,20 @@ print("\n".join(failures))
 '''
 
 
-def _import_with_only(allowed_extra_blocked: set[str]) -> str:
+def shipped_modules() -> list[str]:
+    """Every importable module in the package, tests and __init__ aside."""
+    mods = []
+    for path in sorted(_AGENT_DIR.rglob("*.py")):
+        if path.name.startswith("test_") or path.name == "__init__.py":
+            continue
+        mods.append(".".join(path.relative_to(_AGENT_DIR.parent).with_suffix("").parts))
+    return mods
+
+
+def _import_with_only(allowed_extra_blocked: set[str], targets=None) -> str:
     proc = subprocess.run(
-        [sys.executable, "-c", _PROBE, ",".join(sorted(allowed_extra_blocked)), *ENTRY_POINTS],
+        [sys.executable, "-c", _PROBE, ",".join(sorted(allowed_extra_blocked)),
+         *(targets if targets is not None else shipped_modules())],
         cwd=str(_AGENT_DIR.parent), capture_output=True, text=True, timeout=180,
     )
     if proc.returncode != 0:
@@ -111,13 +144,16 @@ def _import_with_only(allowed_extra_blocked: set[str]) -> str:
 
 
 class DocumentedDependenciesSuffice(unittest.TestCase):
-    def test_the_documented_list_is_enough_to_import_the_entry_points(self):
+    def test_the_documented_list_is_enough_to_import_every_shipped_module(self):
         undocumented = third_party_modules() - documented_modules()
-        failures = _import_with_only(undocumented)
+        failures = "\n".join(
+            line for line in _import_with_only(undocumented).splitlines()
+            if line.split(":")[0] not in KNOWN_BROKEN_IMPORTS
+        )
         self.assertEqual(
             failures, "",
             "An install that follows the documented `pip install` line cannot import these "
-            f"entry points.\n{failures}\n\nThe list is in dev_server.py's prerequisites block, "
+            f"shipped modules.\n{failures}\n\nThe list is in dev_server.py's prerequisites block, "
             "and Electron's hint plus docs/DEPLOY_UBUNTU.md must be updated with it — two other "
             "tests enforce that those three agree.",
         )
@@ -130,11 +166,23 @@ class DocumentedDependenciesSuffice(unittest.TestCase):
         """
         needed = "cryptography"
         self.assertIn(needed, documented_modules(), "fixture assumption changed")
-        failures = _import_with_only({needed})
+        failures = _import_with_only({needed}, targets=["agent.main", "agent.web.dev_server"])
         self.assertNotEqual(
             failures, "",
             f"blocking {needed!r} did not break any entry point, so the probe is not blocking "
             "anything and the sufficiency test above proves nothing",
+        )
+
+
+class KnownBrokenListIsExact(unittest.TestCase):
+    def test_every_listed_module_is_still_broken(self):
+        """A carve-out that outlives its defect hides the next one that lands in the same place."""
+        failures = _import_with_only(set(), targets=sorted(KNOWN_BROKEN_IMPORTS))
+        still_broken = {line.split(":")[0] for line in failures.splitlines() if line.strip()}
+        self.assertEqual(
+            still_broken, KNOWN_BROKEN_IMPORTS,
+            "KNOWN_BROKEN_IMPORTS no longer matches reality. A module that now imports must be "
+            "removed from the set so the sufficiency test starts covering it again.",
         )
 
 
