@@ -4,6 +4,7 @@ import { EngagementSubscription } from "./subscription";
 import { Chat } from "./surfaces/Chat";
 import { FlowView } from "./surfaces/FlowView";
 import { Placeholder } from "./surfaces/Placeholder";
+import { Work } from "./surfaces/Work";
 
 // HashRouter, not BrowserRouter: the built client is loaded from a file:// URL by the Electron
 // shell and served as a static bundle by the Python server, neither of which does server-side
@@ -55,7 +56,12 @@ function FlowRoute() {
   return <SurfaceFrame><FlowView subscription={useRouteSubscription()} /></SurfaceFrame>;
 }
 function WorkRoute() {
-  return <SurfaceFrame><Placeholder name="Work" subscription={useRouteSubscription()} /></SurfaceFrame>;
+  const { engagementId } = useParams();
+  return (
+    <SurfaceFrame>
+      <Work subscription={useRouteSubscription()} engagementId={engagementId ?? ""} />
+    </SurfaceFrame>
+  );
 }
 function BrowserRoute() {
   return <SurfaceFrame><Placeholder name="Browser" subscription={useRouteSubscription()} /></SurfaceFrame>;
