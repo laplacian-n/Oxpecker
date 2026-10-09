@@ -77,6 +77,62 @@ class HighTierDriverGraphTest(unittest.TestCase):
         self.assertIn(("ANALYSIS", "VALIDATION"), hops)
         self.assertIn(("VALIDATION", "REPORT"), hops)
 
+    def test_the_finding_gate_runs_at_validation_to_report_only(self):
+        driver = AutonomousDriver(
+            engagement_id=self.engagement_id, profile_name="web_api", mode="autonomous",
+            session_id="s", on_event=self.events.append, tier="high",
+        )
+        real_runner_for = driver._runner_for_phase
+
+        def fake_runner_for(phase):
+            if tiers.uses_graph(phase, driver.tier):
+                return _FakeGraphRunner(driver, phase)
+            return real_runner_for(phase)
+
+        gate_calls = []
+        with patch.object(driver, "_runner_for_phase", side_effect=fake_runner_for), \
+             patch.object(driver, "_run_finding_gate", side_effect=lambda: gate_calls.append(True)):
+            driver.run()
+        # the gate fires exactly once — on the VALIDATION->REPORT hand-off, not on RECON/ANALYSIS
+        self.assertEqual(len(gate_calls), 1)
+
+    def test_run_finding_gate_skips_cleanly_when_no_verifier_is_configured(self):
+        (self.tmp / self.engagement_id).mkdir(parents=True, exist_ok=True)
+        (self.tmp / self.engagement_id / "roe.json").write_text('{"tier": "high"}')  # no verifier
+        driver = AutonomousDriver(
+            engagement_id=self.engagement_id, profile_name="web_api", mode="autonomous",
+            session_id="s", on_event=self.events.append, tier="high",
+        )
+        driver._run_finding_gate()
+        self.assertTrue(any(e["type"] == "finding_gate_skipped" for e in self.events))
+
+    def test_run_finding_gate_emits_counts_from_the_gate(self):
+        driver = AutonomousDriver(
+            engagement_id=self.engagement_id, profile_name="web_api", mode="autonomous",
+            session_id="s", on_event=self.events.append, tier="high",
+        )
+
+        class _FakeGate:
+            def run(self_inner):
+                return [{"verdict": "refuted"}, {"verdict": "could_not_refute"}]
+
+        with patch("agent.pipeline.finding_gate.build_finding_gate", return_value=_FakeGate()):
+            driver._run_finding_gate()
+        done = next(e for e in self.events if e["type"] == "finding_gate_done")
+        self.assertEqual((done["verified"], done["refuted"]), (2, 1))
+
+    def test_proposer_model_reads_roe_or_defaults(self):
+        from ..llm import registry
+
+        driver = AutonomousDriver(
+            engagement_id=self.engagement_id, profile_name="web_api", mode="autonomous",
+            session_id="s", tier="high",
+        )
+        self.assertEqual(driver._proposer_model(), registry.DEFAULT_PROVIDER)  # no roe model
+        (self.tmp / self.engagement_id).mkdir(parents=True, exist_ok=True)
+        (self.tmp / self.engagement_id / "roe.json").write_text('{"model": "openai/gpt-4o-mini"}')
+        self.assertEqual(driver._proposer_model(), "openai/gpt-4o-mini")
+
     def test_a_medium_engagement_never_builds_a_graph_runner(self):
         # The same driver at a flat tier must select flat runners for every phase — the tier is the
         # only thing that changes, and it changes only the runner.
