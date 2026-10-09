@@ -73,6 +73,36 @@ class VerifyOnceIsExecVerifiedAndCached(unittest.TestCase):
         self.assertEqual(seen, [availability.TIER_BUBBLEWRAP, availability.TIER_WSL2])
 
 
+class StartupCheckSharesTheCacheWithTheCommandPath(unittest.TestCase):
+    """The startup check and the per-command check must be the same exec, not two.
+
+    dev_server's main() verifies the tier at startup so a hardened unit shows up in the startup
+    log instead of in a tool error twenty minutes later. If it called resolve_tier(deep=True)
+    directly -- the obvious spelling -- it would not populate the cache, and the first
+    run_command would exec a second sandboxed /bin/true for an answer already known.
+    """
+
+    def setUp(self):
+        availability.reset_verification_cache()
+        self.addCleanup(availability.reset_verification_cache)
+
+    def test_a_startup_verification_leaves_nothing_for_the_first_command_to_exec(self):
+        deep_calls = []
+
+        def counting_probe(tier, deep=False):
+            if deep:
+                deep_calls.append(tier)
+            return True, "ok"
+
+        with patch.object(availability, "probe", side_effect=counting_probe):
+            availability.verify_once(availability.TIER_BUBBLEWRAP)   # startup
+            availability.verify_once(availability.TIER_BUBBLEWRAP)   # first command
+            availability.verify_once(availability.TIER_BUBBLEWRAP)   # every command after
+
+        self.assertEqual(deep_calls, [availability.TIER_BUBBLEWRAP],
+                         f"the sandbox was exec-verified {len(deep_calls)} times, want 1")
+
+
 class RunCommandRefusesWhenVerificationFails(unittest.TestCase):
     """The half that matters to an operator: the refusal reaches the model as a tool error that
     names the cause, instead of a raw `bwrap: No permissions...` from deep inside subprocess."""

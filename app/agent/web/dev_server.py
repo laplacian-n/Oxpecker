@@ -3440,6 +3440,34 @@ def main():
 
     _check_bind_is_safe(parser, args)
 
+    # Surface a disabled sandbox in the startup log, before any command runs. The per-command
+    # check added alongside this refuses correctly, but an operator reading `journalctl -u
+    # oxpecker` after hardening a unit should not have to wait for a model to call run_command
+    # to learn that the sandbox is gone -- by then the only trace is a tool error inside a
+    # session. Found by walking docs/DEPLOY_UBUNTU.md under `systemd-run --user -p
+    # RestrictNamespaces=yes`, where the server started clean and reported bubblewrap
+    # everywhere.
+    #
+    # This goes through verify_once rather than resolve_tier(deep=True) so the exec is shared
+    # with the per-command check: one sandboxed /bin/true for the whole process, not one here
+    # and another on the first tool call.
+    #
+    # Non-fatal on purpose. `direct` is a legitimate operator choice, and a server that refuses
+    # to start would also refuse the sessions that never run a command at all. The refusal that
+    # matters happens where the risk is, at the command.
+    if platform.system() == "Linux":
+        _sandbox_ok, _sandbox_reason = _isolation.verify_once(_isolation.TIER_BUBBLEWRAP)
+        if _sandbox_ok:
+            log.info("Sandbox check at startup: bubblewrap %s", _sandbox_reason)
+        else:
+            log.warning(
+                "SANDBOX UNAVAILABLE: bubblewrap failed when actually exercised: %s. If this "
+                "unit was just hardened with systemd directives (RestrictNamespaces=, "
+                "PrivateUsers=yes), that is almost certainly why -- see the systemd section of "
+                "docs/DEPLOY_UBUNTU.md. The server will still start, and run_command will "
+                "refuse rather than run outside the sandbox.", _sandbox_reason,
+            )
+
     # Create data directory
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
