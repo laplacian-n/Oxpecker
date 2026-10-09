@@ -211,6 +211,26 @@ CREATE TABLE IF NOT EXISTS experiments (
     FOREIGN KEY (hypothesis_id) REFERENCES hypotheses(hypothesis_id)
 );
 
+CREATE TABLE IF NOT EXISTS experiment_claims (
+    claim_id      TEXT PRIMARY KEY,
+    hypothesis_id TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    worker        TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'claimed',  -- claimed | released | completed
+    claimed_at    REAL NOT NULL,
+    released_at   REAL,
+    FOREIGN KEY (hypothesis_id) REFERENCES hypotheses(hypothesis_id)
+);
+-- AGENT_ARCHITECTURE.md §14.1 E′ / §2.5: a worker claims an EXPERIMENT — (hypothesis, method) —
+-- not a hypothesis, because one wave dispatches several workers against one hypothesis with
+-- different methods. This partial unique index is the atomic serialization point: at most one
+-- *active* claim per (hypothesis, method), so two workers racing the same experiment resolve to
+-- exactly one winner (the loser's INSERT raises IntegrityError), the same assigned-by-the-write
+-- discipline the event-log sequence and the spend reservation use. Partial (status='claimed') so
+-- a released or completed claim does not block a later retry of that method.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_active_claim
+    ON experiment_claims(hypothesis_id, method) WHERE status = 'claimed';
+
 CREATE TABLE IF NOT EXISTS observations (
     observation_id       TEXT PRIMARY KEY,
     experiment_id        TEXT NOT NULL,
