@@ -176,7 +176,13 @@ async function startEverything() {
     spawnProc('dev_server', py, devArgs);
   }
   const okDev = await waitForHealth(devUrl, 'Oxpecker backend');
-  if (!okDev) return fail('The Oxpecker backend (dev_server.py) did not start. Is Python installed? Try: py -m pip install fastapi uvicorn sse-starlette python-multipart scikit-learn numpy');
+  // Kept in sync with dev_server.py's own Prerequisites docstring and docs/DEPLOY_UBUNTU.md.
+  // This line named `sse-starlette` and `python-multipart` (never imported anywhere in this
+  // repo's history — grep found nothing, `git log -S` found nothing) and omitted `cryptography`
+  // (a real, load-bearing import since agent/evidence/store.py landed) and `uvicorn[standard]`
+  // (the bare package has no WebSocket implementation). A user who hit this dialog and followed
+  // it verbatim would still not have a working venv.
+  if (!okDev) return fail('The Oxpecker backend (dev_server.py) did not start. Is Python installed? Try: py -m pip install fastapi "uvicorn[standard]" scikit-learn numpy cryptography pydantic');
 
   setStatus('Ready');
   mainWindow.loadURL(appUrl);
