@@ -701,11 +701,16 @@ def engagement_snapshot(engagement_id: str, request: Request, at: int | None = N
     GETs use."""
     _check_api_version(request)
     _authorize_engagement_read(request, engagement_id)
+    # The orchestration tier (§2.6.2, set per engagement) rides along on the snapshot so the client
+    # can offer exactly the surfaces that tier has (§8) — a surface with nothing in it is worse
+    # than one that is not offered, and the client needs the tier to decide which to show.
+    from .. import tiers
+    tier = tiers.engagement_tier(engagement_id)
     event_log = _engagement_event_log(engagement_id, create=False)
     if event_log is None:
         from ..engagement.event_log import project
-        return project([], at_seq=0, latest_seq=0)
-    return event_log.snapshot(at_seq=at)
+        return {**project([], at_seq=0, latest_seq=0), "tier": tier}
+    return {**event_log.snapshot(at_seq=at), "tier": tier}
 
 
 async def _sse_event_stream(engagement_id: str, after: int, is_disconnected, *, poll: float = 0.1):
