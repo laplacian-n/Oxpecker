@@ -61,27 +61,47 @@ rules they must follow — is recorded in [docs/TOOLING_ROADMAP.md](docs/TOOLING
 
 The [`app/`](app/) directory contains the **runnable, self-hosted desktop version** of Oxpecker — a packaged Electron application that drives a **local model** (Qwen 4B via llama.cpp, CUDA) end-to-end on a single machine, with a built-in web UI, a live hypothesis graph, a notebook, a findings tracker, and a memory-mapped 547K-chunk RAG. It is the practical, installable counterpart to the research pipeline below: the training work produces the model; `app/` is where the agent is actually operated against authorized lab targets.
 
-- **Backend** — FastAPI agent server (`app/agent/web/dev_server.py`): a destructive-command denylist, structured HTTP tooling, auto-compaction, and **per-session** hypothesis graph / notebook / findings. Its scope check is **nominal only** and it does **not** sandbox command execution or write an audit log — see the warning below.
+- **Backend** — FastAPI agent server (`app/agent/web/dev_server.py`): broker-mediated network tools, sandboxed command execution, a hash-chained audit entry per tool call, a destructive-command denylist, structured HTTP tooling, auto-compaction, and **per-session** hypothesis graph / notebook / findings. The remaining gaps are listed below.
 - **Desktop shell** — Electron + electron-builder with GitHub auto-update (`app/electron/`); one-click installer, no manual dependency setup.
 - **MCP servers** — a dev/debug MCP and a control MCP for driving the live agent (`app/.mcp.json`).
 - **Install** — download the latest `Oxpecker-Setup-*.exe` from [Releases](../../releases), or run from source per [`app/README.md`](app/README.md).
 
-> ### ⚠ The desktop app does not currently have the safety controls described below
+> ### The desktop app's safety posture, stated precisely
 >
-> An audit of `dev_server.py` found that the app enforces a destructive-command denylist, but
-> **does not** sandbox command execution (it calls `subprocess.run(..., shell=True)` on the
-> host), **does not** write an audit log, and **does not** route tool calls through the broker.
-> Its scope check is nominal: it fails open when the allowlist is empty, appends any URL found
-> in an operator message to the allowlist automatically, and compares hosts by substring. The
-> `isolation_tier` field reports `"bubblewrap"` while nothing reads it at execution time.
+> An earlier audit of `dev_server.py` found that the app ran `subprocess.run(..., shell=True)`
+> on the host, wrote no audit log, did not route tool calls through the broker, and had a scope
+> check that failed open on an empty allowlist, matched hosts by substring, and appended any URL
+> found in an operator message to the allowlist. **Those are fixed.** What is true now:
 >
-> The controls are real in the research runtime (`agent/`, via `agent/main.py`). Bringing the
-> app to parity is the current work; the finding and the plan are in
-> [docs/OBSERVABILITY_PLAN.md](docs/OBSERVABILITY_PLAN.md).
+> - **Command execution is sandboxed.** `run_command` builds an argv — no shell — and runs
+>   through `agent/tools/run_command.py`, the same path the CLI uses, inside the isolation tier
+>   the operator selected. `resolve_tier` never silently downgrades: a tier that cannot run is
+>   an error, and `direct` has to be chosen explicitly. On a non-Linux host only the `wsl2` tier
+>   is offered; running unsandboxed on the Windows host is not a fallback.
+> - **Scope is enforced by the broker's own matcher** (`agent/web/scope.py` →
+>   `broker/scope_check.validate_target`): exact hostname matching, CIDR for IP literals, deny
+>   rules evaluated before allow rules, and a terminal deny when nothing matches — so it fails
+>   closed by construction rather than by a flag.
+> - **Every tool call writes an audit entry**, hash-chained; broker-mediated tools write theirs
+>   inside the broker, so one action produces one entry.
+> - **Injection screening changes what the agent may do next**, rather than only raising a flag:
+>   flagged output marks the session tainted, and the broker gates the next non-passive action.
 >
-> **Run the desktop app on a disposable machine or VM until this lands.**
+> Two limits remain, and they are design positions rather than oversights:
+>
+> - **`http_request` does not pin DNS.** `validate_target()` returns the IP the caller should
+>   connect to, but `http_request` re-resolves the hostname, so the pinned IP is checked and then
+>   discarded — a rebinding window between check and connection. Tracked as the `http_request`
+>   work in [docs/TOOLING_ROADMAP.md](docs/TOOLING_ROADMAP.md).
+> - **`run_command` is deliberately not broker-mediated.** Local execution is gated by the
+>   sandbox and its preflight instead, so the broker's per-action-class cooldown and approval
+>   path do not apply to it. `read_file`, `write_file` and the `record_*` tools likewise stay
+>   local.
+>
+> The research runtime (`agent/`, via `agent/main.py`) remains the reference implementation of
+> these controls. Run against authorized targets only, and prefer a disposable machine or VM.
 
-The intended design — which `agent/` implements — enforces safety architecturally: an allowlisted engagement scope the agent hard-refuses to step outside of, a destructive-command block, and sandboxed/isolated execution, so the agent only ever acts against targets the operator has explicitly authorized.
+Safety here is architectural rather than advisory: an allowlisted engagement scope the agent hard-refuses to step outside of, a destructive-command block, and sandboxed/isolated execution — so the agent only ever acts against targets the operator has explicitly authorized.
 
 > **Configuration:** `app/electron/config.json` is a **template** with placeholder paths. Copy it to `app/electron/config.local.json` (gitignored, never shipped) and point it at your own `llama-server`, model, and RAG index.
 
