@@ -93,6 +93,44 @@ class BrokerEmitsEventsTest(unittest.TestCase):
         started = next(e for e in self._events() if e["kind"] == "tool_call_started")
         self.assertNotIn("super-secret-payload", started["payload"]["argument_digest"])
 
+    def _approval_broker(self, confirm):
+        from agent.broker.approval_queue import ApprovalQueue
+
+        broker = self._broker(allowed={"knowledge_search"})
+        broker.confirm_fn = confirm
+        broker.approval_queue = ApprovalQueue(queue_dir=self.tmp / "approvals")
+        return broker
+
+    def test_an_approved_action_emits_required_then_resolved_approved(self):
+        with patch.object(broker_mod, "REQUIRES_APPROVAL", {"knowledge_search"}):
+            broker = self._approval_broker(confirm=lambda prompt: True)
+            resp = broker.dispatch(self._request(), executor=lambda p, a: {"ok": True})
+        self.assertEqual(resp.status, "succeeded")
+        kinds = [e["kind"] for e in self._events()]
+        self.assertIn("approval_required", kinds)
+        resolved = next(e for e in self._events() if e["kind"] == "approval_resolved")
+        self.assertEqual(resolved["payload"]["status"], "approved")
+        # required before resolved before the tool even started.
+        self.assertLess(kinds.index("approval_required"), kinds.index("approval_resolved"))
+        self.assertLess(kinds.index("approval_resolved"), kinds.index("tool_call_started"))
+        # the digest identifies the request without carrying the arguments.
+        req = next(e for e in self._events() if e["kind"] == "approval_required")["payload"]
+        self.assertTrue(req["argument_digest"])
+
+    def test_a_declined_action_emits_resolved_denied_and_runs_nothing(self):
+        with patch.object(broker_mod, "REQUIRES_APPROVAL", {"knowledge_search"}):
+            broker = self._approval_broker(confirm=lambda prompt: False)
+            resp = broker.dispatch(self._request(), executor=lambda p, a: {"ok": True})
+        self.assertEqual(resp.status, "denied")
+        kinds = [e["kind"] for e in self._events()]
+        self.assertEqual(
+            next(e for e in self._events() if e["kind"] == "approval_resolved")["payload"]["status"],
+            "denied",
+        )
+        # declined -> the tool never started, so no tool_call/artifact events.
+        self.assertNotIn("tool_call_started", kinds)
+        self.assertNotIn("artifact_stored", kinds)
+
 
 if __name__ == "__main__":
     unittest.main()
