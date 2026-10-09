@@ -46,6 +46,7 @@ def make_agent_loop_worker(
     engagement_id: str,
     *,
     loop_factory: LoopFactory = _default_loop_factory,
+    client_factory: Callable[[], object] | None = None,
     workspace_root: Path | None = None,
     device_id: str = "wave-worker",
 ):
@@ -61,9 +62,14 @@ def make_agent_loop_worker(
     The experiment's verdict lives on the hypothesis graph, written by the loop's own graph tools
     during the run; the orchestrator reads it from there, so the WorkerResult carries the outcome
     and leaves `verdict` for the graph to own.
+
+    `client_factory`, when given, builds the loop's model client per worker — this is how workers
+    run on OpenRouter (so the wave never touches the local GPU) without this module importing the
+    provider: the caller passes `lambda: OpenRouterLoopClient("openai/gpt-4o-mini")`. Omitted, the
+    loop uses its own default client.
     """
     def run(hypothesis_id: str, method: str, stop: threading.Event, deadline: float) -> WorkerResult:
-        loop = loop_factory(
+        kwargs = dict(
             workspace_root=workspace_root or config.default_workspace_root(),
             engagement_id=engagement_id,
             use_security_tools=True,
@@ -71,6 +77,9 @@ def make_agent_loop_worker(
             device_id=device_id,
             stop_event=stop,
         )
+        if client_factory is not None:
+            kwargs["client"] = client_factory()
+        loop = loop_factory(**kwargs)
         try:
             result = loop.run_task(_brief(hypothesis_id, method))
         finally:

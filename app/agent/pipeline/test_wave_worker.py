@@ -67,6 +67,18 @@ class WaveWorkerAdapterTest(unittest.TestCase):
         self.assertIn("error-based", b)
         self.assertIn("do not branch", b)  # a worker tests one thing; siblings cover the rest
 
+    def test_a_client_factory_is_used_to_build_the_loops_client(self):
+        # This is how a worker runs on OpenRouter (no GPU): the caller supplies a client factory.
+        record: dict = {}
+        sentinel = object()
+        worker = make_agent_loop_worker(
+            "eng1",
+            loop_factory=_factory_for(TaskResult("ok"), record),
+            client_factory=lambda: sentinel,
+        )
+        worker("H-1", "m", threading.Event(), 0.0)
+        self.assertIs(record["kwargs"]["client"], sentinel)
+
     def test_the_loop_is_closed_even_when_the_run_raises(self):
         record: dict = {}
 
