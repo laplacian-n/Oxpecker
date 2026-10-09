@@ -32,6 +32,9 @@ export interface Projection {
   artifacts: { seq: number; worker?: string; artifact?: string; store?: string; ref?: string }[];
   counts: { note_added: number; finding_recorded: number };
   budget: Record<string, unknown>;
+  // Approvals keyed by request id (§7: one request, one state, three renderings — flow node,
+  // drawer, chat). Pending and resolved both live here; a surface filters by status.
+  approvals: Record<string, Record<string, any>>;
   // The engagement's orchestration tier (§2.6.2), carried on the snapshot so the client offers
   // exactly the surfaces that tier has (§8). "high" until a snapshot says otherwise.
   tier: string;
@@ -50,6 +53,7 @@ export function emptyProjection(): Projection {
     artifacts: [],
     counts: { note_added: 0, finding_recorded: 0 },
     budget: {},
+    approvals: {},
     tier: "high",
   };
 }
@@ -66,6 +70,7 @@ export function fromSnapshot(snapshot: Record<string, any>): Projection {
   for (const c of snapshot.tool_calls_in_flight ?? []) p.toolCalls[String(c.call_id)] = c;
   for (const m of snapshot.model_roster ?? []) p.modelRoster[String(m.model_id)] = { calls: 0, prompt_tokens: 0, completion_tokens: 0, cost: 0, ...m };
   p.artifacts = [...(snapshot.artifacts ?? [])];
+  for (const a of snapshot.approvals ?? []) p.approvals[String(a.request_id)] = a;
   if (snapshot.counts) p.counts = { ...p.counts, ...snapshot.counts };
   if (snapshot.budget) p.budget = snapshot.budget;
   if (snapshot.tier) p.tier = String(snapshot.tier);
@@ -150,6 +155,15 @@ export function applyEvent(prev: Projection, event: EngagementEvent): Projection
     }
     case "artifact_stored":
       next.artifacts = [...prev.artifacts, { seq: event.seq, worker: p.worker, artifact: p.artifact, store: p.store, ref: p.ref }];
+      break;
+    case "approval_required":
+      next.approvals = { ...prev.approvals, [String(p.request_id)]: { ...p, status: "pending" } };
+      break;
+    case "approval_resolved":
+      next.approvals = {
+        ...prev.approvals,
+        [String(p.request_id)]: { ...(prev.approvals[String(p.request_id)] ?? { request_id: p.request_id }), status: p.status },
+      };
       break;
     case "graph_node_changed":
       next.graphNodes = { ...prev.graphNodes, [String(p.node)]: p };

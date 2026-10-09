@@ -30,6 +30,23 @@ test("projectionAt re-folds exactly the prefix up to the sequence number", () =>
   expect(at2).toEqual(byHand);
 });
 
+test("approvals fold from pending to resolved, keyed by request id (§7 one request, one state)", () => {
+  const events = feed([
+    { kind: "approval_required", payload: { request_id: "r1", tool: "http_request", argument_digest: "abc123" } },
+    { kind: "approval_required", payload: { request_id: "r2", tool: "port_discovery" } },
+    { kind: "approval_resolved", payload: { request_id: "r1", status: "approved" } },
+  ]);
+  let p = emptyProjection();
+  for (const e of events) p = applyEvent(p, e);
+
+  expect(p.approvals["r1"].status).toBe("approved");
+  expect(p.approvals["r1"].tool).toBe("http_request"); // the required-event detail survives resolve
+  expect(p.approvals["r2"].status).toBe("pending");
+  // The scrubber replayed to before the resolution shows r1 still pending — the drawer/chat/flow
+  // (§7) all read the same state, so "past" and "now" agree.
+  expect(projectionAt(events, 2).approvals["r1"].status).toBe("pending");
+});
+
 test("workerView slices one worker's tools and output from whatever projection it is handed", () => {
   const events = feed([
     { kind: "worker_spawned", payload: { worker_id: "w1", method: "sqli", hypothesis: "H-3" } },
