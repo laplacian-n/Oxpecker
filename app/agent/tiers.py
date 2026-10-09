@@ -105,3 +105,31 @@ def engagement_tier(engagement_id: str, *, engagements_root: Path | None = None)
     except (json.JSONDecodeError, OSError):
         return DEFAULT_TIER
     return normalize_tier(roe.get("tier"))
+
+
+# The phases a high-tier engagement runs on the hypothesis graph: the recon-wave cold-start entry
+# (§14.1 G — a root claim with a recon experiment whose observed_result spawns the real
+# hypotheses) through hypothesis testing. INTAKE has no work to do; REPORT and CLOSEOUT are flat
+# orchestration that *read* the graph (the reporter walks a confirmed chain back, §2.4 — it reads,
+# it does not produce hypotheses, so it needs no wave). Keeping RECON on the graph is what stops a
+# two-store bridge forming at the busiest seam: if RECON were flat, its raw evidence would land
+# outside the graph and ANALYSIS would have to import it.
+GRAPH_PHASES = ("RECON", "ANALYSIS", "VALIDATION")
+
+
+def uses_graph(phase: str, tier: str | None) -> bool:
+    """The single decider of whether a `(phase, tier)` runs on the hypothesis graph (the wave
+    engine) or the flat task machine. **Both `plan_tasks` and `check_transition` must call this one
+    function** — if two call sites decide the mode independently they will drift, and the day they
+    disagree a phase hangs (one plans no tasks, the other waits on tasks that never come) or jumps
+    (one defers to a wave, the other sees an empty task list and advances before the wave runs).
+    One function, asked from both places, is the whole guard against a third engine fork growing
+    inside the driver.
+
+    Only the high tier uses the graph, and only for RECON..VALIDATION. `tier` is explicit on
+    purpose — a `None`/unknown tier is treated as flat, never as the `DEFAULT_TIER`, so a caller
+    that has not deliberately opted a phase into graph mode keeps the flat behaviour it has today
+    rather than silently switching because the default tier happens to be high."""
+    if tier is None:
+        return False
+    return normalize_tier(tier) == "high" and phase in GRAPH_PHASES
