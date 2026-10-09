@@ -1,0 +1,64 @@
+# The repository had no CI until this file, so every pull request merged so far was reviewed
+# without a machine ever running the suite. The suite itself is fast — 517 tests in about 13
+# seconds — so there was never a cost reason for that.
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        # This list is the one app/agent/web/dev_server.py documents, and two tests already
+        # assert that the Electron installer hint and docs/DEPLOY_UBUNTU.md agree with it
+        # (test_electron_install_hint.py, test_dev_server_imports.py). Keep the three in step.
+        # httpx is test-only: the FastAPI TestClient needs it, the app does not.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic httpx
+
+      - name: Run the agent suite
+        working-directory: app
+        # -t . matters: the tests import by package path, and discovering from the repo root
+        # fails every module with "attempted relative import with no known parent package".
+        run: |
+          python -m unittest discover -t . -s agent -p 'test_*.py' 2>&1 | tee ../test-output.txt
+
+      - name: Check that the suite was not hollowed out by skips
+        # A green run proves nothing if the tests did not execute. 60 of the 517 skip in a bare
+        # container because they need something this runner has no cheap way to provide — the
+        # Juice Shop lab (24), llama-server (15), the embedding server (7), the RAG corpus
+        # checkouts (11), SearXNG, a Chromium binary, outbound DNS.
+        #
+        # So the floor is asserted rather than assumed, the same way
+        # sandbox/test_seccomp_profile.py counts what it actually exercised. Raising either
+        # number has to be a deliberate edit with a reason in the commit message; a dependency
+        # that quietly stops importing shows up here as a drop, not as a green tick.
+        run: |
+          python - <<'PY'
+          import re, sys
+          out = open('test-output.txt').read()
+          ran = int(re.search(r'^Ran (\d+) tests', out, re.M).group(1))
+          m = re.search(r'skipped=(\d+)', out)
+          skipped = int(m.group(1)) if m else 0
+          executed = ran - skipped
+          print(f'ran={ran} skipped={skipped} executed={executed}')
+          MIN_EXECUTED, MAX_SKIPPED = 450, 70
+          if executed < MIN_EXECUTED:
+              sys.exit(f'only {executed} tests actually executed, floor is {MIN_EXECUTED}')
+          if skipped > MAX_SKIPPED:
+              sys.exit(f'{skipped} tests skipped, ceiling is {MAX_SKIPPED} — '
+                       'a dependency probably stopped importing')
+          PY
