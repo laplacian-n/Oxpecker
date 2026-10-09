@@ -17,6 +17,7 @@ import json
 import time
 from dataclasses import dataclass
 
+from .. import tiers
 from ..engagement.store import PHASES, EngagementStore
 from ..skills.library import SkillLibrary
 from ..skills.schema import Skill
@@ -48,6 +49,7 @@ class PipelineOrchestrator:
         profile_name: str,
         budget: Budget | None = None,
         skill_library: SkillLibrary | None = None,
+        tier: str | None = None,
     ):
         if profile_name not in PROFILES:
             raise UnknownProfileError(f"unknown profile {profile_name!r}, must be one of {list(PROFILES)}")
@@ -57,6 +59,17 @@ class PipelineOrchestrator:
         # M5.4 wiring: optional, additive — a caller that omits this gets tasks with no
         # skill_ids in their params, exactly the pre-existing behavior.
         self.skill_library = skill_library
+        # The orchestration tier (§2.6), explicit and defaulting to None = flat. In the high tier,
+        # RECON..VALIDATION run on the hypothesis graph (the wave engine), so the flat task machine
+        # stands aside for those phases — see `_uses_graph`. None keeps the flat behaviour every
+        # existing caller has today; nothing switches to graph mode until a caller passes "high".
+        self.tier = tier
+
+    def _uses_graph(self, phase: str) -> bool:
+        """Whether `phase` runs on the graph for this orchestrator's tier. The ONE decider, so
+        plan_tasks and check_transition can never disagree about the mode (tiers.uses_graph's own
+        docstring says why that matters)."""
+        return tiers.uses_graph(phase, self.tier)
 
     def skills_for_current_phase(self) -> list[Skill]:
         if self.skill_library is None:
@@ -85,6 +98,14 @@ class PipelineOrchestrator:
         result adds new services, re-calling this creates the service_fingerprint tasks those
         services now warrant). Returns newly created task_ids."""
         phase = self.store.get_phase()["current_phase"]
+        if self._uses_graph(phase):
+            # Graph-mode phase: the wave engine plans and runs the experiments against the
+            # hypothesis graph, not the flat task machine. Creating flat tasks here would be the
+            # start of a second source of truth for the same work — so plan nothing and leave the
+            # phase to the wave. check_transition honours the same decision (it does not advance a
+            # graph phase off an empty task list); the two must agree, which is why both ask
+            # `_uses_graph`.
+            return []
         templates = self._templates_for_phase(phase)
         if not templates:
             return []
@@ -124,6 +145,17 @@ class PipelineOrchestrator:
                 f"phase wall-clock budget exhausted "
                 f"({elapsed:.0f}s >= {self.budget.max_phase_wall_clock_s}s)"
             )
+
+        if self._uses_graph(phase):
+            # Graph-mode phase: the flat task list does not govern it, so this method must NOT read
+            # readiness off the task list — in particular not the "no templates -> ready" shortcut
+            # below, which would jump the phase before the first wave ran (a graph phase has no
+            # flat templates, so that shortcut would fire immediately). Readiness here is the
+            # wave's conclusion — the strategist dispatching nothing, which is a first-class
+            # outcome (§2.7) — and that signal is supplied by the driver, which advances the phase
+            # explicitly. The one automatic exit that still applies is the wall-clock ceiling
+            # above (the owner's "or budget"). Everything else: not ready by the task machine.
+            return False, "graph-mode phase advances on the wave's conclusion, not the task list"
 
         templates = self._templates_for_phase(phase)
         if not templates:
