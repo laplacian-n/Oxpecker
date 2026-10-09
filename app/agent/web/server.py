@@ -816,16 +816,22 @@ def notebook_overview(engagement_id: str) -> dict:
 
 
 @app.get("/api/technique-kb")
-def technique_kb() -> dict:
-    """The global cross-engagement technique library (docs/working-notebook-spec.md §7).
-    Not engagement-scoped — it's the operator's accumulated know-how."""
-    kb = TechniqueKB()
+def technique_kb(request: Request) -> dict:
+    """The cross-engagement technique library (docs/working-notebook-spec.md §7) — cross-
+    *engagement*, not cross-account: AGENT_ARCHITECTURE.md §14.1 B scopes it per account so one
+    operator's accumulated know-how is never handed to a different account (§5.3)."""
+    # resolve_account can only return None if the require_api_key middleware would already have
+    # 401'd the request before this handler ran — the fallback is defensive, not load-bearing.
+    account = engagement_access.resolve_account(_presented_key(request)) or config.WEB_UI_DEFAULT_ACCOUNT
+    kb = TechniqueKB(db_path=config.technique_kb_path_for(account))
     return {"techniques": kb.all(), "count": kb.count()}
 
 
 @app.delete("/api/technique-kb/{ordinal}")
-def technique_kb_forget(ordinal: int) -> dict:
-    return {"deleted": TechniqueKB().delete(ordinal)}
+def technique_kb_forget(ordinal: int, request: Request) -> dict:
+    account = engagement_access.resolve_account(_presented_key(request)) or config.WEB_UI_DEFAULT_ACCOUNT
+    kb = TechniqueKB(db_path=config.technique_kb_path_for(account))
+    return {"deleted": kb.delete(ordinal)}
 
 
 @app.post("/api/engagements/{engagement_id}/notebook/notes/{ordinal}/resolve")
