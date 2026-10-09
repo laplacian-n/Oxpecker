@@ -20,9 +20,14 @@ import time
 import urllib.request
 import urllib.error
 
-from mcp.server.mcpserver import MCPServer
+# `mcp.server.mcpserver.MCPServer` is not a path any released `mcp` 1.x provides, so this
+# module could not be imported at all. FastMCP is the real API and takes exactly what this
+# file already passes: FastMCP(name), .tool(name=, description=), .run(). Same fix as
+# security_mcp_server.py, which carries the longer explanation; these three were left
+# behind when it was made, and nothing noticed because nothing imports them.
+from mcp.server import FastMCP
 
-server = MCPServer("oxpecker")
+server = FastMCP("oxpecker")
 BASE = os.environ.get("OXPECKER_URL", "http://127.0.0.1:7777").rstrip("/")
 
 

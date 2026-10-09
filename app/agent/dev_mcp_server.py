@@ -28,12 +28,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp.server.mcpserver import MCPServer
+# `mcp.server.mcpserver.MCPServer` is not a path any released `mcp` 1.x provides, so this
+# module could not be imported at all. FastMCP is the real API and takes exactly what this
+# file already passes: FastMCP(name), .tool(name=, description=), .run(). Same fix as
+# security_mcp_server.py, which carries the longer explanation; these three were left
+# behind when it was made, and nothing noticed because nothing imports them.
+from mcp.server import FastMCP
 
 from . import config
 from .engagement.store import EngagementStore
 
-server = MCPServer("oxpecker-dev-tools")
+server = FastMCP("oxpecker-dev-tools")
 
 
 # ---------------------------------------------------------------------------

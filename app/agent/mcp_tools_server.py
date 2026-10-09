@@ -11,13 +11,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from mcp.server.mcpserver import MCPServer
+# `mcp.server.mcpserver.MCPServer` is not a path any released `mcp` 1.x provides, so this
+# module could not be imported at all. FastMCP is the real API and takes exactly what this
+# file already passes: FastMCP(name), .tool(name=, description=), .run(). Same fix as
+# security_mcp_server.py, which carries the longer explanation; these three were left
+# behind when it was made, and nothing noticed because nothing imports them.
+from mcp.server import FastMCP
 
 from .tools import read_file as read_file_tool
 from .tools import run_command as run_command_tool
 from .tools import write_file as write_file_tool
 
-server = MCPServer("localai-phase1-tools")
+server = FastMCP("localai-phase1-tools")
 
 _workspace_root: Path
 _dangerous_local: bool = False
