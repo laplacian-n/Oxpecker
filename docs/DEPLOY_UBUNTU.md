@@ -49,7 +49,7 @@ Three further wins, all of which follow from there being exactly one server proc
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip bubblewrap
+sudo apt install -y python3-venv python3-pip bubblewrap tree
 
 sudo useradd --system --create-home --home-dir /var/lib/oxpecker oxpecker
 sudo mkdir -p /opt/oxpecker /var/lib/oxpecker/{data,state}
@@ -65,6 +65,12 @@ sudo -u oxpecker /opt/oxpecker/.venv/bin/pip install \
 implementation, so `/api/sessions/{id}/ws` silently stops being a WebSocket route and answers as
 plain HTTP (404). The shipped UI uses SSE and does not need it, but a client that opens the
 WebSocket will fail confusingly without it.
+
+`tree` is not a Python dependency, but `config.COMMAND_ALLOWLIST` lets the model call it via
+`run_command`, and it is not installed by any other package on a stock Ubuntu image. Found by
+running every allowlisted command for real under the seccomp filter instead of a four-command
+sample (see `test_seccomp_profile.py`) — 18 of the 22 commands, including this one, had never
+actually been invoked by that check.
 
 `cryptography` is not mentioned anywhere else on this page, but it is a hard dependency:
 `agent/evidence/store.py` imports `cryptography.fernet` at module scope, `agent/audit_log.py`
