@@ -993,6 +993,23 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             # needed: resolve_tier returns direct when direct was asked for, and raises when a
             # stronger tier was asked for and cannot run. It never silently downgrades.
             tier, tier_reason = _isolation.resolve_tier(requested_tier)
+            # The static probe above is not the last word. A systemd unit hardened with
+            # RestrictNamespaces= or PrivateUsers=yes leaves bwrap installed and the sysctl
+            # permissive, so resolve_tier says yes and the exec then dies with a raw kernel
+            # message naming neither systemd nor the tier. verify_once execs a sandboxed
+            # /bin/true and caches the answer, so the first command on a tier pays one short
+            # process and the rest pay nothing -- which is what makes the honest check
+            # affordable per command instead of static-only. `direct` has nothing to verify.
+            if tier != _isolation.TIER_DIRECT:
+                verified, verify_reason = _isolation.verify_once(tier)
+                if not verified:
+                    raise _isolation.IsolationUnavailableError(
+                        f"isolation tier {tier!r} passed the static check but failed when "
+                        f"actually exercised: {verify_reason}. On a systemd deployment this is "
+                        f"usually RestrictNamespaces= or PrivateUsers=yes on the unit (see "
+                        f"docs/DEPLOY_UBUNTU.md)."
+                    )
+                tier_reason = verify_reason
         except _isolation.IsolationUnavailableError as e:
             session.effective_isolation_tier = None
             return {"ok": False, "error": (
@@ -2817,6 +2834,14 @@ def get_session(session_id: str):
         "isolation_tier": s.isolation_tier,
         "effective_isolation_tier": s.effective_isolation_tier,
         "isolation": _isolation.describe_host(),
+        # The exec-verified answer for the tier this session asked for, alongside the static
+        # one. describe_host() is static by construction and reports `available: true` under a
+        # namespace-restricted systemd unit; this row is the one that has actually run bwrap.
+        # None for `direct`, which has no namespace to verify.
+        "isolation_verified": (
+            None if s.isolation_tier == _isolation.TIER_DIRECT
+            else dict(zip(("ok", "reason"), _isolation.verify_once(s.isolation_tier)))
+        ),
         "messages": [{"role": m["role"], "content": m["content"], "message_id": m.get("message_id"),
                       "reasoning_content": m.get("reasoning_content"),
                       "tool_calls": m.get("tool_calls"), "tool_name": m.get("tool_name")}
@@ -3414,6 +3439,34 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
     _check_bind_is_safe(parser, args)
+
+    # Surface a disabled sandbox in the startup log, before any command runs. The per-command
+    # check added alongside this refuses correctly, but an operator reading `journalctl -u
+    # oxpecker` after hardening a unit should not have to wait for a model to call run_command
+    # to learn that the sandbox is gone -- by then the only trace is a tool error inside a
+    # session. Found by walking docs/DEPLOY_UBUNTU.md under `systemd-run --user -p
+    # RestrictNamespaces=yes`, where the server started clean and reported bubblewrap
+    # everywhere.
+    #
+    # This goes through verify_once rather than resolve_tier(deep=True) so the exec is shared
+    # with the per-command check: one sandboxed /bin/true for the whole process, not one here
+    # and another on the first tool call.
+    #
+    # Non-fatal on purpose. `direct` is a legitimate operator choice, and a server that refuses
+    # to start would also refuse the sessions that never run a command at all. The refusal that
+    # matters happens where the risk is, at the command.
+    if platform.system() == "Linux":
+        _sandbox_ok, _sandbox_reason = _isolation.verify_once(_isolation.TIER_BUBBLEWRAP)
+        if _sandbox_ok:
+            log.info("Sandbox check at startup: bubblewrap %s", _sandbox_reason)
+        else:
+            log.warning(
+                "SANDBOX UNAVAILABLE: bubblewrap failed when actually exercised: %s. If this "
+                "unit was just hardened with systemd directives (RestrictNamespaces=, "
+                "PrivateUsers=yes), that is almost certainly why -- see the systemd section of "
+                "docs/DEPLOY_UBUNTU.md. The server will still start, and run_command will "
+                "refuse rather than run outside the sandbox.", _sandbox_reason,
+            )
 
     # Create data directory
     DATA_DIR.mkdir(parents=True, exist_ok=True)

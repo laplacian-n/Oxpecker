@@ -9,7 +9,14 @@ project once -- never sees it. The first machine that followed the documented in
 exactly was a CI runner, and `agent.main` could not be imported there.
 
 This test asks the question those two do not: **install only what the docs say, and do the
-entry points import?** It answers it by blocking every third-party module the package imports
+shipped modules import?**
+
+It briefly carried a KNOWN_BROKEN_IMPORTS carve-out for three MCP servers that could not be
+imported under the pinned SDK, together with a test asserting that set was exact. The carve-out
+is gone because the defect is: porting those three to FastMCP made them importable, and the
+exactness test is what demanded the list be emptied. The mechanism is in git history if another
+long-lived defect ever needs it; an empty carve-out kept around is the thing it was written to
+prevent. It answers it by blocking every third-party module the package imports
 that the documented list does not cover, in a subprocess, and then importing the entry points.
 
 One subprocess, not one per module, so this costs about a second rather than doubling the suite.
@@ -95,31 +102,6 @@ def third_party_modules() -> set[str]:
     return {m for m in mods if m not in sys.stdlib_module_names and m != "agent"}
 
 
-# This repository holds MCP code written against two incompatible generations of the SDK, and
-# no single installed version satisfies both. Verified by installing each in a clean venv:
-#
-#   mcp 1.28.1  mcp.server.FastMCP exists;  mcp.server.mcpserver does NOT
-#   mcp 2.3.0   mcp.server.FastMCP is GONE; mcp.server.mcpserver DOES exist
-#
-# security_mcp_server.py uses the 1.x spelling and is the one the runtime actually imports
-# (loop.py pulls it in for the security tools). dev_mcp_server.py, mcp_tools_server.py and
-# oxpecker_control_mcp.py use the 2.x spelling and are standalone servers launched from
-# .mcp.json, which nothing imports.
-#
-# So the documented list pins "mcp<2": the live path works, installs stop depending on the day
-# they were run, and the three standalone servers stay unimportable until someone ports them --
-# which is the state every developer machine has been in anyway, undetected, because the split
-# only shows up on a machine that installs fresh.
-#
-# They are listed rather than quietly excluded, and the second test below asserts the list is
-# EXACT: fix one and this test tells you to take it off the list, so the carve-out cannot
-# outlive the defect or grow to cover a new one.
-KNOWN_BROKEN_IMPORTS = {
-    "agent.dev_mcp_server",
-    "agent.mcp_tools_server",
-    "agent.oxpecker_control_mcp",
-}
-
 _PROBE = r'''
 import importlib, sys
 blocked = set(sys.argv[1].split(",")) - {""}
@@ -166,10 +148,7 @@ def _import_with_only(allowed_extra_blocked: set[str], targets=None) -> str:
 class DocumentedDependenciesSuffice(unittest.TestCase):
     def test_the_documented_list_is_enough_to_import_every_shipped_module(self):
         undocumented = third_party_modules() - documented_modules()
-        failures = "\n".join(
-            line for line in _import_with_only(undocumented).splitlines()
-            if line.split(":")[0] not in KNOWN_BROKEN_IMPORTS
-        )
+        failures = _import_with_only(undocumented)
         self.assertEqual(
             failures, "",
             "An install that follows the documented `pip install` line cannot import these "
@@ -191,18 +170,6 @@ class DocumentedDependenciesSuffice(unittest.TestCase):
             failures, "",
             f"blocking {needed!r} did not break any entry point, so the probe is not blocking "
             "anything and the sufficiency test above proves nothing",
-        )
-
-
-class KnownBrokenListIsExact(unittest.TestCase):
-    def test_every_listed_module_is_still_broken(self):
-        """A carve-out that outlives its defect hides the next one that lands in the same place."""
-        failures = _import_with_only(set(), targets=sorted(KNOWN_BROKEN_IMPORTS))
-        still_broken = {line.split(":")[0] for line in failures.splitlines() if line.strip()}
-        self.assertEqual(
-            still_broken, KNOWN_BROKEN_IMPORTS,
-            "KNOWN_BROKEN_IMPORTS no longer matches reality. A module that now imports must be "
-            "removed from the set so the sufficiency test starts covering it again.",
         )
 
 

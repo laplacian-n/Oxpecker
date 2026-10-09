@@ -21,6 +21,7 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
+import threading
 
 TIER_DIRECT = "direct"
 TIER_BUBBLEWRAP = "bubblewrap"
@@ -272,6 +273,52 @@ def probe(tier: str, deep: bool = False) -> tuple[bool, str]:
     if tier == TIER_MICROVM:
         return _probe_microvm(deep=deep)
     raise ValueError(f"unknown isolation tier: {tier!r}, choose from {list(TIERS)}")
+
+
+# Exec-verification results, cached per process and per tier. See `verify_once`.
+_verified: dict[str, tuple[bool, str]] = {}
+_verify_lock = threading.Lock()
+
+
+def verify_once(tier: str) -> tuple[bool, str]:
+    """The exec-verified probe, run at most once per tier per process.
+
+    `probe(deep=False)` is static: it checks the platform, the binary on PATH and the
+    user-namespace sysctl. That is cheap enough to run per command, and it is **wrong** for a
+    whole class of host, because the restriction can live somewhere a static check never looks.
+    The one that found this: a systemd unit hardened with `RestrictNamespaces=` or
+    `PrivateUsers=yes`. `bwrap` is installed, the sysctl is permissive, and the static probe
+    says `available: true` -- but the moment `bwrap` calls `unshare(2)` the kernel refuses.
+
+    Before this function existed, nothing in the shipped server ever passed `deep=True`. The
+    probe's own docstring said the deep path "suits a startup check rather than a per-command
+    one", and there was no startup check -- so the definitive answer was implemented, correct,
+    and never asked for. The server started, reported `bubblewrap` as the active tier
+    everywhere an operator could look, and the first real `run_command` died at the bwrap exec
+    with a raw kernel message that named neither systemd nor the tier.
+
+    Found by walking the deployment in docs/DEPLOY_UBUNTU.md on real hardware under
+    `systemd-run --user -p RestrictNamespaces=yes`, which is also why it was not caught here:
+    no unit test can reach a restriction that only exists inside a hardened service unit.
+
+    Caching makes the honest check affordable. The first use of a tier pays one short-lived
+    process; every later command reads the dict. The cache is per process and never invalidated,
+    which is correct for what it measures -- namespace permission is a property of how this
+    process was started, and it cannot change under a running process.
+    """
+    with _verify_lock:
+        if tier in _verified:
+            return _verified[tier]
+    result = probe(tier, deep=True)
+    with _verify_lock:
+        _verified.setdefault(tier, result)
+        return _verified[tier]
+
+
+def reset_verification_cache() -> None:
+    """Test-only. Production never clears it -- see `verify_once` on why that is correct."""
+    with _verify_lock:
+        _verified.clear()
 
 
 def resolve_tier(
