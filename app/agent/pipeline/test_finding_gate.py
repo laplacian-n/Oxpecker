@@ -89,6 +89,19 @@ class FindingGateApplyTest(unittest.TestCase):
         self.assertIn("verifier:could_not_refute", after.limitations)
         self.assertIsNotNone(after.last_verified)
 
+    def test_could_not_refute_raises_assurance_to_differential(self):
+        # §8.6.4/§14.1: a different-family verifier that could not refute is a differential pass, so
+        # the finding rises off the model floor and can now cross the submission boundary on its own.
+        from agent.findings.model import can_submit
+        f = self.store.add(_finding(self.eng, status="confirmed"))
+        self.assertEqual(f.confirmed_by, "model")
+        self.assertFalse(can_submit(f))  # model-only, unreviewed -> blocked
+        results = _gate(self.store, [_verdict_json("could_not_refute")]).run()
+        self.assertEqual(results[0]["confirmed_by"], "differential")
+        after = self.store.get(f.finding_id)
+        self.assertEqual(after.confirmed_by, "differential")
+        self.assertTrue(can_submit(after))  # differential crosses without human review
+
     def test_not_reproducible_keeps_the_finding_and_records_the_reason(self):
         f = self.store.add(_finding(self.eng, status="confirmed"))
         _gate(self.store, [_verdict_json("confirmed_not_reproducible", reason="patched")]).run()

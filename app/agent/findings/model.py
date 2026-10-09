@@ -42,6 +42,26 @@ VALID_SEVERITIES = ("info", "low", "medium", "high", "critical")
 VALID_CONFIDENCE = ("confirmed", "hypothesis", "needs_validation")
 VALID_STATUS = ("confirmed", "hypothesis", "needs_validation", "false_positive", "wont_fix")
 
+# §8.6.4 — the assurance ladder: who raised confidence in the finding, not whether its claim is
+# true. The order is the ladder (low -> high): a model's own assertion is the floor and passes at
+# every tier; a rule match, a differential (a different model instance / comparison rule agreeing),
+# a downstream use that worked, or a human sign-off each strengthen it. Assurance is a *property*,
+# not a gate (§8.6.4): a finding is never blocked for being model-confirmed, only labelled — and
+# the submission boundary (§8.6.5 #1) is what keeps a model-only finding from a submitted report
+# unseen. A worker cannot raise its own level (§14.1 A): every level above `model` is awarded by
+# something other than the finder.
+CONFIRMED_BY_LEVELS = ("model", "rule", "differential", "downstream", "human")
+CONFIRMED_BY_FLOOR = "model"
+
+
+def assurance_rank(level: str) -> int:
+    """The ladder position of a `confirmed_by` level, for comparison. Raises on an unknown level
+    rather than ranking it 0 — an unrecognised assurance label is a bug, not the floor."""
+    try:
+        return CONFIRMED_BY_LEVELS.index(level)
+    except ValueError:
+        raise ValueError(f"unknown confirmed_by level {level!r}; expected one of {CONFIRMED_BY_LEVELS}")
+
 
 @dataclass
 class Finding:
@@ -61,6 +81,17 @@ class Finding:
     confidence: str = "needs_validation"
     status: str = "needs_validation"
     demonstrated_impact: str | None = None  # what was actually shown to work, not theorized
+
+    # §8.6.4 assurance ladder — WHO raised confidence, orthogonal to severity (how bad) and
+    # confidence/status (how sure). Defaults to the floor, `model`: a model's own assertion, which
+    # passes at every tier but cannot cross the submission boundary unseen (§8.6.5 #1). Levels above
+    # `model` are awarded by something other than the finder (a rule, a different-family verifier, a
+    # downstream use, a human) — a worker can assert, it cannot promote its own assurance (§14.1 A).
+    confirmed_by: str = CONFIRMED_BY_FLOOR
+    # §8.6.4.1 — set to `rule_id@version` when a rule returned False against evidence the model
+    # called positive. The disagreement is the rule library's only bug report, and the label keeps
+    # a model-over-rule confirmation distinguishable from an unchallenged one at export (§8.3).
+    rule_disagreed: str | None = None
 
     # CVSS — score kept as the existing float field (backward compatible with records written
     # before this expansion); version/vector added alongside it, not replacing it.
@@ -105,9 +136,52 @@ class Finding:
             raise ValueError(f"confidence must be one of {VALID_CONFIDENCE}, got {self.confidence!r}")
         if self.status not in VALID_STATUS:
             raise ValueError(f"status must be one of {VALID_STATUS}, got {self.status!r}")
+        if self.confirmed_by not in CONFIRMED_BY_LEVELS:
+            raise ValueError(
+                f"confirmed_by must be one of {CONFIRMED_BY_LEVELS}, got {self.confirmed_by!r}"
+            )
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def submission_blocker(finding: "Finding") -> str | None:
+    """§8.6.5 #1 — the absolute, tier-independent submission boundary. A false positive circulating
+    internally is cheap and self-correcting; one that reaches a *submitted report* is reputation,
+    and programs ban for repeated invalid reports. So a finding whose assurance is only `model`
+    cannot cross into a submission without a person seeing it (`reviewed_by` set). Assurance above
+    the model floor — a rule, a differential verifier pass, a downstream use, a human sign-off —
+    crosses on its own: full autonomy inside, the expensive edge guarded. Returns the reason the
+    finding is blocked from submission, or None if it may be submitted.
+
+    No tier can lower this (§2.6.1-adjacent): the boundary is a property of the finding, read the
+    same way whoever is about to submit it — the reporter, an export, an operator action."""
+    if finding.status in ("false_positive", "wont_fix"):
+        return f"status {finding.status!r} is not a submittable finding"
+    if assurance_rank(finding.confirmed_by) > assurance_rank(CONFIRMED_BY_FLOOR):
+        return None  # above the model floor — awarded by something other than the finder, so it crosses
+    if finding.reviewed_by:
+        return None  # a person saw it (the review gate satisfies "without a person seeing it")
+    return (
+        "confirmed_by: model has not been seen by a person — it cannot cross the submission "
+        "boundary unseen (§8.6.5 #1); have an operator review it or raise its assurance"
+    )
+
+
+def can_submit(finding: "Finding") -> bool:
+    return submission_blocker(finding) is None
+
+
+def unsubmittable(findings: "list[Finding]") -> "list[tuple[Finding, str]]":
+    """The findings in `findings` that may NOT be submitted, each with the reason — what a reporter
+    or export calls at the boundary to hold back model-only, unreviewed findings (and shelved
+    ones) rather than discovering them in a delivered report."""
+    blocked = []
+    for f in findings:
+        reason = submission_blocker(f)
+        if reason is not None:
+            blocked.append((f, reason))
+    return blocked
 
 
 class FindingsStore:
@@ -142,19 +216,25 @@ class FindingsStore:
 
     def record_verification(
         self, finding_id: str, *, verdict: str, reason: str | None, rationale: str,
-        by: str, new_status: str | None = None,
+        by: str, new_status: str | None = None, confirmed_by: str | None = None,
     ) -> Finding:
         """Record a verifier's verdict on a finding (§2.3). Unlike `mark_reviewed` (a *human* gate),
         this is the independent verifier's result: it stamps `verifier`/`last_verified`, appends the
         verdict to `limitations` so the report carries *why* the finding stands or fell, and — only
         when the verdict calls for it — moves `status` (a refutation to `false_positive`). It never
         touches `reviewed_by`: a verifier pass is not a human review, and must not look like one.
-        Same atomic whole-file rewrite as mark_reviewed, for the same reason (JSONL has no in-place
-        update)."""
+
+        `confirmed_by`, when given, raises the assurance level — but only ever *raises* it (§14.1 A:
+        a worker cannot raise its own level, and assurance never silently drops because a later pass
+        was weaker). A different-family verifier that could not refute is a differential pass, so the
+        gate passes `differential`; an already-downstream/human finding keeps its higher level.
+        Same atomic whole-file rewrite as mark_reviewed (JSONL has no in-place update)."""
         if not by or not by.strip():
             raise ValueError("verifier identity (`by`) must be non-empty, not silently 'someone'")
         if new_status is not None and new_status not in VALID_STATUS:
             raise ValueError(f"new_status must be one of {VALID_STATUS}, got {new_status!r}")
+        if confirmed_by is not None and confirmed_by not in CONFIRMED_BY_LEVELS:
+            raise ValueError(f"confirmed_by must be one of {CONFIRMED_BY_LEVELS}, got {confirmed_by!r}")
         findings = self.list_all()
         updated = None
         rewritten = []
@@ -168,6 +248,8 @@ class FindingsStore:
                 f.limitations = f"{f.limitations} | {note}" if f.limitations else note
                 if new_status is not None:
                     f.status = new_status
+                if confirmed_by is not None and assurance_rank(confirmed_by) > assurance_rank(f.confirmed_by):
+                    f.confirmed_by = confirmed_by  # raise only — never lower an earned assurance
                 updated = f
             rewritten.append(f)
         if updated is None:
