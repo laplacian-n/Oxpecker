@@ -22,6 +22,7 @@ from . import injection_guard
 from . import session as session_mod
 from .engagement import emit as event_emit
 from .engagement.locks import engagement_lock
+from .engagement.spend import BudgetExhausted as SpendBudgetExhausted, SpendLedger
 from .llama_client import LlamaClient
 from .loop_control.steer import SteerChannel
 from .prompts.compiler import compile_prompt
@@ -165,6 +166,7 @@ class AgentLoop:
         # and the loop returns a 'cancelled' result at the next turn boundary, rather than being
         # force-killed mid-generation (a thread cannot be). What it had already recorded stays.
         self.stop_event = stop_event
+        self._spend_ledger: SpendLedger | None = None
         self.engagement_id = engagement_id
         self.prompt_version: str | None = None  # set on first _system_message() call
         # Injected so main.py can supply input(); tests can supply an auto-yes/no stub.
@@ -276,6 +278,13 @@ class AgentLoop:
         self.completed_turns: list[budget_mod.Turn] = self._restore_turns()
         self._recent_calls: list[tuple[str, str]] = []
         self._turn_counter = len(self.completed_turns)
+
+    def _spend(self) -> SpendLedger:
+        """The engagement's spend ledger (§14.1 D), opened once. Resolved from config at call time
+        (not bound at import) so a test patching ENGAGEMENTS_ROOT is honoured."""
+        if self._spend_ledger is None:
+            self._spend_ledger = SpendLedger(config.ENGAGEMENTS_ROOT / self.engagement_id)
+        return self._spend_ledger
 
     def close(self) -> None:
         if self.mcp_client is not None:
@@ -568,6 +577,19 @@ class AgentLoop:
             if evicted:
                 log.info("evicted %d turn(s) from working memory (still in session log)", len(evicted))
 
+            # §14.1 D / §7.2: reserve the spend slot BEFORE the call so a crossed cap stops the
+            # next call rather than degrading it — single-worker mode reserves then settles
+            # immediately; the wave only splits the two moments. Default-unmetered means reserve
+            # never refuses, so this is a no-op until a cap is set in roe.json. The estimate is 0
+            # (the cost is not known until the response); the slot exists for the wave to pass a
+            # real estimate. A ledger error must not break the run.
+            try:
+                _spend_rid = self._spend().reserve(0.0, worker=self.session_id)
+            except SpendBudgetExhausted as e:
+                return finish(TaskResult("budget_exhausted", str(e)))
+            except Exception:  # noqa: BLE001 - telemetry/ledger failure never stops the run
+                _spend_rid = None
+
             call_start = time.monotonic()
             resp = self.client.chat_completions(
                 messages_for_api,
@@ -580,16 +602,26 @@ class AgentLoop:
                 on_reasoning_delta=self.on_reasoning_stream,
             )
             latency_ms = (time.monotonic() - call_start) * 1000
-            # §4.2 model_call — feeds the flow view's model roster (§6.3). Cost comes from the
-            # OpenRouter price probe, a source this path does not hold, so usage is emitted and
-            # price is left to the roster's own source; role is the profile this loop runs under.
+            # §4.2 model_call — feeds the flow view's model roster (§6.3). `usage.cost` is the
+            # provider's own actual cost (OpenRouter reports it per response; local llama has
+            # none, so 0). role is the profile this loop runs under.
             _usage = resp.get("usage") or {}
+            _cost = float(_usage.get("cost") or 0.0)
             event_emit.emit(self.engagement_id, "model_call", {
                 "model_id": resp.get("model") or "model",
                 "role": self.profile,
                 "prompt_tokens": _usage.get("prompt_tokens", 0),
                 "completion_tokens": _usage.get("completion_tokens", 0),
+                "cost": _cost,
             })
+            # Settle the actual spend and publish the budget (§4.2 budget_updated). Never breaks
+            # the run on a ledger error.
+            if _spend_rid is not None:
+                try:
+                    self._spend().settle(_spend_rid, _cost)
+                    event_emit.emit(self.engagement_id, "budget_updated", self._spend().snapshot())
+                except Exception:  # noqa: BLE001
+                    log.warning("failed to settle spend for this model call", exc_info=True)
             choice = resp["choices"][0]["message"]
             content = choice.get("content") or ""
             # See _run_diagnostic's comment: llama-server returns thinking-mode output in its own
