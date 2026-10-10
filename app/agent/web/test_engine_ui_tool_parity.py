@@ -46,8 +46,9 @@ KNOWN_MISSING_FROM_UI = {
     # write tools stay until their model-facing interface is consolidated.
     "graph_hypothesis_add", "graph_attempt_start", "graph_attempt_complete", "graph_set_verdict",
     "graph_park", "graph_abandon", "graph_set_active_path",
-    # the working notebook
-    "note_add", "note_search", "note_resolve", "note_promote", "technique_recall",
+    # the working notebook. The two read-only tools (note_search, technique_recall) are wired across
+    # in step 3; the write tools stay until their model-facing interface is consolidated.
+    "note_add", "note_resolve", "note_promote",
 }
 
 # UI tools with no engine counterpart under the graph-on configuration, documented so the test is

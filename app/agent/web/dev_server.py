@@ -237,6 +237,9 @@ TRACK YOUR WORK (keep the hypothesis graph and notebook alive — do this contin
 - Use graph_read_branch on a hypothesis's ordinal to revisit an earlier line of attack and what it
   found, rather than re-deriving it from memory.
 - Jot record_note as you work: a technique that worked, a dead-end to avoid, a todo, an observation.
+- Call note_search before assuming what you noted earlier or whether you already ruled something
+  out — do not guess. Call technique_recall when you reach a surface or bug class you have worked
+  before, to reuse a technique you saved on a past engagement instead of re-deriving it.
 - Call record_finding for every CONFIRMED vulnerability, with evidence.
 A real red-teamer leaves a trail — the operator watches the hypothesis tree and notebook fill up
 as you go, so keep them current round by round.
@@ -1615,6 +1618,15 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         from ..hypothesis_graph.tools import dispatch as _graph_tool_dispatch
         return _graph_tool_dispatch(_graph_service(session.engagement_id), name, args)
 
+    elif name in ("note_search", "technique_recall"):
+        # §12 step 3 — the engine's read-only notebook tools, mounted on the UI runtime against this
+        # engagement's notebook service (the single tool plane). In-process, keyed by engagement
+        # like record_note. technique_recall reaches the account-scoped global technique KB the
+        # service already carries. The write tools (note_add/resolve/promote) still go through
+        # record_note until that model-facing interface is consolidated.
+        from ..notebook.tools import dispatch as _notebook_tool_dispatch
+        return _notebook_tool_dispatch(_notebook_service(session.engagement_id), name, args)
+
     elif name == "port_discovery":
         # Delegates to the same security_tools implementation the CLI uses, with a Policy built
         # from this session's engagement. That brings four things the web runtime had no way to
@@ -2113,6 +2125,15 @@ from ..hypothesis_graph.tools import SCHEMAS as _ENGINE_GRAPH_SCHEMAS  # noqa: E
 
 _UI_GRAPH_READ_TOOLS = ("graph_search", "graph_read_branch")
 TOOL_SCHEMAS += [s for s in _ENGINE_GRAPH_SCHEMAS if s["function"]["name"] in _UI_GRAPH_READ_TOOLS]
+
+# Likewise the engine's read-only notebook tools, now that the notebook is the per-engagement
+# NotebookService (step 3). note_search reads this engagement's notebook; technique_recall reads
+# the account-scoped global technique library. Additive — the note write tools still reach the
+# model through record_note.
+from ..notebook.tools import SCHEMAS as _ENGINE_NOTEBOOK_SCHEMAS  # noqa: E402
+
+_UI_NOTEBOOK_READ_TOOLS = ("note_search", "technique_recall")
+TOOL_SCHEMAS += [s for s in _ENGINE_NOTEBOOK_SCHEMAS if s["function"]["name"] in _UI_NOTEBOOK_READ_TOOLS]
 
 SECURITY_TOOL_SCHEMAS = [
     # What the "security tools" toggle gates, now that it gates something. These reach the
