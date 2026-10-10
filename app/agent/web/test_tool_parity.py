@@ -138,10 +138,17 @@ def main() -> int:
     def writes(var: str) -> bool:
         return bool(re.search(rf"{re.escape(var)}\[[^\]]+\]\s*(=|\.append)|{re.escape(var)}\.append", src))
 
-    for var, endpoint in (("_graphs", "/hypothesis-graph"),
-                          ("_notebooks", "/notebook"),
+    # Notebook and findings are still the in-memory dicts (written via their accessors).
+    for var, endpoint in (("_notebooks", "/notebook"),
                           ("_findings", "/findings")):
         check(f"{var} ({endpoint}) has a writer", writes(var))
+
+    # The hypothesis graph moved off the in-memory dict in step 2b — it is now the per-engagement
+    # HypothesisGraphService, so its writer is the service call inside the accessor, not a dict
+    # assignment. The invariant is unchanged (the store the UI reads has a writer); only the shape
+    # of the writer did.
+    check("_graph_* (/hypothesis-graph) has a writer via the graph service",
+          bool(re.search(r"svc\.add_hypothesis\(", src)))
 
     # Known gaps, asserted as gaps rather than left to look like features: these two endpoints
     # exist and the UI reads them, but nothing in this runtime ever writes either store, so they

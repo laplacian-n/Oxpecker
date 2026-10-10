@@ -83,6 +83,8 @@ from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..engagement.program import Program as _Program
+from ..hypothesis_graph.service import HypothesisGraphService as _HypothesisGraphService
+from ..hypothesis_graph.store import NotFoundError as _GraphNotFoundError
 from ..llm import registry as _llm_registry
 from ..sandbox import availability as _isolation
 from ..security_tools import http_recon as _http_recon
@@ -698,66 +700,147 @@ _engagements: dict[str, Engagement] = {"lab-default": Engagement(
 )}
 _approvals: dict[str, ApprovalRequest] = {}
 _consults: dict[str, ConsultRequest] = {}
-_graphs: dict[str, list[HypothesisNode]] = {}
-_graph_edges: dict[str, list[dict]] = {}
+# The hypothesis store (step 2b). Every read and write goes through the accessors below, so the
+# backing store is swapped by rewiring them alone — which is what this is: the in-memory per-
+# session dicts are gone, replaced by the real HypothesisGraphService, ONE graph per engagement
+# (persisted as hypothesis_graph.db beside the engagement's other data under DATA_DIR).
+#
+# Keying changed deliberately (§3.1): the graph's value — chaining, coverage, the single
+# graph_version optimistic lock, the strategist digest — rests on there being one graph per
+# engagement, so the old per-session buckets (and the cross-session ordinal collisions they
+# produced) are gone. The response SHAPE is unchanged: each store row is mapped back onto the
+# same HypothesisNode the UI has always destructured, so the frontend sees the same fields.
+_graph_services: dict[str, _HypothesisGraphService] = {}
+_graph_services_lock = threading.Lock()
 
 
-# The hypothesis store. Every read and write of _graphs / _graph_edges goes through these
-# accessors so the backing store can be swapped by rewriting them alone.
+def _graph_service(key: str) -> _HypothesisGraphService:
+    """Get-or-create the engagement's graph service. Lazy: the DB is created on first touch."""
+    with _graph_services_lock:
+        svc = _graph_services.get(key)
+        if svc is None:
+            svc = _HypothesisGraphService(DATA_DIR / key)
+            _graph_services[key] = svc
+        return svc
+
+
+def _graph_reset_cache() -> None:
+    """Drop every cached service handle (tests point DATA_DIR at a tmp dir between cases)."""
+    with _graph_services_lock:
+        _graph_services.clear()
+
+
+def _graph_node_from_row(h: dict, svc: _HypothesisGraphService) -> HypothesisNode:
+    """Map a store hypothesis row onto the HypothesisNode the HTTP layer already serializes, so
+    the UI contract is byte-identical. `rationale` carries what the UI calls `description`;
+    `unassessed` is normalized back to the empty verdict the UI has always shown for a fresh node;
+    `primary_parent_id` is resolved to the parent's ordinal."""
+    parent_ordinal = None
+    pid = h.get("primary_parent_id")
+    if pid:
+        try:
+            parent_ordinal = svc.store.get_hypothesis(pid)["ordinal"]
+        except _GraphNotFoundError:
+            parent_ordinal = None
+    verdict = h.get("verdict") or ""
+    if verdict == "unassessed":
+        verdict = ""
+    notes = [n["text"] for n in svc.store.list_operator_notes(h["hypothesis_id"])]
+    attempts = [
+        {"method": x.get("method_summary") or "", "result": x.get("observed_result") or "",
+         "status": x.get("status") or ""}
+        for x in svc.store.list_experiments(h["hypothesis_id"])
+    ]
+    return HypothesisNode(
+        ordinal=h["ordinal"], title=h["title"], claim=h.get("claim") or "",
+        description=h.get("rationale") or "", phase=h.get("phase_created") or "RECON",
+        status=h.get("lifecycle_status") or "open", verdict=verdict,
+        parent_ordinal=parent_ordinal, notes=notes, attempts=attempts,
+    )
+
 
 def _graph_has_key(key: str) -> bool:
-    return key in _graphs
+    """True if this engagement has a graph with at least one node. Used only by _scope_keys for
+    the notebook/findings legacy-surfacing path (the graph endpoints key per engagement directly)."""
+    return bool(_graph_service(key).store.list_hypotheses())
 
 
 def _graph_ensure(key: str) -> None:
-    """Create empty node and edge buckets for `key` if its graph is absent."""
-    if key not in _graphs:
-        _graphs[key] = []
-        _graph_edges[key] = []
+    """Materialize the engagement's graph DB if absent (service construction does it)."""
+    _graph_service(key)
 
 
 def _graph_nodes(key: str) -> list:
-    return _graphs.get(key, [])
+    svc = _graph_service(key)
+    return [_graph_node_from_row(h, svc) for h in svc.store.list_hypotheses()]
 
 
 def _graph_edges_for(key: str) -> list:
-    return _graph_edges.get(key, [])
+    svc = _graph_service(key)
+    ord_of = {h["hypothesis_id"]: h["ordinal"] for h in svc.store.list_hypotheses()}
+    edges = []
+    for e in svc.store.list_edges():
+        frm, to = ord_of.get(e["from_hypothesis_id"]), ord_of.get(e["to_hypothesis_id"])
+        if frm is not None and to is not None:
+            edges.append({"from_ordinal": frm, "to_ordinal": to, "edge_type": e["edge_type"]})
+    return edges
 
 
-def _graph_add_node(key: str, node) -> None:
-    _graphs.setdefault(key, [])
-    _graph_edges.setdefault(key, [])
-    _graphs[key].append(node)
-
-
-def _graph_add_edge(key: str, edge: dict) -> None:
-    _graph_edges.setdefault(key, []).append(edge)
+def _graph_add_node(key: str, node) -> int:
+    """Create a hypothesis from a UI-shaped node and return the ordinal the STORE assigned (not a
+    client-supplied one — that single per-engagement ordinal space is the point of the swap). A
+    parent_ordinal is resolved to the parent's id so the store records the lineage edge itself."""
+    svc = _graph_service(key)
+    primary_parent_id = None
+    if node.parent_ordinal:
+        try:
+            primary_parent_id = svc.store.get_by_ordinal(node.parent_ordinal)["hypothesis_id"]
+        except _GraphNotFoundError:
+            primary_parent_id = None
+    # The store requires a non-empty claim and rationale; the UI only ever supplied one free-text
+    # field (stored as both claim and description), so it seeds both here.
+    text = node.description or node.claim or node.title
+    res = svc.add_hypothesis(
+        title=node.title, claim=node.claim or text, rationale=text,
+        phase_created=node.phase if node.phase in (
+            "INTAKE", "RECON", "ANALYSIS", "VALIDATION", "REPORT", "CLOSEOUT") else "RECON",
+        origin_type="ai_inference", impact=3, confidence_band="low",
+        confidence_reason="recorded from the chat UI, not yet tested",
+        primary_parent_id=primary_parent_id,
+    )
+    return res["ordinal"]
 
 
 def _graph_update_node(key, ordinal, *, status=None, verdict=None, evidence=None):
-    for n in _graphs.get(key, []):
-        if n.ordinal == ordinal:
-            if status is not None:
-                n.status = status
-            if verdict is not None:
-                n.verdict = verdict
-            if evidence:
-                n.attempts.append({"method": "evidence", "result": evidence, "status": "done"})
-            return n
-    return None
+    svc = _graph_service(key)
+    try:
+        h = svc.store.get_by_ordinal(ordinal)
+    except _GraphNotFoundError:
+        return None
+    ref = f"H-{ordinal}"
+    if status is not None:
+        svc.store.set_lifecycle_status(h["hypothesis_id"], svc.store.get_hypothesis(
+            h["hypothesis_id"])["version"], status)
+    if verdict is not None:
+        svc.set_verdict(ref, verdict)
+    if evidence:
+        # Preserve the one place the UI reads `attempts`: evidence lands as a completed single-shot
+        # experiment, so node detail still projects it.
+        xid = svc.store.start_experiment(h["hypothesis_id"], method_summary="evidence")
+        svc.store.complete_experiment(xid, status="completed", observed_result=evidence,
+                                      evidence_refs=None, audit_refs=None)
+    return _graph_node_from_row(svc.store.get_by_ordinal(ordinal), svc)
 
 
 def _graph_snapshot() -> dict:
-    return {
-        "graphs": {eid: [n.to_detail() for n in ns] for eid, ns in _graphs.items()},
-        "graph_edges": _graph_edges,
-    }
+    # The graph is now persisted in SQLite (per-engagement hypothesis_graph.db), not in the JSON
+    # state file. Snapshot/restore keep the key so an older state file loads without error, but
+    # carry no graph data — SQLite is the store of record (2c folds the legacy JSON graphs in).
+    return {"graphs": {}, "graph_edges": {}}
 
 
 def _graph_restore(graphs_data: dict, edges_data: dict) -> None:
-    for eid, ns in graphs_data.items():
-        _graphs[eid] = [_mk(HypothesisNode, n) for n in ns]
-    _graph_edges.update(edges_data)
+    return None
 
 
 _notebooks: dict[str, list[NotebookNote]] = {}
@@ -1312,7 +1395,7 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         return {"ok": True, "results": results, "count": len(results)}
 
     elif name == "record_hypothesis":
-        eng_id = session.session_id  # graph is per-session (each chat keeps its own tree)
+        eng_id = session.engagement_id  # one graph per engagement (§3.1), not per chat session
         _graph_ensure(eng_id)
         nodes = _graph_nodes(eng_id)
         title = (args.get("title") or "").strip()
@@ -1322,26 +1405,20 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         for n in nodes:
             if (n.title or "").strip().lower() == title.lower():
                 return {"ok": True, "hypothesis_id": f"h-{n.ordinal}", "ordinal": n.ordinal, "deduped": True}
-        ordinal = len(nodes) + 1
         node = HypothesisNode(
-            ordinal=ordinal,
+            ordinal=0,  # the store assigns the ordinal from the engagement's single space
             title=args.get("title", ""),
             claim=args.get("description", args.get("claim", "")),
             description=args.get("description", ""),
             phase=args.get("phase", "RECON"),
             parent_ordinal=args.get("parent_ordinal"),
         )
-        _graph_add_node(eng_id, node)
-        if node.parent_ordinal:
-            _graph_add_edge(eng_id, {
-                "from_ordinal": node.parent_ordinal,
-                "to_ordinal": ordinal,
-                "edge_type": "derives",
-            })
+        # The store assigns the ordinal and records the lineage edge from parent_ordinal itself.
+        ordinal = _graph_add_node(eng_id, node)
         return {"ok": True, "hypothesis_id": f"h-{ordinal}", "ordinal": ordinal}
 
     elif name == "update_hypothesis_status":
-        eng_id = session.session_id
+        eng_id = session.engagement_id
         h_id = args.get("hypothesis_id", "")
         ordinal = int(re.sub(r"[^0-9]", "", h_id)) if h_id else args.get("ordinal", 0)
         node = _graph_update_node(eng_id, ordinal, status=args.get("status"),
@@ -3302,12 +3379,18 @@ def _scope_keys(path_id: str) -> list[str]:
         keys.append(path_id)
     return keys
 
+def _graph_scope_key(path_id: str) -> str:
+    """The graph is one per engagement (step 2b), so a path id resolves to a single key: a session
+    id maps to its engagement, an engagement id is already the key. (Notebook/findings still use
+    the per-session _scope_keys above — only the graph moved to the per-engagement store.)"""
+    s = _sessions.get(path_id)
+    return s.engagement_id if s is not None else path_id
+
 @app.get("/api/engagements/{engagement_id}/hypothesis-graph")
 def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
-    nodes, edges = [], []
-    for k in _scope_keys(engagement_id):
-        nodes += _graph_nodes(k)
-        edges += _graph_edges_for(k)
+    key = _graph_scope_key(engagement_id)
+    nodes = _graph_nodes(key)
+    edges = _graph_edges_for(key)
     if not nodes:
         return {"exists": False, "nodes": [], "edges": [], "graph_state": None}
     filtered = nodes if not phase else [n for n in nodes if n.phase == phase]
@@ -3320,37 +3403,34 @@ def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
 
 @app.get("/api/engagements/{engagement_id}/hypothesis-graph/nodes/{ordinal}")
 def hypothesis_graph_node(engagement_id: str, ordinal: int):
-    for k in _scope_keys(engagement_id):
-        for n in _graph_nodes(k):
-            if n.ordinal == ordinal:
-                return n.to_detail()
+    for n in _graph_nodes(_graph_scope_key(engagement_id)):
+        if n.ordinal == ordinal:
+            return n.to_detail()
     raise HTTPException(404, f"node {ordinal} not found")
 
 @app.post("/api/engagements/{engagement_id}/hypothesis-graph/nodes/{ordinal}/operator-action")
 def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraphActionRequest):
-    node = None
-    for k in _scope_keys(engagement_id):
-        for n in _graph_nodes(k):
-            if n.ordinal == ordinal:
-                node = n
-                break
-        if node:
-            break
-    if not node:
+    key = _graph_scope_key(engagement_id)
+    svc = _graph_service(key)
+    try:
+        svc.store.get_by_ordinal(ordinal)
+    except _GraphNotFoundError:
         raise HTTPException(404, f"node {ordinal} not found")
+    ref = f"H-{ordinal}"
     if req.action == "park":
         if not req.reason.strip():
             raise HTTPException(400, "parking requires a reason")
-        node.status = "parked"
+        svc.park(ref, req.reason.strip(), actor="operator")
         return {"ok": True, "status": "parked"}
     elif req.action == "reopen":
-        node.status = "open"
+        svc.reopen(ref, actor="operator")
         return {"ok": True, "status": "open"}
     elif req.action == "note":
         if not req.text.strip():
             raise HTTPException(400, "note needs text")
-        node.notes.append(req.text.strip())
-        return {"ok": True, "notes_count": len(node.notes)}
+        svc.add_note(ref, req.text.strip(), actor="operator")
+        n = _graph_service(key).store.get_by_ordinal(ordinal)
+        return {"ok": True, "notes_count": len(svc.store.list_operator_notes(n["hypothesis_id"]))}
     raise HTTPException(400, f"unknown action {req.action!r}")
 
 # ── Notebook ──
