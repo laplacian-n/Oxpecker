@@ -65,7 +65,12 @@ class Strategist:
         omitted = len(self.store.list_hypotheses()) - len(candidates)
         resp = self.provider.chat(
             [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": self._digest(candidates, omitted)}],
-            max_tokens=400,
+            # Generous because a *reasoning* model (DeepSeek V4, o1, R1, …) spends output tokens on
+            # its chain of thought before the answer. At 400 the reasoning alone exhausted the
+            # budget — the reply came back with finish_reason=length and an empty content, so the
+            # strategist parsed no array and dispatched nothing, stalling ANALYSIS on every wave.
+            # The actual answer (a short JSON array) is tiny; this headroom is for the thinking.
+            max_tokens=4000,
             temperature=0.0,
         )
         content = resp["choices"][0]["message"].get("content") or ""
