@@ -82,6 +82,7 @@ from ..broker.contracts import ActionRequest as _ActionRequest
 from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
+from ..engagement.intake import EngagementIntake as _EngagementIntake
 from ..engagement.program import Program as _Program
 from ..hypothesis_graph.service import HypothesisGraphService as _HypothesisGraphService
 from ..hypothesis_graph.store import NotFoundError as _GraphNotFoundError
@@ -3539,7 +3540,47 @@ def create_engagement(req: CreateEngagementRequest):
     )
     _engagements[req.engagement_id] = eng
     _persist()
+    _materialize_engine_engagement(eng)  # so the autonomous pipeline can run this engagement
     return {"engagement_id": req.engagement_id, "engagement_dir": str(DATA_DIR / req.engagement_id)}
+
+
+def _materialize_engine_engagement(eng: Engagement) -> bool:
+    """Write the engine's roe.json/scope.txt/deny.txt for `eng` so the autonomous pipeline
+    (agent/pipeline/autonomous_driver.py, which reads an EngagementStore from
+    config.ENGAGEMENTS_ROOT/<id>) can run an engagement the UI created. dev_server keeps engagements
+    as in-memory objects; this bridges that representation to the files the engine expects, into the
+    SAME directory the UI's graph/notebook stores live in (main() aligns ENGAGEMENTS_ROOT to
+    DATA_DIR), so the agent and the UI share one graph.
+
+    Best-effort and idempotent: it never raises into engagement creation — an engagement missing a
+    field the engine requires (e.g. no action classes yet) simply has no engine files until it is
+    completed, and only the autonomous run is unavailable, not the UI. Returns whether the files
+    now exist.
+    """
+    engagement_dir = _config.ENGAGEMENTS_ROOT / eng.engagement_id
+    if (engagement_dir / "roe.json").exists():
+        return True
+    try:
+        intake = _EngagementIntake(
+            engagement_id=eng.engagement_id,
+            description=eng.description or "",
+            allow_targets=list(eng.allow_targets or []),
+            valid_from=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(eng.created_at)),
+            valid_until=eng.valid_until or time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(eng.created_at + 365 * 24 * 3600)),
+            allowed_action_classes=list(eng.allowed_action_classes or []),
+            authorized_by=(eng.authorized_by or "operator").strip() or "operator",
+            operator_sign_off=True,  # the operator created this engagement through the UI
+            deny_targets=list(eng.deny_targets or []),
+        )
+        _intake.create_engagement(intake, _config.ENGAGEMENTS_ROOT)
+        log.info("Materialized engine engagement files for %r at %s",
+                 eng.engagement_id, engagement_dir)
+        return True
+    except Exception as e:  # noqa: BLE001 — incomplete fields or a race; never break UI creation
+        log.info("Engine engagement files not written for %r (%s: %s) — autonomous run unavailable "
+                 "until the engagement is completed", eng.engagement_id, type(e).__name__, e)
+        return False
 
 @app.get("/api/engagements")
 def list_engagements():
@@ -3870,6 +3911,12 @@ def main():
 
     # Create data directory
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Align the engine's engagement root with dev_server's data dir, so the autonomous pipeline
+    # (which opens config.ENGAGEMENTS_ROOT/<id>) and the UI's per-engagement graph/notebook stores
+    # (DATA_DIR/<id>) are one directory — the agent and the UI then read and write one graph, not
+    # two that silently diverge. Done at launch, not import, so the test suite keeps the default.
+    _config.ENGAGEMENTS_ROOT = DATA_DIR
 
     # Restore persisted sessions/engagements/findings from a previous run
     _load_state()
