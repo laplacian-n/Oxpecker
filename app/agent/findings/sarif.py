@@ -2,7 +2,7 @@
 (§8d: "Don't make SARIF native, poor fit for narrative findings — render *to* it")."""
 from __future__ import annotations
 
-from .model import Finding
+from .model import Finding, can_submit, submission_blocker
 
 _SEVERITY_TO_LEVEL = {
     "critical": "error",
@@ -57,6 +57,11 @@ def render_sarif(findings: list[Finding], tool_name: str = "localai-security-age
                     "discovered_at": f.discovered_at,
                     "reviewed_by": f.reviewed_by,
                     "reviewed_at": f.reviewed_at,
+                    # §8.6.4 / §8.6.5 #1 — assurance level and the submission boundary's verdict.
+                    "confirmed_by": f.confirmed_by,
+                    "rule_disagreed": f.rule_disagreed,
+                    "submittable": can_submit(f),
+                    "submission_blocker": submission_blocker(f),
                 },
             }
         )
