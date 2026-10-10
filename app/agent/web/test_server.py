@@ -865,6 +865,44 @@ class TestFindingsEndpoints(TestWebServerBase):
         self.assertEqual(r.status_code, 404)
 
 
+class TestFindingSubmittableFields(TestWebServerBase):
+    """The findings list carries the §8.6.5 #1 submission boundary per finding, computed from the
+    finding itself (not stored), so a client never has to re-derive it."""
+
+    def _seed(self, engagement_id: str, confirmed_by: str):
+        from ..findings.model import Finding, FindingsStore
+
+        store = FindingsStore(engagement_id, findings_dir=self.tmp / "findings")
+        f = Finding(
+            title="Reflected XSS", severity="high", target="http://127.0.0.1:3000/search",
+            description="d", remediation="r", tool="http_recon",
+            session_id="s1", engagement_id=engagement_id, confirmed_by=confirmed_by,
+        )
+        return store.add(f)
+
+    def test_model_only_unreviewed_finding_is_blocked_with_a_section_reason(self):
+        self._seed("sub-model", "model")
+        body = self.client.get("/api/engagements/sub-model/findings").json()
+        f = body["findings"][0]
+        self.assertFalse(f["submittable"])
+        self.assertIsNotNone(f["submission_blocker"])
+        self.assertIn("§8.6.5", f["submission_blocker"])
+
+    def test_differential_finding_is_submittable_with_no_blocker(self):
+        self._seed("sub-diff", "differential")
+        f = self.client.get("/api/engagements/sub-diff/findings").json()["findings"][0]
+        self.assertTrue(f["submittable"])
+        self.assertIsNone(f["submission_blocker"])
+
+    def test_existing_fields_are_still_present(self):
+        self._seed("sub-fields", "differential")
+        f = self.client.get("/api/engagements/sub-fields/findings").json()["findings"][0]
+        self.assertEqual(f["confirmed_by"], "differential")
+        self.assertEqual(f["title"], "Reflected XSS")
+        self.assertIn("rule_disagreed", f)
+        self.assertIn("reviewed_by", f)
+
+
 class TestConsultEndpoints(TestWebServerBase):
     def test_list_and_resolve(self):
         rid = server_mod._consult_queue.submit(session_id="s1", question="continue?")
