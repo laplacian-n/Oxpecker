@@ -316,7 +316,7 @@ function handleServerEvent(evt){
     case 'autonomous_done':
       stampDuration(sid);S.running=false;clearInterval(S.elapsedTimer);
       if(!S.threads[sid])S.threads[sid]=[];
-      S.threads[sid].push({role:'system',content:'Autonomous run finished — '+evt.status+(evt.reason?' · '+evt.reason:'')});
+      {const r=evt.result||evt;S.threads[sid].push({role:'system',content:'Autonomous run finished — '+(r.status||'done')+(r.reason?' · '+r.reason:''),_raw:r});}
       render();softScroll();break;
     case 'autonomous_error':S.running=false;clearInterval(S.elapsedTimer);toast('Autonomous error: '+evt.error);render();break;
     // The turn thread is now blocked waiting for the answer, so fetch the card immediately
@@ -1100,7 +1100,11 @@ function renderAgentGroup(thread,start,end,isLast){
       if(m._durSecs!=null)durSecs=m._durSecs;
     } else if(m.role==='system'){
       const c=m.content||'';
-      if(c.startsWith('⏳ Awaiting approval')||c.startsWith('Steer:')||c.startsWith('['))continue;
+      // Autonomous pipeline events (phase_entered, phase_advanced, …) are pushed as system lines
+      // tagged '[<type>]' and carry _raw; they MUST render — they are the whole visible output of
+      // an autonomous run. Only the internal bracketed markers (e.g. '[OPERATOR STEER]'), which
+      // have no _raw, stay suppressed.
+      if(!m._raw&&(c.startsWith('⏳ Awaiting approval')||c.startsWith('Steer:')||c.startsWith('[')))continue;
       sysLines+=`<div style="font:400 13px 'Instrument Sans';color:#8a8a8a;padding:2px 0">${esc(c)}</div>`;
     }
   }
