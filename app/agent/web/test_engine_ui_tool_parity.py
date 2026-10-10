@@ -41,13 +41,11 @@ KNOWN_MISSING_FROM_UI = {
     # internet / osint / browser (security-gated, broker-mediated)
     "knowledge_fetch", "osint_record", "browser_fetch",
     "security_reference_search",
-    # the hypothesis graph (replaces dev_server's in-memory lookalike, §3.1). The two read-only
-    # tools (graph_search, graph_read_branch) are wired across in step 3 and removed from here; the
-    # write tools stay until their model-facing interface is consolidated.
-    "graph_hypothesis_add", "graph_attempt_start", "graph_attempt_complete", "graph_set_verdict",
-    "graph_park", "graph_abandon", "graph_set_active_path",
-    # the working notebook. The two read-only tools (note_search, technique_recall) are wired across
-    # in step 3; the write tools stay until their model-facing interface is consolidated.
+    # the hypothesis graph: the full tool set (reads + writes) is now mounted on the UI runtime in
+    # step 3, so none remain here. The record_hypothesis/update_hypothesis_status lookalikes stay in
+    # KNOWN_UI_ONLY as back-compat aliases until a final cleanup removes them.
+    # the working notebook: the reads (note_search, technique_recall) are wired across; the write
+    # tools stay until their model-facing interface is consolidated.
     "note_add", "note_resolve", "note_promote",
 }
 
