@@ -833,14 +833,67 @@ def _graph_update_node(key, ordinal, *, status=None, verdict=None, evidence=None
 
 
 def _graph_snapshot() -> dict:
-    # The graph is now persisted in SQLite (per-engagement hypothesis_graph.db), not in the JSON
-    # state file. Snapshot/restore keep the key so an older state file loads without error, but
-    # carry no graph data — SQLite is the store of record (2c folds the legacy JSON graphs in).
+    # The graph is persisted in SQLite (per-engagement hypothesis_graph.db), not in the JSON state
+    # file, so a fresh snapshot carries no graph data — SQLite is the store of record. The empty
+    # keys stay so that once _graph_migrate_legacy has folded an old state file's graphs in, the
+    # next persist overwrites that block with nothing and the one-time migration never re-runs.
     return {"graphs": {}, "graph_edges": {}}
 
 
-def _graph_restore(graphs_data: dict, edges_data: dict) -> None:
-    return None
+# Valid lifecycle/verdict values, so the migration below can drop legacy junk rather than crash on
+# it — the old in-memory store never validated what the model wrote into status/verdict.
+_LIFECYCLE_VALUES = {"draft", "open", "queued", "running", "blocked", "awaiting_approval",
+                     "completed", "parked", "abandoned"}
+_VERDICT_VALUES = {"unassessed", "supported", "refuted", "inconclusive", "confirmed", "superseded"}
+
+
+def _graph_migrate_legacy(graphs_data: dict) -> None:
+    """Step 2c: fold any legacy per-session JSON graphs (written before the SQLite swap) into the
+    per-engagement store, once. Buckets are grouped by the engagement they map to (an old key is a
+    session id → its engagement, or already an engagement id); an engagement whose SQLite graph
+    already has nodes is left untouched, so this is idempotent and never double-imports. Edges are
+    not read — the only edges the old store ever made were parent lineage, which parent_ordinal
+    recreates. After this runs, the next persist drops the legacy `graphs` block entirely."""
+    if not graphs_data:
+        return
+    by_engagement: dict[str, list[dict]] = {}
+    for legacy_key, nodes in graphs_data.items():
+        by_engagement.setdefault(_graph_scope_key(legacy_key), []).extend(nodes or [])
+    migrated = 0
+    for engagement_id, nodes in by_engagement.items():
+        svc = _graph_service(engagement_id)
+        if svc.store.list_hypotheses():
+            continue  # already populated — a prior migration or live use; don't duplicate
+        old_to_new: dict[int, int] = {}
+        # ascending old ordinal, so a parent is always created before the child that cites it
+        for n in sorted(nodes, key=lambda d: d.get("ordinal") or 0):
+            parent_old = n.get("parent_ordinal")
+            node = HypothesisNode(
+                ordinal=0, title=n.get("title") or "(untitled)",
+                claim=n.get("claim") or n.get("description") or n.get("title") or "(none)",
+                description=n.get("description") or "", phase=n.get("phase") or "RECON",
+                parent_ordinal=old_to_new.get(parent_old) if parent_old else None,
+            )
+            new_ordinal = _graph_add_node(engagement_id, node)
+            old_to_new[n.get("ordinal")] = new_ordinal
+            ref = f"H-{new_ordinal}"
+            status = (n.get("status") or "").strip()
+            if status == "parked":
+                svc.park(ref, n.get("park_reason") or "migrated from legacy state")
+            elif status == "abandoned":
+                svc.abandon(ref, "migrated from legacy state")
+            elif status in _LIFECYCLE_VALUES and status not in ("open", "draft"):
+                h = svc.store.get_by_ordinal(new_ordinal)
+                svc.store.set_lifecycle_status(h["hypothesis_id"], h["version"], status)
+            verdict = (n.get("verdict") or "").strip()
+            if verdict in _VERDICT_VALUES and verdict != "unassessed":
+                svc.set_verdict(ref, verdict)
+            for note in n.get("notes") or []:
+                if (note or "").strip():
+                    svc.add_note(ref, note.strip())
+            migrated += 1
+    if migrated:
+        log.info("Migrated %d legacy hypothesis node(s) into the per-engagement graph store", migrated)
 
 
 _notebooks: dict[str, list[NotebookNote]] = {}
@@ -1021,7 +1074,6 @@ def _load_state():
         eng.program = _Program.from_dict(e.get("program"))
         _engagements[e["engagement_id"]] = eng
     _findings_restore(data.get("findings", {}))
-    _graph_restore(data.get("graphs", {}), data.get("graph_edges", {}))
     _notebook_restore(data.get("notebooks", {}))
     for sd in data.get("sessions", []):
         s = Session(
@@ -1040,6 +1092,9 @@ def _load_state():
         s.summary = sd.get("summary", "")
         s.summary_upto = sd.get("summary_upto", 0)
         _sessions[s.session_id] = s
+    # Fold any legacy per-session JSON graphs into the per-engagement SQLite store (step 2c). Runs
+    # after sessions load so a legacy session-keyed bucket resolves to its engagement.
+    _graph_migrate_legacy(data.get("graphs", {}))
     log.info("Restored state: %d sessions, %d engagements, %d finding-sets",
              len(_sessions), len(_engagements), _finding_key_count())
 
