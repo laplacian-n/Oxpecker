@@ -36,9 +36,16 @@ def _brief(hypothesis_id: str, method: str) -> str:
         f"Test exactly one hypothesis with exactly one method, then stop.\n"
         f"Hypothesis: {hypothesis_id}\n"
         f"Method: {method}\n"
-        f"Run the experiment, record the observation and the verdict on the hypothesis graph for "
-        f"this hypothesis, and do not branch into other hypotheses or methods — a sibling worker "
-        f"is covering those."
+        f"Run the experiment and record, on the hypothesis graph for THIS hypothesis, the "
+        f"observation and the verdict.\n"
+        f"If — and only if — running it reveals a NEW, deeper, concrete weakness worth testing on "
+        f"its own (e.g. the page you reached exposes a login form, an id parameter, an upload, an "
+        f"API route, or an error that leaks a stack trace), record that as a new hypothesis with "
+        f"graph_hypothesis_add, parent_ref={hypothesis_id}, phase ANALYSIS, origin_type "
+        f"combined_analysis, a concrete surface and a falsifiable claim — so a later wave digs into "
+        f"it. This is how the investigation goes deeper; one good lead is worth more than a vague "
+        f"one. Do NOT test that new hypothesis yourself, and do not branch sideways into unrelated "
+        f"hypotheses — a sibling worker and the strategist cover those."
     )
 
 
