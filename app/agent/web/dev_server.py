@@ -764,6 +764,51 @@ _notebooks: dict[str, list[NotebookNote]] = {}
 _findings: dict[str, list[Finding]] = {}
 _technique_kb: list[dict] = []
 
+
+# The notebook store. Every read and write of _notebooks goes through these accessors so the
+# backing store can be swapped by rewriting them alone.
+
+def _notebook_has_key(key: str) -> bool:
+    return key in _notebooks
+
+
+def _notebook_ensure(key: str) -> None:
+    """Create an empty note bucket for `key` if it is absent."""
+    if key not in _notebooks:
+        _notebooks[key] = []
+
+
+def _notebook_notes(key: str) -> list:
+    return _notebooks.get(key, [])
+
+
+def _notebook_add_note(key: str, note) -> None:
+    _notebook_ensure(key)
+    _notebooks[key].append(note)
+
+
+def _notebook_set_resolved(key: str, ordinal: int, action: str):
+    """Apply a resolve/reopen action to the note with this ordinal under `key`.
+    Returns the note, or None if `key` holds no note with that ordinal."""
+    for n in _notebooks.get(key, []):
+        if n.ordinal == ordinal:
+            if action == "resolve":
+                n.resolved = True
+            elif action == "reopen":
+                n.resolved = False
+            return n
+    return None
+
+
+def _notebook_snapshot() -> dict:
+    return {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()}
+
+
+def _notebook_restore(data: dict) -> None:
+    for eid, ns in data.items():
+        _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
+
+
 # Serializes access to the single-slot llama-server: concurrent generations (e.g. two
 # MCP-driven turns at once) otherwise pile onto `-np 1` and wedge the slot.
 _LLM_LOCK = threading.Lock()
@@ -811,7 +856,7 @@ def _persist():
             ],
             "findings": {eid: [f.to_dict() for f in fs] for eid, fs in _findings.items()},
             **_graph_snapshot(),
-            "notebooks": {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()},
+            "notebooks": _notebook_snapshot(),
         }
         with _persist_lock:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -839,8 +884,7 @@ def _load_state():
     for eid, fs in data.get("findings", {}).items():
         _findings[eid] = [_mk(Finding, f) for f in fs]
     _graph_restore(data.get("graphs", {}), data.get("graph_edges", {}))
-    for eid, ns in data.get("notebooks", {}).items():
-        _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
+    _notebook_restore(data.get("notebooks", {}))
     for sd in data.get("sessions", []):
         s = Session(
             session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
@@ -1285,9 +1329,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 
     elif name == "record_note":
         eng_id = session.session_id
-        if eng_id not in _notebooks:
-            _notebooks[eng_id] = []
-        notes = _notebooks[eng_id]
+        _notebook_ensure(eng_id)
+        notes = _notebook_notes(eng_id)
         ordinal = len(notes) + 1
         cat = args.get("category", "observation")
         if cat not in ("technique", "dead-end", "todo", "observation"):
@@ -1300,8 +1343,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         for n in notes:
             if (n.text or "").strip() == note_text:
                 return {"ok": True, "note_ordinal": n.ordinal, "deduped": True}
-        notes.append(NotebookNote(ordinal=ordinal, text=note_text, category=cat,
-                                  refs=args.get("refs", []) or []))
+        _notebook_add_note(eng_id, NotebookNote(ordinal=ordinal, text=note_text, category=cat,
+                                                refs=args.get("refs", []) or []))
         return {"ok": True, "note_ordinal": ordinal}
 
     elif name == "port_discovery":
@@ -3201,7 +3244,7 @@ def _scope_keys(path_id: str) -> list[str]:
     if path_id in _sessions:
         return [path_id]
     keys = [sid for sid, s in _sessions.items() if s.engagement_id == path_id]
-    if _graph_has_key(path_id) or path_id in _notebooks or path_id in _findings:
+    if _graph_has_key(path_id) or _notebook_has_key(path_id) or path_id in _findings:
         keys.append(path_id)
     return keys
 
@@ -3261,7 +3304,7 @@ def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraph
 def notebook_overview(engagement_id: str):
     notes = []
     for k in _scope_keys(engagement_id):
-        notes += _notebooks.get(k, [])
+        notes += _notebook_notes(k)
     if not notes:
         return {"exists": False, "notes": [], "counts": {}, "version": 0}
     counts = Counter(n.category for n in notes)
@@ -3274,15 +3317,10 @@ def notebook_overview(engagement_id: str):
 
 @app.post("/api/engagements/{engagement_id}/notebook/notes/{ordinal}/resolve")
 def notebook_resolve(engagement_id: str, ordinal: int, req: NotebookResolveRequest):
-    notes = []
+    # Scope keys are searched in order and the first note with this ordinal wins, as before.
     for k in _scope_keys(engagement_id):
-        notes += _notebooks.get(k, [])
-    for n in notes:
-        if n.ordinal == ordinal:
-            if req.action == "resolve":
-                n.resolved = True
-            elif req.action == "reopen":
-                n.resolved = False
+        n = _notebook_set_resolved(k, ordinal, req.action)
+        if n is not None:
             return {"ok": True, "resolved": n.resolved}
     raise HTTPException(404, f"note {ordinal} not found")
 
