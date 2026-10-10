@@ -119,7 +119,7 @@ FINDINGS_DIR = STATE_DIR / "findings"
 EVAL_RESULTS_DIR = STATE_DIR / "eval_results"
 # §7.1 / §8 trajectory record (v1): per-engagement JSONL of experiments, strategist turns and
 # chain links. Overridable so tests and alternate deployments can point it elsewhere.
-TRAJECTORY_DIR = Path(os.environ.get("AGENT_TRAJECTORY_DIR", PROJECT_DIR / "trajectory"))
+TRAJECTORY_DIR = STATE_DIR / "trajectory"
 # The Working Notebook is per-engagement; `technique` notes also overflow into this ONE global
 # store so a reusable trick learned on engagement A is recallable on engagement B
 # (docs/working-notebook-spec.md §7).
