@@ -1845,7 +1845,7 @@ async function saveEngagement(){
   const scope=(document.getElementById('neScope')?.value||'').trim();
   if(!/^[a-z0-9][a-z0-9-]{1,30}$/.test(id)){S.newEng.error='ID must be 2-31 chars: lowercase letters, digits, hyphens.';render();return;}
   if(!scope){S.newEng.error='Scope is required.';render();return;}
-  try{await api.createEngagement({engagement_id:id,description:scope.split('\n')[0],allow_targets:scope.split('\n').map(s=>s.trim()).filter(Boolean),allowed_action_classes:['passive_recon','active_recon','exploitation'],authorized_by:'web-ui'});
+  try{await api.createEngagement({engagement_id:id,description:scope.split('\n')[0],allow_targets:scope.split('\n').map(s=>s.trim()).filter(Boolean),allowed_action_classes:['passive_recon','active_web_request','active_scan_light','browser_recon','knowledge_search'],authorized_by:'web-ui'});
   S.engagementId=id;S.modal=null;toast('Engagement created');loadEngagements();render();}catch(e){S.newEng.error='Failed: '+e.message;render();}
 }
 
