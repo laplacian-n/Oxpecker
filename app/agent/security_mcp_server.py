@@ -413,13 +413,20 @@ def main() -> None:
         "stdin (which the MCP protocol already owns) for approval-required dispatches — for a "
         "UI or anything else resolving requests out-of-band.",
     )
+    parser.add_argument(
+        "--auto-approve", action="store_true",
+        help="Autonomous mode: grant approval-required dispatches automatically (recorded as an "
+        "auto-approval, not a human one) instead of blocking on stdin — scope, action-class, deny "
+        "and kill-switch gates still apply. For the unattended wave worker, which has no operator.",
+    )
     args = parser.parse_args()
 
     _session_id = args.session_id
     _device_id = args.device_id
     _engagement_id = args.engagement_id
     engagement_dir = resolve_engagement_dir(_engagement_id)
-    _broker = Broker(engagement_dir=engagement_dir, use_approval_queue=args.use_approval_queue)
+    _broker = Broker(engagement_dir=engagement_dir, use_approval_queue=args.use_approval_queue,
+                     auto_approve=args.auto_approve)
     server.run()
 
 
