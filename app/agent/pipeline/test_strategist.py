@@ -116,3 +116,39 @@ class LiveStrategistTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StrategistRetryCapTest(unittest.TestCase):
+    """A hypothesis dispatched past its retry budget without ever reaching a verdict is resolved
+    inconclusive and drops out of the candidate pool, so ANALYSIS cannot loop on it forever."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = HypothesisGraphStore(Path(self._tmp.name) / "eng")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_exhausted_hypothesis_is_parked_and_dropped(self):
+        from agent.pipeline.strategist import MAX_ATTEMPTS_PER_HYPOTHESIS, Strategist
+
+        hid = _hyp(self.store, "times out every time", surface="/slow")
+        for _ in range(MAX_ATTEMPTS_PER_HYPOTHESIS):
+            self.store.start_experiment(hid, method_summary="poke it")
+
+        s = Strategist(self.store, FakeProvider("[]"))
+        cands = s._candidates()
+
+        self.assertNotIn(hid, [c["hypothesis_id"] for c in cands],
+                         "a hypothesis past its retry budget must not stay a candidate")
+        self.assertEqual(self.store.get_hypothesis(hid)["verdict"], "inconclusive")
+        self.assertEqual(self.store.get_hypothesis(hid)["lifecycle_status"], "completed")
+
+    def test_under_budget_hypothesis_stays_a_candidate(self):
+        from agent.pipeline.strategist import Strategist
+
+        hid = _hyp(self.store, "still worth testing", surface="/x")
+        self.store.start_experiment(hid, method_summary="one try")  # 1 < cap
+        cands = Strategist(self.store, FakeProvider("[]"))._candidates()
+        self.assertIn(hid, [c["hypothesis_id"] for c in cands])
+        self.assertEqual(self.store.get_hypothesis(hid)["verdict"], "unassessed")
