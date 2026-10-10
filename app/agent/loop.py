@@ -139,6 +139,7 @@ class AgentLoop:
         stop_event=None,
         client=None,
         serialize_engagement: bool = True,
+        auto_approve: bool = False,
     ):
         # Default to the local llama-server (unchanged behaviour); a caller — notably a wave
         # worker that must not touch the GPU — may inject an OpenRouter-backed client instead
@@ -247,6 +248,13 @@ class AgentLoop:
                 # (or anything else) can resolve out-of-band. Off by default: the CLI's
                 # synchronous input()-based approval remains unchanged for every existing caller.
                 security_mcp_args.append("--use-approval-queue")
+            if auto_approve:
+                # Autonomous wave worker: no operator to answer an approval prompt, and the
+                # subprocess cannot block on this process's stdin anyway. --auto-approve grants
+                # approval-required dispatches automatically (audited as auto-approvals), still
+                # behind scope / action-class / deny / kill-switch. Off for every human-in-the-loop
+                # caller.
+                security_mcp_args.append("--auto-approve")
             self.security_mcp_client = MCPToolClient(
                 config.SECURITY_MCP_SERVER_MODULE, security_mcp_args,
             )

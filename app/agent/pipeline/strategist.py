@@ -92,11 +92,26 @@ class Strategist:
         omitted = len(self.store.list_hypotheses()) - len(candidates)
         resp = self.provider.chat(
             [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": self._digest(candidates, omitted)}],
-            max_tokens=400,
+            # Generous because a *reasoning* model (DeepSeek V4, o1, R1, …) spends output tokens on
+            # its chain of thought before the answer. At 400 the reasoning alone exhausted the
+            # budget — the reply came back finish_reason=length with empty content, the parser found
+            # no array, and the wave dispatched nothing, stalling ANALYSIS on every wave. The answer
+            # itself (a short JSON array) is tiny; this headroom is for the thinking.
+            max_tokens=4000,
             temperature=0.0,
         )
         content = resp["choices"][0]["message"].get("content") or ""
-        return self._parse(content, candidates)
+        chosen = self._parse(content, candidates)
+        if chosen:
+            return chosen
+        # The model produced nothing usable (bad JSON, refusal, or an empty reply even with the
+        # headroom above). Rather than stall the phase — ANALYSIS can't advance until something is
+        # tested — fall back to testing the first few open hypotheses with a generic method derived
+        # from each claim. Keeps the engagement moving on any model; a good strategist just orders
+        # the work better than this default does.
+        log.warning("strategist produced no usable dispatch; falling back to the open hypotheses")
+        return [(h["hypothesis_id"], f"test whether: {h.get('claim', h.get('title', ''))}"[:200])
+                for h in candidates[:self.max_experiments]]
 
     def _parse(self, content: str, candidates: list[dict]) -> list[tuple[str, str]]:
         """Pull the JSON array out of the reply and turn it into validated (hypothesis_id, method)

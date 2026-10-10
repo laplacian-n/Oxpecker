@@ -126,8 +126,17 @@ class Broker:
         approval_queue: ApprovalQueue | None = None,
         use_approval_queue: bool = False,
         policy_loader: Callable[[], policy_mod.Policy] | None = None,
+        auto_approve: bool = False,
     ):
         self.engagement_dir = engagement_dir
+        # Autonomous mode has no human to answer an approval prompt. When set, an approval-required
+        # dispatch is granted automatically INSTEAD of blocking on confirm_fn (which would hang
+        # forever on a subprocess whose stdin the MCP protocol owns) — and the audit says so, as an
+        # auto-approval, not a human one. This relaxes only the human-sign-off gate: every dispatch
+        # still clears scope, the engagement's allowed_action_classes, the deny list, the kill
+        # switch and the cooldown first, so the operator's RoE remains the ceiling. Off by default;
+        # a human-in-the-loop (CLI/UI) run never auto-approves.
+        self.auto_approve = auto_approve
         # Where the policy comes from. The default reads roe.json/scope.txt/deny.txt from
         # `engagement_dir`, which is how every CLI caller works. A caller that holds its
         # engagement somewhere other than on disk — the web runtime keeps them in memory —
@@ -466,6 +475,14 @@ class Broker:
                     )
                 approved = record["status"] == "approved"
                 approval_ref = f"queue-approved-{request_id}"
+            elif self.auto_approve:
+                # Autonomous: granted without a human, bounded by the gates already passed above
+                # (scope, action class, deny, kill switch, cooldown). Recorded as an auto-approval
+                # so the audit never claims a human signed off.
+                approved = True
+                self.approval_queue.resolve(
+                    request_id, approved=True, resolved_by="autonomous-auto-approve")
+                approval_ref = f"auto-approved-{time.time()}"
             else:
                 approved = self.confirm_fn(
                     f"\n[approval required{note}] {request.tool}({request.arguments})  [y/N] "
@@ -473,7 +490,10 @@ class Broker:
                 self.approval_queue.resolve(request_id, approved=approved, resolved_by="cli-operator")
                 approval_ref = f"cli-approved-{time.time()}"
             event_emit.emit(request.engagement_id, "approval_resolved",
-                            {"request_id": request_id, "status": "approved" if approved else "denied"})
+                            {"request_id": request_id,
+                             "status": ("auto_approved" if (approved and self.auto_approve
+                                                            and not self.use_approval_queue)
+                                        else "approved" if approved else "denied")})
             if not approved:
                 reason = "human declined approval" + note
                 rule = "approval_required_taint" if taint_escalation else "approval_required"

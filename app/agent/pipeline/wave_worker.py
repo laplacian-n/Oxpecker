@@ -126,6 +126,11 @@ def make_agent_loop_worker(
             # (locks.py; the lock is re-entrant only on its holder). The workers of one wave are that
             # run, serialized as a unit by the driver's lock, not competing sessions.
             serialize_engagement=False,
+            # A wave worker is unattended: there is no operator to answer an approval prompt, and
+            # the security subprocess cannot block on stdin. Approval-required dispatches are granted
+            # automatically (audited as auto-approvals) — still bounded by scope, the engagement's
+            # allowed_action_classes, the deny list and the kill switch, which the operator set.
+            auto_approve=True,
         )
         if client_factory is not None:
             kwargs["client"] = client_factory()
