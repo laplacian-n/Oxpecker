@@ -220,6 +220,67 @@ class TestVerificationRaisesAssurance(unittest.TestCase):
         self.assertEqual(self.store.get(f.finding_id).confirmed_by, "downstream")  # unchanged
 
 
+class TestRuleOutcome(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rule-outcome-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.store = FindingsStore("e1", findings_dir=self.tmp)
+
+    def test_a_match_raises_model_to_rule_and_leaves_no_disagreement(self):
+        f = self.store.add(_finding(confirmed_by="model"))
+        updated = self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=True)
+        self.assertEqual(updated.confirmed_by, "rule")
+        self.assertIsNone(updated.rule_disagreed)
+        self.assertEqual(self.store.get(f.finding_id).confirmed_by, "rule")
+
+    def test_a_match_does_not_lower_a_downstream_finding(self):
+        f = self.store.add(_finding(confirmed_by="downstream"))
+        updated = self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=True)
+        self.assertEqual(updated.confirmed_by, "downstream")
+        self.assertEqual(self.store.get(f.finding_id).confirmed_by, "downstream")
+
+    def test_a_match_clears_a_previously_set_disagreement(self):
+        f = self.store.add(_finding())
+        self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=False)
+        updated = self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=True)
+        self.assertIsNone(updated.rule_disagreed)
+        self.assertEqual(updated.confirmed_by, "rule")
+
+    def test_a_non_match_leaves_confirmed_by_and_sets_the_disagreement(self):
+        f = self.store.add(_finding(confirmed_by="model"))
+        updated = self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=False)
+        self.assertEqual(updated.confirmed_by, "model")
+        self.assertEqual(updated.rule_disagreed, "open_port@1")
+        stored = self.store.get(f.finding_id)
+        self.assertEqual(stored.confirmed_by, "model")
+        self.assertEqual(stored.rule_disagreed, "open_port@1")
+
+    def test_a_non_match_does_not_lower_an_earned_assurance(self):
+        f = self.store.add(_finding(confirmed_by="differential"))
+        updated = self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=False)
+        self.assertEqual(updated.confirmed_by, "differential")
+
+    def test_rule_outcome_does_not_touch_review_verifier_or_status(self):
+        f = self.store.add(_finding(status="hypothesis"))
+        self.store.mark_reviewed(f.finding_id, "alice")
+        self.store.record_rule_outcome(f.finding_id, rule_ref="open_port@1", matched=True)
+        stored = self.store.get(f.finding_id)
+        self.assertEqual(stored.reviewed_by, "alice")
+        self.assertEqual(stored.verifier, "unspecified")
+        self.assertIsNone(stored.last_verified)
+        self.assertEqual(stored.status, "hypothesis")
+
+    def test_rule_outcome_only_touches_the_matching_finding(self):
+        a = self.store.add(_finding(title="A"))
+        b = self.store.add(_finding(title="B"))
+        self.store.record_rule_outcome(a.finding_id, rule_ref="open_port@1", matched=True)
+        self.assertEqual(self.store.get(b.finding_id).confirmed_by, "model")
+
+    def test_rule_outcome_on_unknown_id_raises(self):
+        with self.assertRaises(FindingNotFoundError):
+            self.store.record_rule_outcome("not-a-real-id", rule_ref="open_port@1", matched=True)
+
+
 def _section(md: str, heading: str) -> str:
     """The text of one `## ` section: from its heading up to the next `## ` heading (or EOF)."""
     start = md.index(heading)

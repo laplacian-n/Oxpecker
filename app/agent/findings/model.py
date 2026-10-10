@@ -257,6 +257,37 @@ class FindingsStore:
         _write_atomic(self.path, "".join(json.dumps(f.to_dict()) + "\n" for f in rewritten))
         return updated
 
+    def record_rule_outcome(self, finding_id: str, *, rule_ref: str, matched: bool) -> Finding:
+        """Record a confirmation rule's outcome on a finding (§8.6.4 / §8.6.4.1).
+
+        A rule STRENGTHENS a finding, it never gates it. On a match, assurance rises to `rule` —
+        but only if `rule` is above the current level, so an earned `differential`/`downstream`/
+        `human` is never lowered — and any earlier disagreement is cleared. On a non-match the
+        model's positive call stands ("believe the model", not a refutation): `confirmed_by` is left
+        alone and the rule is recorded in `rule_disagreed` as a defect report against the rule.
+
+        Same atomic whole-file rewrite as record_verification/mark_reviewed. It never touches
+        `reviewed_by`, `verifier`, `last_verified` or `status`."""
+        if not rule_ref or not rule_ref.strip():
+            raise ValueError("rule_ref must be a non-empty id@version string")
+        findings = self.list_all()
+        updated = None
+        rewritten = []
+        for f in findings:
+            if f.finding_id == finding_id:
+                if matched:
+                    if assurance_rank("rule") > assurance_rank(f.confirmed_by):
+                        f.confirmed_by = "rule"  # raise only — never lower an earned assurance
+                    f.rule_disagreed = None
+                else:
+                    f.rule_disagreed = rule_ref.strip()
+                updated = f
+            rewritten.append(f)
+        if updated is None:
+            raise FindingNotFoundError(f"no finding {finding_id!r} in {self.path}")
+        _write_atomic(self.path, "".join(json.dumps(f.to_dict()) + "\n" for f in rewritten))
+        return updated
+
     def mark_reviewed(self, finding_id: str, reviewed_by: str) -> Finding:
         """The human review gate (see Finding.reviewed_by's own comment) — an operator action,
         never something the model-facing record_finding tool calls itself. JSONL has no
