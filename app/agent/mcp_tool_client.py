@@ -27,6 +27,26 @@ from mcp.client.stdio import stdio_client
 _STOP = object()
 
 
+def _subprocess_env() -> dict:
+    """The environment the MCP server subprocess is launched with.
+
+    Left to itself the MCP SDK uses a *minimal* environment (get_default_environment(): only
+    PATH/HOME/USER/…) and strips everything else — which dropped AGENT_ENGAGEMENTS_ROOT. The
+    security MCP server resolves which engagement's RoE/scope to enforce from config.ENGAGEMENTS_ROOT
+    (resolve_engagement_dir), so without it the subprocess fell back to the legacy default lab
+    engagement (localhost-only scope) no matter which engagement the run actually targeted: every
+    probe of a real target was denied "not in scope" and recon produced nothing, and the broker was
+    enforcing a *different* engagement's rules than the one in effect. The dev server sets
+    config.ENGAGEMENTS_ROOT at runtime (to its DATA_DIR), not via the environment, so its live value
+    is passed through explicitly here. The parent's full environment is inherited too — this is our
+    own trusted server, not an arbitrary third-party one — so other config overrides (AGENT_STATE_DIR
+    and the like) resolve to the same paths in the child."""
+    import os
+
+    from . import config
+    return {**os.environ, "AGENT_ENGAGEMENTS_ROOT": str(config.ENGAGEMENTS_ROOT)}
+
+
 def _parse_tool_result(result) -> dict:
     """Map an MCP `CallToolResult` to the plain dict the loop expects.
 
@@ -62,7 +82,7 @@ class MCPToolClient:
         import pathlib
         _pkg_root = pathlib.Path(__file__).resolve().parent.parent
         self._server_params = StdioServerParameters(
-            command=sys.executable, args=args, cwd=str(_pkg_root))
+            command=sys.executable, args=args, cwd=str(_pkg_root), env=_subprocess_env())
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
