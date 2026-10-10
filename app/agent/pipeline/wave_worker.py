@@ -76,6 +76,12 @@ def make_agent_loop_worker(
             use_hypothesis_graph=True,
             device_id=device_id,
             stop_event=stop,
+            # The orchestrator's caller (AutonomousDriver.run / GraphPhaseRunner) already holds the
+            # engagement RLock for the whole run, and each worker runs on its own thread — so taking
+            # that same lock here would deadlock the worker against the thread that holds it
+            # (locks.py; the lock is re-entrant only on its holder). The workers of one wave are that
+            # run, serialized as a unit by the driver's lock, not competing sessions.
+            serialize_engagement=False,
         )
         if client_factory is not None:
             kwargs["client"] = client_factory()
