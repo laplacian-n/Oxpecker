@@ -71,8 +71,13 @@ class StrategistParseTest(unittest.TestCase):
         )
         self.assertEqual(len(Strategist(self.store, provider, max_experiments=3).decide()), 3)
 
-    def test_a_reply_with_no_json_dispatches_nothing_rather_than_guessing(self):
-        self.assertEqual(Strategist(self.store, FakeProvider("I think we should probe login.")).decide(), [])
+    def test_a_reply_with_no_json_falls_back_to_the_open_hypotheses(self):
+        # A model that will not produce the JSON array must not stall ANALYSIS: the strategist
+        # falls back to testing the open hypotheses (so the phase keeps moving on any model),
+        # rather than dispatching nothing.
+        chosen = Strategist(self.store, FakeProvider("I think we should probe login.")).decide()
+        self.assertEqual({hid for hid, _ in chosen}, {self.h1, self.h2})
+        self.assertTrue(all(method for _, method in chosen))
 
     def test_no_open_hypotheses_means_no_model_call(self):
         # park both so there are no candidates; the provider must not be called.

@@ -144,13 +144,21 @@ class GraphPhaseRunner:
         # per mechanical finding (missing headers, insecure cookies, disclosed versions, linked
         # endpoints, forms). This guarantees a non-empty, testable graph even when the model's recon
         # pass does not write hypotheses — the failure that left every engagement closing out after
-        # one shallow pass. The model pass still runs for depth this misses.
+        # one shallow pass.
+        seeded = 0
         for r in open_roots:
-            self._seed_root_deterministically(r)
+            seeded += self._seed_root_deterministically(r)
 
-        dispatch = [(r["hypothesis_id"], "enumerate the in-scope surface") for r in open_roots]
-        runner = self._recon_runner or self._default_recon_runner()
-        runner(dispatch)
+        # The model recon pass is a fallback for a target the deterministic rules could not read
+        # (seeded nothing). When seeding already produced a surface, skip it: it was observed to
+        # make the model crawl dozens of URLs (one run issued 42 http_recon calls, ran for minutes
+        # and left the next phase wedged), and the deeper, model-driven testing belongs to ANALYSIS,
+        # which also branches off what it finds. So the model runs here only when there is nothing
+        # to test yet — and an injected recon runner (tests) still runs, since it is explicit.
+        if seeded == 0 or self._recon_runner is not None:
+            dispatch = [(r["hypothesis_id"], "enumerate the in-scope surface") for r in open_roots]
+            runner = self._recon_runner or self._default_recon_runner()
+            runner(dispatch)
 
         # Surface what recon found to the operator (the UI renders these over the SSE) — so an
         # autonomous run shows the attack surface it is about to investigate instead of jumping
