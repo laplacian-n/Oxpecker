@@ -147,6 +147,20 @@ async function ensureServer(c, healthUrl, label) {
 
 async function startEverything() {
   cfg = loadConfig();
+
+  // Remote mode: the server runs on another host (the Ubuntu box) — spawn nothing locally, just
+  // load its UI. Set "remoteUrl" in config.local.json (e.g. "http://192.168.1.50:7777"); once the
+  // page loads, paste the API key into the UI's key field. /health is the unauthenticated probe
+  // the server keeps open for exactly this. See docs/DEPLOY_UBUNTU.md.
+  if (cfg.remoteUrl) {
+    const base = String(cfg.remoteUrl).replace(/\/$/, '');
+    console.log(`[oxpecker] remote mode — loading ${base}, spawning nothing locally`);
+    const ok = await waitForHealth(`${base}/health`, 'remote Oxpecker server', 20000);
+    if (!ok) return fail(`Could not reach the remote Oxpecker server at ${base}. Is it running and reachable on the LAN (and bound with --host 0.0.0.0)?`);
+    mainWindow.loadURL(base);
+    return;
+  }
+
   const chatUrl = `http://127.0.0.1:${cfg.chatLlama.port}/health`;
   const embedUrl = cfg.embedLlama ? `http://127.0.0.1:${cfg.embedLlama.port}/health` : null;
   const devUrl = `http://127.0.0.1:${cfg.devServer.port}/api/health`;

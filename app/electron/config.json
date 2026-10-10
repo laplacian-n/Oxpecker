@@ -1,5 +1,7 @@
 {
   "_comment": "TEMPLATE — edit the paths below to point at YOUR llama-server, model and RAG index. For a private override that is never committed or shipped, copy this file to electron/config.local.json (gitignored) and the app will prefer it.",
+  "_remote_comment": "To connect to a server on another host (e.g. an Ubuntu box running dev_server --host 0.0.0.0) instead of spawning everything locally, set remoteUrl to that server's URL and nothing below is used — the app just loads it and you paste the API key into the UI. Leave remoteUrl empty for a local install.",
+  "remoteUrl": "",
   "pythonCmd": "py",
   "startLlama": true,
   "devServer": {
