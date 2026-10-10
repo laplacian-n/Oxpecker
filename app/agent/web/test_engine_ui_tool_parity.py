@@ -44,9 +44,8 @@ KNOWN_MISSING_FROM_UI = {
     # the hypothesis graph: the full tool set (reads + writes) is now mounted on the UI runtime in
     # step 3, so none remain here. The record_hypothesis/update_hypothesis_status lookalikes stay in
     # KNOWN_UI_ONLY as back-compat aliases until a final cleanup removes them.
-    # the working notebook: the reads (note_search, technique_recall) are wired across; the write
-    # tools stay until their model-facing interface is consolidated.
-    "note_add", "note_resolve", "note_promote",
+    # the working notebook: the full tool set (reads + writes) is now mounted on the UI runtime in
+    # step 3, so none remain here. record_note stays in KNOWN_UI_ONLY as a back-compat alias.
 }
 
 # UI tools with no engine counterpart under the graph-on configuration, documented so the test is
