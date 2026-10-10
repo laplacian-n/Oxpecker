@@ -230,6 +230,10 @@ TRACK YOUR WORK (keep the hypothesis graph and notebook alive — do this contin
   confirmed or refuted until you have ACTUALLY run the test with a tool — if you recorded a
   hypothesis to test the login SQLi, you must send that POST payload before judging it. No verdict
   without evidence from a tool call this turn.
+- Before recording a new hypothesis, call graph_search (by ordinal, title or keyword) to check you
+  are not repeating one you already have — reuse the existing ordinal instead of making a duplicate.
+- Use graph_read_branch on a hypothesis's ordinal to revisit an earlier line of attack and what it
+  found, rather than re-deriving it from memory.
 - Jot record_note as you work: a technique that worked, a dead-end to avoid, a todo, an observation.
 - Call record_finding for every CONFIRMED vulnerability, with evidence.
 A real red-teamer leaves a trail — the operator watches the hypothesis tree and notebook fill up
@@ -1533,6 +1537,13 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
                                                 refs=args.get("refs", []) or []))
         return {"ok": True, "note_ordinal": ordinal}
 
+    elif name in ("graph_search", "graph_read_branch"):
+        # §12 step 3 — the engine's own read-only graph tools, mounted on the UI runtime against
+        # this engagement's graph service (the single tool plane). In-process: a graph read is not
+        # a target action, so no broker. Keyed by engagement, exactly like record_hypothesis.
+        from ..hypothesis_graph.tools import dispatch as _graph_tool_dispatch
+        return _graph_tool_dispatch(_graph_service(session.engagement_id), name, args)
+
     elif name == "port_discovery":
         # Delegates to the same security_tools implementation the CLI uses, with a Policy built
         # from this session's engagement. That brings four things the web runtime had no way to
@@ -2020,6 +2031,17 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "record_finding", "description": "Record a security finding.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]}, "target": {"type": "string"}, "description": {"type": "string"}, "remediation": {"type": "string"}}, "required": ["title", "severity", "description"]}}},
     {"type": "function", "function": {"name": "record_note", "description": "Jot a note in the engagement notebook: a technique that worked, a dead-end to avoid, a todo, or an observation. Keep a running lab notebook like a real red-teamer does.", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "The note"}, "category": {"type": "string", "enum": ["technique", "dead-end", "todo", "observation"], "default": "observation"}}, "required": ["text"]}}},
 ]
+
+# §12 step 3 — mount the engine's read-only hypothesis-graph tools (search + read-branch) on the UI
+# runtime from the engine's OWN schema source, so there is one definition per tool rather than a
+# dev_server copy that can drift. The write tools (graph_hypothesis_add / attempt_* / set_verdict /
+# park / abandon / set_active_path) still reach the model through record_hypothesis /
+# update_hypothesis_status until that model-facing interface is consolidated as its own step;
+# these two reads are additive and carry no write-path risk.
+from ..hypothesis_graph.tools import SCHEMAS as _ENGINE_GRAPH_SCHEMAS  # noqa: E402
+
+_UI_GRAPH_READ_TOOLS = ("graph_search", "graph_read_branch")
+TOOL_SCHEMAS += [s for s in _ENGINE_GRAPH_SCHEMAS if s["function"]["name"] in _UI_GRAPH_READ_TOOLS]
 
 SECURITY_TOOL_SCHEMAS = [
     # What the "security tools" toggle gates, now that it gates something. These reach the

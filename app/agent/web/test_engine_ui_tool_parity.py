@@ -41,9 +41,11 @@ KNOWN_MISSING_FROM_UI = {
     # internet / osint / browser (security-gated, broker-mediated)
     "knowledge_fetch", "osint_record", "browser_fetch",
     "security_reference_search",
-    # the hypothesis graph (replaces dev_server's in-memory lookalike, §3.1)
+    # the hypothesis graph (replaces dev_server's in-memory lookalike, §3.1). The two read-only
+    # tools (graph_search, graph_read_branch) are wired across in step 3 and removed from here; the
+    # write tools stay until their model-facing interface is consolidated.
     "graph_hypothesis_add", "graph_attempt_start", "graph_attempt_complete", "graph_set_verdict",
-    "graph_park", "graph_abandon", "graph_set_active_path", "graph_search", "graph_read_branch",
+    "graph_park", "graph_abandon", "graph_set_active_path",
     # the working notebook
     "note_add", "note_search", "note_resolve", "note_promote", "technique_recall",
 }
