@@ -700,6 +700,66 @@ _approvals: dict[str, ApprovalRequest] = {}
 _consults: dict[str, ConsultRequest] = {}
 _graphs: dict[str, list[HypothesisNode]] = {}
 _graph_edges: dict[str, list[dict]] = {}
+
+
+# The hypothesis store. Every read and write of _graphs / _graph_edges goes through these
+# accessors so the backing store can be swapped by rewriting them alone.
+
+def _graph_has_key(key: str) -> bool:
+    return key in _graphs
+
+
+def _graph_ensure(key: str) -> None:
+    """Create empty node and edge buckets for `key` if its graph is absent."""
+    if key not in _graphs:
+        _graphs[key] = []
+        _graph_edges[key] = []
+
+
+def _graph_nodes(key: str) -> list:
+    return _graphs.get(key, [])
+
+
+def _graph_edges_for(key: str) -> list:
+    return _graph_edges.get(key, [])
+
+
+def _graph_add_node(key: str, node) -> None:
+    _graphs.setdefault(key, [])
+    _graph_edges.setdefault(key, [])
+    _graphs[key].append(node)
+
+
+def _graph_add_edge(key: str, edge: dict) -> None:
+    _graph_edges.setdefault(key, []).append(edge)
+
+
+def _graph_update_node(key, ordinal, *, status=None, verdict=None, evidence=None):
+    for n in _graphs.get(key, []):
+        if n.ordinal == ordinal:
+            if status is not None:
+                n.status = status
+            if verdict is not None:
+                n.verdict = verdict
+            if evidence:
+                n.attempts.append({"method": "evidence", "result": evidence, "status": "done"})
+            return n
+    return None
+
+
+def _graph_snapshot() -> dict:
+    return {
+        "graphs": {eid: [n.to_detail() for n in ns] for eid, ns in _graphs.items()},
+        "graph_edges": _graph_edges,
+    }
+
+
+def _graph_restore(graphs_data: dict, edges_data: dict) -> None:
+    for eid, ns in graphs_data.items():
+        _graphs[eid] = [_mk(HypothesisNode, n) for n in ns]
+    _graph_edges.update(edges_data)
+
+
 _notebooks: dict[str, list[NotebookNote]] = {}
 _findings: dict[str, list[Finding]] = {}
 
@@ -760,6 +820,51 @@ def _findings_restore(data: dict) -> None:
 
 _technique_kb: list[dict] = []
 
+
+# The notebook store. Every read and write of _notebooks goes through these accessors so the
+# backing store can be swapped by rewriting them alone.
+
+def _notebook_has_key(key: str) -> bool:
+    return key in _notebooks
+
+
+def _notebook_ensure(key: str) -> None:
+    """Create an empty note bucket for `key` if it is absent."""
+    if key not in _notebooks:
+        _notebooks[key] = []
+
+
+def _notebook_notes(key: str) -> list:
+    return _notebooks.get(key, [])
+
+
+def _notebook_add_note(key: str, note) -> None:
+    _notebook_ensure(key)
+    _notebooks[key].append(note)
+
+
+def _notebook_set_resolved(key: str, ordinal: int, action: str):
+    """Apply a resolve/reopen action to the note with this ordinal under `key`.
+    Returns the note, or None if `key` holds no note with that ordinal."""
+    for n in _notebooks.get(key, []):
+        if n.ordinal == ordinal:
+            if action == "resolve":
+                n.resolved = True
+            elif action == "reopen":
+                n.resolved = False
+            return n
+    return None
+
+
+def _notebook_snapshot() -> dict:
+    return {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()}
+
+
+def _notebook_restore(data: dict) -> None:
+    for eid, ns in data.items():
+        _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
+
+
 # Serializes access to the single-slot llama-server: concurrent generations (e.g. two
 # MCP-driven turns at once) otherwise pile onto `-np 1` and wedge the slot.
 _LLM_LOCK = threading.Lock()
@@ -806,9 +911,8 @@ def _persist():
                 for e in list(_engagements.values())
             ],
             "findings": _findings_snapshot(),
-            "graphs": {eid: [n.to_detail() for n in ns] for eid, ns in _graphs.items()},
-            "graph_edges": _graph_edges,
-            "notebooks": {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()},
+            **_graph_snapshot(),
+            "notebooks": _notebook_snapshot(),
         }
         with _persist_lock:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -834,11 +938,8 @@ def _load_state():
         eng.program = _Program.from_dict(e.get("program"))
         _engagements[e["engagement_id"]] = eng
     _findings_restore(data.get("findings", {}))
-    for eid, ns in data.get("graphs", {}).items():
-        _graphs[eid] = [_mk(HypothesisNode, n) for n in ns]
-    _graph_edges.update(data.get("graph_edges", {}))
-    for eid, ns in data.get("notebooks", {}).items():
-        _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
+    _graph_restore(data.get("graphs", {}), data.get("graph_edges", {}))
+    _notebook_restore(data.get("notebooks", {}))
     for sd in data.get("sessions", []):
         s = Session(
             session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
@@ -1212,10 +1313,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 
     elif name == "record_hypothesis":
         eng_id = session.session_id  # graph is per-session (each chat keeps its own tree)
-        if eng_id not in _graphs:
-            _graphs[eng_id] = []
-            _graph_edges[eng_id] = []
-        nodes = _graphs[eng_id]
+        _graph_ensure(eng_id)
+        nodes = _graph_nodes(eng_id)
         title = (args.get("title") or "").strip()
         if not title:
             return {"ok": False, "error": "title is required for a hypothesis"}
@@ -1232,9 +1331,9 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             phase=args.get("phase", "RECON"),
             parent_ordinal=args.get("parent_ordinal"),
         )
-        nodes.append(node)
+        _graph_add_node(eng_id, node)
         if node.parent_ordinal:
-            _graph_edges[eng_id].append({
+            _graph_add_edge(eng_id, {
                 "from_ordinal": node.parent_ordinal,
                 "to_ordinal": ordinal,
                 "edge_type": "derives",
@@ -1243,16 +1342,12 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 
     elif name == "update_hypothesis_status":
         eng_id = session.session_id
-        nodes = _graphs.get(eng_id, [])
         h_id = args.get("hypothesis_id", "")
         ordinal = int(re.sub(r"[^0-9]", "", h_id)) if h_id else args.get("ordinal", 0)
-        for n in nodes:
-            if n.ordinal == ordinal:
-                n.status = args.get("status", n.status)
-                n.verdict = args.get("verdict", n.verdict)
-                if args.get("evidence"):
-                    n.attempts.append({"method": "evidence", "result": args["evidence"], "status": "done"})
-                return {"ok": True, "hypothesis_id": h_id}
+        node = _graph_update_node(eng_id, ordinal, status=args.get("status"),
+                                  verdict=args.get("verdict"), evidence=args.get("evidence"))
+        if node is not None:
+            return {"ok": True, "hypothesis_id": h_id}
         return {"ok": False, "error": f"hypothesis {h_id} not found"}
 
     elif name == "record_finding":
@@ -1288,9 +1383,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 
     elif name == "record_note":
         eng_id = session.session_id
-        if eng_id not in _notebooks:
-            _notebooks[eng_id] = []
-        notes = _notebooks[eng_id]
+        _notebook_ensure(eng_id)
+        notes = _notebook_notes(eng_id)
         ordinal = len(notes) + 1
         cat = args.get("category", "observation")
         if cat not in ("technique", "dead-end", "todo", "observation"):
@@ -1303,8 +1397,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         for n in notes:
             if (n.text or "").strip() == note_text:
                 return {"ok": True, "note_ordinal": n.ordinal, "deduped": True}
-        notes.append(NotebookNote(ordinal=ordinal, text=note_text, category=cat,
-                                  refs=args.get("refs", []) or []))
+        _notebook_add_note(eng_id, NotebookNote(ordinal=ordinal, text=note_text, category=cat,
+                                                refs=args.get("refs", []) or []))
         return {"ok": True, "note_ordinal": ordinal}
 
     elif name == "port_discovery":
@@ -3204,7 +3298,7 @@ def _scope_keys(path_id: str) -> list[str]:
     if path_id in _sessions:
         return [path_id]
     keys = [sid for sid, s in _sessions.items() if s.engagement_id == path_id]
-    if path_id in _graphs or path_id in _notebooks or _finding_has_key(path_id):
+    if _graph_has_key(path_id) or _notebook_has_key(path_id) or _finding_has_key(path_id):
         keys.append(path_id)
     return keys
 
@@ -3212,8 +3306,8 @@ def _scope_keys(path_id: str) -> list[str]:
 def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
     nodes, edges = [], []
     for k in _scope_keys(engagement_id):
-        nodes += _graphs.get(k, [])
-        edges += _graph_edges.get(k, [])
+        nodes += _graph_nodes(k)
+        edges += _graph_edges_for(k)
     if not nodes:
         return {"exists": False, "nodes": [], "edges": [], "graph_state": None}
     filtered = nodes if not phase else [n for n in nodes if n.phase == phase]
@@ -3227,7 +3321,7 @@ def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
 @app.get("/api/engagements/{engagement_id}/hypothesis-graph/nodes/{ordinal}")
 def hypothesis_graph_node(engagement_id: str, ordinal: int):
     for k in _scope_keys(engagement_id):
-        for n in _graphs.get(k, []):
+        for n in _graph_nodes(k):
             if n.ordinal == ordinal:
                 return n.to_detail()
     raise HTTPException(404, f"node {ordinal} not found")
@@ -3236,7 +3330,7 @@ def hypothesis_graph_node(engagement_id: str, ordinal: int):
 def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraphActionRequest):
     node = None
     for k in _scope_keys(engagement_id):
-        for n in _graphs.get(k, []):
+        for n in _graph_nodes(k):
             if n.ordinal == ordinal:
                 node = n
                 break
@@ -3264,7 +3358,7 @@ def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraph
 def notebook_overview(engagement_id: str):
     notes = []
     for k in _scope_keys(engagement_id):
-        notes += _notebooks.get(k, [])
+        notes += _notebook_notes(k)
     if not notes:
         return {"exists": False, "notes": [], "counts": {}, "version": 0}
     counts = Counter(n.category for n in notes)
@@ -3277,15 +3371,10 @@ def notebook_overview(engagement_id: str):
 
 @app.post("/api/engagements/{engagement_id}/notebook/notes/{ordinal}/resolve")
 def notebook_resolve(engagement_id: str, ordinal: int, req: NotebookResolveRequest):
-    notes = []
+    # Scope keys are searched in order and the first note with this ordinal wins, as before.
     for k in _scope_keys(engagement_id):
-        notes += _notebooks.get(k, [])
-    for n in notes:
-        if n.ordinal == ordinal:
-            if req.action == "resolve":
-                n.resolved = True
-            elif req.action == "reopen":
-                n.resolved = False
+        n = _notebook_set_resolved(k, ordinal, req.action)
+        if n is not None:
             return {"ok": True, "resolved": n.resolved}
     raise HTTPException(404, f"note {ordinal} not found")
 
