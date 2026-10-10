@@ -5,7 +5,7 @@ what you want in.
 
 ## Keeping the web UI running
 
-`agent.run_web_ui` (`agent/web/server.py` under uvicorn) has no built-in supervisor — until now,
+`agent.run_web_ui` (`agent/web/dev_server.py` under uvicorn — the security-complete app, not the stripped `agent/web/server.py`) has no built-in supervisor — until now,
 a crash or a reboot meant starting it back up by hand. `localai-web.service` is a systemd **user**
 unit that does that for you: restarts it on crash, and can start it automatically on login/boot.
 

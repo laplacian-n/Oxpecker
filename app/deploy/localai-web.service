@@ -1,5 +1,5 @@
 [Unit]
-Description=localAI web UI (agent.web.server, run via uvicorn)
+Description=localAI web UI (agent.web.dev_server, run via uvicorn)
 After=network.target
 
 [Service]
