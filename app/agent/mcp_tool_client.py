@@ -30,7 +30,16 @@ _STOP = object()
 class MCPToolClient:
     def __init__(self, server_module: str, server_args: list[str], connect_timeout_s: float = 30):
         args = ["-m", server_module, *server_args]
-        self._server_params = StdioServerParameters(command=sys.executable, args=args)
+        # Run the server subprocess from the package root (the dir that contains the `agent`
+        # package), so `python -m agent.security_mcp_server` resolves no matter what working
+        # directory the parent was launched from. Without this, launching dev_server from anywhere
+        # but app/ makes the subprocess fail with "No module named 'agent'" and every
+        # broker-mediated tool (port_discovery, http_recon, knowledge_fetch, browser_fetch) silently
+        # becomes unavailable — the agent then walks its phases but can never actually probe.
+        import pathlib
+        _pkg_root = pathlib.Path(__file__).resolve().parent.parent
+        self._server_params = StdioServerParameters(
+            command=sys.executable, args=args, cwd=str(_pkg_root))
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
