@@ -700,6 +700,66 @@ _approvals: dict[str, ApprovalRequest] = {}
 _consults: dict[str, ConsultRequest] = {}
 _graphs: dict[str, list[HypothesisNode]] = {}
 _graph_edges: dict[str, list[dict]] = {}
+
+
+# The hypothesis store. Every read and write of _graphs / _graph_edges goes through these
+# accessors so the backing store can be swapped by rewriting them alone.
+
+def _graph_has_key(key: str) -> bool:
+    return key in _graphs
+
+
+def _graph_ensure(key: str) -> None:
+    """Create empty node and edge buckets for `key` if its graph is absent."""
+    if key not in _graphs:
+        _graphs[key] = []
+        _graph_edges[key] = []
+
+
+def _graph_nodes(key: str) -> list:
+    return _graphs.get(key, [])
+
+
+def _graph_edges_for(key: str) -> list:
+    return _graph_edges.get(key, [])
+
+
+def _graph_add_node(key: str, node) -> None:
+    _graphs.setdefault(key, [])
+    _graph_edges.setdefault(key, [])
+    _graphs[key].append(node)
+
+
+def _graph_add_edge(key: str, edge: dict) -> None:
+    _graph_edges.setdefault(key, []).append(edge)
+
+
+def _graph_update_node(key, ordinal, *, status=None, verdict=None, evidence=None):
+    for n in _graphs.get(key, []):
+        if n.ordinal == ordinal:
+            if status is not None:
+                n.status = status
+            if verdict is not None:
+                n.verdict = verdict
+            if evidence:
+                n.attempts.append({"method": "evidence", "result": evidence, "status": "done"})
+            return n
+    return None
+
+
+def _graph_snapshot() -> dict:
+    return {
+        "graphs": {eid: [n.to_detail() for n in ns] for eid, ns in _graphs.items()},
+        "graph_edges": _graph_edges,
+    }
+
+
+def _graph_restore(graphs_data: dict, edges_data: dict) -> None:
+    for eid, ns in graphs_data.items():
+        _graphs[eid] = [_mk(HypothesisNode, n) for n in ns]
+    _graph_edges.update(edges_data)
+
+
 _notebooks: dict[str, list[NotebookNote]] = {}
 _findings: dict[str, list[Finding]] = {}
 _technique_kb: list[dict] = []
@@ -750,8 +810,7 @@ def _persist():
                 for e in list(_engagements.values())
             ],
             "findings": {eid: [f.to_dict() for f in fs] for eid, fs in _findings.items()},
-            "graphs": {eid: [n.to_detail() for n in ns] for eid, ns in _graphs.items()},
-            "graph_edges": _graph_edges,
+            **_graph_snapshot(),
             "notebooks": {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()},
         }
         with _persist_lock:
@@ -779,9 +838,7 @@ def _load_state():
         _engagements[e["engagement_id"]] = eng
     for eid, fs in data.get("findings", {}).items():
         _findings[eid] = [_mk(Finding, f) for f in fs]
-    for eid, ns in data.get("graphs", {}).items():
-        _graphs[eid] = [_mk(HypothesisNode, n) for n in ns]
-    _graph_edges.update(data.get("graph_edges", {}))
+    _graph_restore(data.get("graphs", {}), data.get("graph_edges", {}))
     for eid, ns in data.get("notebooks", {}).items():
         _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
     for sd in data.get("sessions", []):
@@ -1157,10 +1214,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 
     elif name == "record_hypothesis":
         eng_id = session.session_id  # graph is per-session (each chat keeps its own tree)
-        if eng_id not in _graphs:
-            _graphs[eng_id] = []
-            _graph_edges[eng_id] = []
-        nodes = _graphs[eng_id]
+        _graph_ensure(eng_id)
+        nodes = _graph_nodes(eng_id)
         title = (args.get("title") or "").strip()
         if not title:
             return {"ok": False, "error": "title is required for a hypothesis"}
@@ -1177,9 +1232,9 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             phase=args.get("phase", "RECON"),
             parent_ordinal=args.get("parent_ordinal"),
         )
-        nodes.append(node)
+        _graph_add_node(eng_id, node)
         if node.parent_ordinal:
-            _graph_edges[eng_id].append({
+            _graph_add_edge(eng_id, {
                 "from_ordinal": node.parent_ordinal,
                 "to_ordinal": ordinal,
                 "edge_type": "derives",
@@ -1188,16 +1243,12 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 
     elif name == "update_hypothesis_status":
         eng_id = session.session_id
-        nodes = _graphs.get(eng_id, [])
         h_id = args.get("hypothesis_id", "")
         ordinal = int(re.sub(r"[^0-9]", "", h_id)) if h_id else args.get("ordinal", 0)
-        for n in nodes:
-            if n.ordinal == ordinal:
-                n.status = args.get("status", n.status)
-                n.verdict = args.get("verdict", n.verdict)
-                if args.get("evidence"):
-                    n.attempts.append({"method": "evidence", "result": args["evidence"], "status": "done"})
-                return {"ok": True, "hypothesis_id": h_id}
+        node = _graph_update_node(eng_id, ordinal, status=args.get("status"),
+                                  verdict=args.get("verdict"), evidence=args.get("evidence"))
+        if node is not None:
+            return {"ok": True, "hypothesis_id": h_id}
         return {"ok": False, "error": f"hypothesis {h_id} not found"}
 
     elif name == "record_finding":
@@ -3150,7 +3201,7 @@ def _scope_keys(path_id: str) -> list[str]:
     if path_id in _sessions:
         return [path_id]
     keys = [sid for sid, s in _sessions.items() if s.engagement_id == path_id]
-    if path_id in _graphs or path_id in _notebooks or path_id in _findings:
+    if _graph_has_key(path_id) or path_id in _notebooks or path_id in _findings:
         keys.append(path_id)
     return keys
 
@@ -3158,8 +3209,8 @@ def _scope_keys(path_id: str) -> list[str]:
 def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
     nodes, edges = [], []
     for k in _scope_keys(engagement_id):
-        nodes += _graphs.get(k, [])
-        edges += _graph_edges.get(k, [])
+        nodes += _graph_nodes(k)
+        edges += _graph_edges_for(k)
     if not nodes:
         return {"exists": False, "nodes": [], "edges": [], "graph_state": None}
     filtered = nodes if not phase else [n for n in nodes if n.phase == phase]
@@ -3173,7 +3224,7 @@ def hypothesis_graph_overview(engagement_id: str, phase: str | None = None):
 @app.get("/api/engagements/{engagement_id}/hypothesis-graph/nodes/{ordinal}")
 def hypothesis_graph_node(engagement_id: str, ordinal: int):
     for k in _scope_keys(engagement_id):
-        for n in _graphs.get(k, []):
+        for n in _graph_nodes(k):
             if n.ordinal == ordinal:
                 return n.to_detail()
     raise HTTPException(404, f"node {ordinal} not found")
@@ -3182,7 +3233,7 @@ def hypothesis_graph_node(engagement_id: str, ordinal: int):
 def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraphActionRequest):
     node = None
     for k in _scope_keys(engagement_id):
-        for n in _graphs.get(k, []):
+        for n in _graph_nodes(k):
             if n.ordinal == ordinal:
                 node = n
                 break
