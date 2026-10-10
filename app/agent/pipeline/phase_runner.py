@@ -140,9 +140,22 @@ class GraphPhaseRunner:
                       if h.get("lifecycle_status") in ("draft", "open", "queued", "running")]
         if not open_roots:
             return False  # already enumerated — nothing to do this iteration
+        # Deterministic seed first: fetch each root's surface in code and record a child hypothesis
+        # per mechanical finding (missing headers, insecure cookies, disclosed versions, linked
+        # endpoints, forms). This guarantees a non-empty, testable graph even when the model's recon
+        # pass does not write hypotheses — the failure that left every engagement closing out after
+        # one shallow pass. The model pass still runs for depth this misses.
+        for r in open_roots:
+            self._seed_root_deterministically(r)
+
         dispatch = [(r["hypothesis_id"], "enumerate the in-scope surface") for r in open_roots]
         runner = self._recon_runner or self._default_recon_runner()
         runner(dispatch)
+
+        # Surface what recon found to the operator (the UI renders these over the SSE) — so an
+        # autonomous run shows the attack surface it is about to investigate instead of jumping
+        # silently from RECON to ANALYSIS.
+        self._announce(self._recon_summary(open_roots))
         # Recon is enumeration, not a verdict: once a root's recon ran, close it by lifecycle so the
         # strategist stops dispatching it and the phase can conclude (its children carry the
         # falsifiable claims forward).
@@ -150,16 +163,75 @@ class GraphPhaseRunner:
             cs.mark_root_enumerated(self.graph, r["hypothesis_id"])
         return True
 
+    def _announce(self, detail: str) -> None:
+        """Forward a human-readable progress line to the driver's event stream (the UI), if the
+        driver exposes one. Best-effort: a driver/test without _emit just gets nothing."""
+        if not detail:
+            return
+        emit = getattr(self.d, "_emit", None)
+        if callable(emit):
+            try:
+                emit("recon_enumerated", detail=detail)
+            except Exception:  # noqa: BLE001 — telemetry must never break enumeration
+                pass
+
+    def _recon_summary(self, roots: list[dict]) -> str:
+        """One line naming how many child hypotheses recon produced and a sample of their surfaces —
+        what the operator most wants to see when RECON finishes."""
+        from . import graph_coldstart as cs
+
+        children = cs.open_hypotheses_excluding_roots(self.graph)
+        if not children:
+            return "RECON found no testable surface on the in-scope target(s)."
+        surfaces = [c.get("surface") or c.get("title") or "" for c in children]
+        surfaces = [s for s in surfaces if s]
+        sample = ", ".join(surfaces[:8])
+        more = f" (+{len(surfaces) - 8} more)" if len(surfaces) > 8 else ""
+        return f"RECON found {len(children)} things to test: {sample}{more}"
+
+    def _seed_root_deterministically(self, root: dict) -> int:
+        """http_recon the root's scope host in code and seed child hypotheses from the response.
+
+        Best-effort: a scope entry that is a wildcard, an unreachable host, or an out-of-scope URL
+        simply seeds nothing (the model pass still runs). Never raises into enumeration."""
+        from . import graph_coldstart as cs
+        from .recon_seed import seed_recon_hypotheses
+
+        entry = cs.root_scope_entry(root)
+        if not entry or "*" in entry:
+            return 0
+        try:
+            from ..broker.policy import load_policy
+            from ..security_tools import http_recon
+
+            policy = load_policy(self.d.engagement_dir)
+            recon = None
+            for url in (f"https://{entry}/", f"http://{entry}/"):
+                try:
+                    recon = http_recon.run(url, policy)
+                except Exception:  # noqa: BLE001 — scope/DNS/TLS failure: try the next scheme
+                    recon = None
+                if recon and recon.get("ok"):
+                    return seed_recon_hypotheses(self.graph, root["hypothesis_id"], recon, url)
+        except Exception:  # noqa: BLE001 — deterministic seeding is a best-effort safety net
+            return 0
+        return 0
+
     def _default_recon_runner(self):
         # One wave dispatching the per-root recon experiments in parallel (the walkthrough's
         # "send several workers to recon"). Built lazily so importing this module needs no model
         # stack. Workers run on the engagement's model (OpenRouter when configured, so no GPU).
         from .engine import resolve_wave_clients
         from .wave import WaveOrchestrator
-        from .wave_worker import make_agent_loop_worker
+        from .wave_worker import make_agent_loop_worker, recon_brief
 
         _, client_factory = resolve_wave_clients(self.model)
-        worker = make_agent_loop_worker(self.d.engagement_id, client_factory=client_factory)
+        # The recon-specific brief: enumerate the surface and spawn a child hypothesis per element
+        # found (recon_brief), not the default "test one hypothesis, do not branch" brief. Without
+        # this the root records a single observation and closes with no children, so ANALYSIS has
+        # nothing to dispatch and the engagement ends after one shallow pass.
+        worker = make_agent_loop_worker(
+            self.d.engagement_id, client_factory=client_factory, brief_fn=recon_brief)
         orch = WaveOrchestrator(self.d.engagement_id, self.graph, worker)
         return lambda dispatch: orch.run_wave(1, dispatch)
 
@@ -174,7 +246,13 @@ class GraphPhaseRunner:
         )
         engine = factory()
         summary = engine.run()
-        return summary.get("waves", 0) > 0
+        waves = summary.get("waves", 0)
+        if waves:
+            tested = summary.get("experiments") or summary.get("dispatched") or ""
+            self._announce(
+                f"Investigated the hypotheses over {waves} wave(s)"
+                + (f", {tested} experiment(s)" if tested else "") + ".")
+        return waves > 0
 
     def produce(self, phase: str, attempts: dict) -> ProduceResult:
         if phase == "RECON":
