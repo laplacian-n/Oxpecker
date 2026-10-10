@@ -247,6 +247,9 @@ TRACK YOUR WORK (keep the hypothesis graph and notebook alive — do this contin
 - When a todo note is done or a dead-end is settled, close it with note_resolve (give the reason).
   When a note turns out to be a real lead worth testing, note_promote it into a hypothesis in the
   graph instead of retyping it.
+- For background technique/exploit knowledge, search the local corpus with
+  security_reference_search. File a subdomain or address you merely noticed, without probing it,
+  with osint_record (a filing cabinet, not a probe).
 - Call record_finding for every CONFIRMED vulnerability, with evidence.
 A real red-teamer leaves a trail — the operator watches the hypothesis tree and notebook fill up
 as you go, so keep them current round by round.
@@ -971,6 +974,14 @@ def _findings_restore(data: dict) -> None:
 
 _technique_kb: list[dict] = []
 
+# OSINT filing cabinet (osint_record): incidental out-of-scope observations, per engagement. A
+# plain store — never consulted by the scope check, only surfaced for the operator's awareness.
+_osint: dict[str, list[dict]] = {}
+
+
+def _osint_add(key: str, entry: dict) -> None:
+    _osint.setdefault(key, []).append(entry)
+
 
 # The notebook store (step 3). Swapped from the in-memory per-session dict to the real
 # NotebookService — ONE notebook per engagement, persisted beside the engagement's other data under
@@ -1134,6 +1145,7 @@ def _persist():
             "findings": _findings_snapshot(),
             **_graph_snapshot(),
             "notebooks": _notebook_snapshot(),
+            "osint": _osint,
         }
         with _persist_lock:
             tmp = STATE_FILE.with_suffix(".tmp")
@@ -1159,6 +1171,7 @@ def _load_state():
         eng.program = _Program.from_dict(e.get("program"))
         _engagements[e["engagement_id"]] = eng
     _findings_restore(data.get("findings", {}))
+    _osint.update(data.get("osint", {}))
     for sd in data.get("sessions", []):
         s = Session(
             session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
@@ -1534,6 +1547,60 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         results = _rag.search(query, top_k=args.get("top_k", 5))
         return {"ok": True, "results": results, "count": len(results)}
 
+    elif name == "security_reference_search":
+        # The CLI's name for the same bundled technique/reference index knowledge_search reads — a
+        # local corpus (HackTricks/ExploitDB/GTFOBins), not a network call. Not broker-mediated and
+        # taint-exempt, exactly as knowledge_search is.
+        query = args.get("query", "")
+        if not query:
+            return {"ok": False, "error": "empty query"}
+        results = _rag.search(query, top_k=args.get("top_k", 5))
+        return {"ok": True, "results": results, "count": len(results)}
+
+    elif name == "osint_record":
+        # A filing cabinet for incidental out-of-scope observations (a subdomain seen in a page, an
+        # email in response content) — a structured engagement-state write, no network call, so not
+        # broker-mediated (the engine treats it the same, LOCAL_BOOKKEEPING_TOOLS).
+        observation = (args.get("observation") or args.get("note")
+                       or args.get("value") or args.get("text") or "").strip()
+        if not observation:
+            return {"ok": False, "error": "osint_record needs an observation to file"}
+        _osint_add(session.engagement_id, {
+            "observation": observation, "kind": (args.get("kind") or "").strip(),
+            "source": (args.get("source") or "").strip(), "recorded_at": time.time()})
+        return {"ok": True, "recorded": observation}
+
+    elif name == "knowledge_fetch":
+        # A real, SSRF-checked fetch of an allowed OFF-target reference URL (an advisory, a doc) —
+        # never the target. Broker-mediated (it reaches the network). Degrades to a clean tool
+        # error if the internet subsystem/network is unavailable on this host, as the engine does.
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "knowledge_fetch needs a url"}
+        try:
+            from ..internet import dispatcher as _internet
+            r = _internet.knowledge_fetch(session.session_id, url)
+            return {"ok": bool(getattr(r, "ok", True)), "content": getattr(r, "content", None),
+                    "provenance": getattr(r, "provenance", {}),
+                    "scan_verdict": getattr(r, "scan_verdict", None)}
+        except Exception as e:  # noqa: BLE001 — scope refusal or missing network both surface here
+            return {"ok": False, "error": f"knowledge_fetch unavailable: {type(e).__name__}: {e}"}
+
+    elif name == "browser_fetch":
+        # Headless-browser render of an in-scope page (post-JS HTML + title). Broker-mediated;
+        # degrades cleanly if Playwright or a browser binary is not installed on this host.
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "browser_fetch needs a url"}
+        eng = _engagements.get(session.engagement_id)
+        if eng is None:
+            return {"ok": False, "error": "no engagement is active for this session"}
+        try:
+            from ..browser.service import browser_fetch as _browser_fetch
+            return {"ok": True, **_browser_fetch(_scope.policy_from_engagement(eng), url)}
+        except Exception as e:  # noqa: BLE001 — a missing browser or an out-of-scope url surfaces here
+            return {"ok": False, "error": f"browser_fetch unavailable: {type(e).__name__}: {e}"}
+
     elif name == "record_hypothesis":
         eng_id = session.engagement_id  # one graph per engagement (§3.1), not per chat session
         _graph_ensure(eng_id)
@@ -1707,7 +1774,8 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 # local execution is gated by the sandbox and its preflight (see the isolation work), and
 # run_command is deliberately absent from broker.TOOL_ACTION_CLASS. read/write_file and the
 # record_* tools stay local and in-memory.
-_BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search", "http_recon"}
+_BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search", "http_recon",
+                    "knowledge_fetch", "browser_fetch"}
 
 # Output that matches an injection pattern taints the session — except from the local knowledge
 # index, which mirrors loop.py's INJECTION_SCAN_EXEMPT_TOOLS ("security_reference_search" is the
@@ -1718,7 +1786,7 @@ _BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search", "http_
 # still wrapped and still flagged in the UI — what is withheld is the session-wide escalation.
 # read_file is deliberately NOT exempt: the workspace holds whatever the agent saved from a
 # target, which is exactly attacker-controlled.
-_TAINT_EXEMPT_TOOLS = {"knowledge_search"}
+_TAINT_EXEMPT_TOOLS = {"knowledge_search", "security_reference_search"}
 
 
 class _AlreadyAudited(Exception):
@@ -2151,6 +2219,50 @@ SECURITY_TOOL_SCHEMAS = [
     # have moved into TOOL_SCHEMAS above — see the note there.
     _http_recon.SCHEMA,
 ]
+
+# §12 step 3 — the engine's internet/OSINT/reference tools, completing tool parity (the four that
+# were the last entries in KNOWN_MISSING_FROM_UI). knowledge_fetch + browser_fetch are broker-
+# mediated network/browser channels (dispatched above with graceful degradation when the network
+# or a browser binary is absent); security_reference_search reads the same local corpus as
+# knowledge_search; osint_record is a local filing cabinet. Schemas come from the engine's own
+# sources where they import light; osint_record/browser_fetch are declared here (matching the
+# engine's tool names/parameters) to avoid importing the MCP server module.
+from ..internet.dispatcher import KNOWLEDGE_FETCH_SCHEMA as _KNOWLEDGE_FETCH_SCHEMA  # noqa: E402
+from ..knowledge_rag.tools import SCHEMAS as _KNOWLEDGE_RAG_SCHEMAS  # noqa: E402
+
+_OSINT_RECORD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "osint_record",
+        "description": ("File an incidental out-of-scope observation noticed while working in scope "
+                        "(a subdomain in a page, an email in a response, a linked third-party "
+                        "service). A filing cabinet, NOT a discovery tool — never use it to probe "
+                        "or fetch the thing you noticed."),
+        "parameters": {"type": "object", "properties": {
+            "observation": {"type": "string", "description": "what you noticed"},
+            "kind": {"type": "string", "description": "e.g. subdomain, email, service"},
+            "source": {"type": "string", "description": "where you saw it (a url or context)"},
+        }, "required": ["observation"]},
+    },
+}
+_BROWSER_FETCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "browser_fetch",
+        "description": ("Render an in-scope page in a headless browser and return the post-JavaScript "
+                        "HTML and title — for a target that needs JS to show its content. In scope "
+                        "and broker-mediated, like http_request."),
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string", "description": "the in-scope URL to render"},
+        }, "required": ["url"]},
+    },
+}
+
+# knowledge_fetch + browser_fetch reach the network/target, so they are gated like the other
+# security tools. security_reference_search (a local corpus read) and osint_record (a local filing
+# write) touch no asset, so they live in the always-available base set alongside knowledge_search.
+SECURITY_TOOL_SCHEMAS += [_KNOWLEDGE_FETCH_SCHEMA, _BROWSER_FETCH_SCHEMA]
+TOOL_SCHEMAS += [_OSINT_RECORD_SCHEMA, *_KNOWLEDGE_RAG_SCHEMAS]  # security_reference_search
 
 
 

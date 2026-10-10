@@ -37,16 +37,12 @@ def _schema_names(schemas) -> set:
 # The 18 engine tools the UI cannot reach today (recon'd from loop.py's security+graph-on set vs
 # dev_server's TOOL_SCHEMAS + SECURITY_TOOL_SCHEMAS). Each is removed from this set as step 3 wires
 # it across; when the set is empty the UI has full engine parity.
-KNOWN_MISSING_FROM_UI = {
-    # internet / osint / browser (security-gated, broker-mediated)
-    "knowledge_fetch", "osint_record", "browser_fetch",
-    "security_reference_search",
-    # the hypothesis graph: the full tool set (reads + writes) is now mounted on the UI runtime in
-    # step 3, so none remain here. The record_hypothesis/update_hypothesis_status lookalikes stay in
-    # KNOWN_UI_ONLY as back-compat aliases until a final cleanup removes them.
-    # the working notebook: the full tool set (reads + writes) is now mounted on the UI runtime in
-    # step 3, so none remain here. record_note stays in KNOWN_UI_ONLY as a back-compat alias.
-}
+# Empty: step 3 is complete — every engine tool (graph reads+writes, notebook reads+writes, and the
+# internet/osint/reference tools) is now reachable from the UI runtime. The record_hypothesis/
+# update_hypothesis_status/record_note lookalikes stay in KNOWN_UI_ONLY as back-compat aliases. A
+# NEW engine tool not wired into dev_server fails the parity test immediately — the ratchet's
+# permanent job now that the gap has closed.
+KNOWN_MISSING_FROM_UI: set[str] = set()
 
 # UI tools with no engine counterpart under the graph-on configuration, documented so the test is
 # honest about both directions. `http_request` is an engine gap (the engine has no such schema,
