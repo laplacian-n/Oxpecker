@@ -563,6 +563,10 @@ class Session:
     autonomous_active: bool = False
     autonomous_mode: str = ""
     stop_requested: bool = False
+    # The running autonomous-pipeline driver (agent/pipeline/autonomous_driver.py) and its stop
+    # flag, set while a /pipeline/start run is in flight so /pipeline/stop can end it. Not persisted.
+    autonomous_driver: object | None = None
+    autonomous_stop_event: object | None = None
     thinking: bool = False     # expose the model's <think> reasoning to the UI when True
     last_prompt_tokens: int = 0  # real prompt-token count from llama-server's last turn
     summary: str = ""          # running condensed summary of folded-away older turns
@@ -3863,6 +3867,117 @@ def start_autonomous(session_id: str, req: AutonomousStartRequest):
 
     threading.Thread(target=run, daemon=True).start()
     return {"status": "started", "mode": req.mode, "engagement_id": req.engagement_id}
+
+def _autonomous_model() -> str | None:
+    """The model id to run the autonomous pipeline on. When dev_server itself is driving OpenRouter,
+    reuse that model id (a `vendor/model` string) so the whole wave runs on OpenRouter and never the
+    GPU (agent/pipeline/engine.py:resolve_wave_clients keys on the `/`). Otherwise None — the engine
+    falls back to its registry/local default."""
+    try:
+        caps = _llm.capabilities() if _llm is not None else None
+        if caps is not None and getattr(caps, "name", "") == "openrouter" and caps.model:
+            return str(caps.model)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _prepare_engagement_for_pipeline(eng: Engagement) -> None:
+    """Make sure the engine files exist for `eng` and name the model + tier the autonomous run
+    needs: the OpenRouter model when dev_server is on it (so the agent runs GPU-free), and the
+    `high` tier so the full wave engine drives the run. Patched into roe.json, which the driver and
+    `tiers.engagement_tier` read."""
+    _materialize_engine_engagement(eng)
+    roe_path = _config.ENGAGEMENTS_ROOT / eng.engagement_id / "roe.json"
+    if not roe_path.exists():
+        return
+    try:
+        roe = json.loads(roe_path.read_text())
+        changed = False
+        model = _autonomous_model()
+        if model and roe.get("model") != model:
+            roe["model"] = model
+            changed = True
+        if not roe.get("tier"):
+            roe["tier"] = "high"  # the full autonomous agent is the high-tier wave engine
+            changed = True
+        if changed:
+            roe_path.write_text(json.dumps(roe, indent=2))
+    except (OSError, ValueError) as e:
+        log.info("Could not set model/tier on %r roe.json: %s", eng.engagement_id, e)
+
+
+@app.post("/api/sessions/{session_id}/pipeline/start")
+def start_pipeline(session_id: str, req: AutonomousStartRequest):
+    """Run the real autonomous pipeline (agent/pipeline/autonomous_driver.py) for this session's
+    engagement, on its own thread, with the driver's phase/wave events streamed to the session SSE.
+    Unlike /autonomous/start (one guided turn), this drives a full RECON→CLOSEOUT engagement."""
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    eng = _engagements.get(s.engagement_id)
+    if eng is None:
+        raise HTTPException(400, f"no engagement {s.engagement_id!r} to run")
+    with s.lock:
+        if s.running:
+            raise HTTPException(409, "a task is already running for this session")
+        s.running = True
+        s.autonomous_active = True
+        s.autonomous_mode = req.mode
+        s.stop_requested = False
+
+    _prepare_engagement_for_pipeline(eng)
+    import threading as _threading
+
+    stop_event = _threading.Event()
+    s.autonomous_stop_event = stop_event
+
+    def on_event(ev: dict) -> None:
+        s.push({"type": "autonomous_event", "event": ev})
+
+    def run() -> None:
+        try:
+            from ..pipeline.autonomous_driver import AutonomousDriver
+
+            driver = AutonomousDriver(
+                engagement_id=s.engagement_id, profile_name=req.profile, mode=req.mode,
+                session_id=s.session_id, device_id="web-ui", on_event=on_event,
+                stop_event=stop_event,
+            )
+            s.autonomous_driver = driver
+            result = driver.run()
+            s.push({"type": "autonomous_done", "result": {
+                "status": getattr(result, "status", None),
+                "reason": getattr(result, "reason", None),
+                "final_phase": getattr(result, "final_phase", None),
+                "phases_completed": list(getattr(result, "phases_completed", []) or []),
+            }})
+        except Exception as e:  # noqa: BLE001 — surface, never crash the server thread silently
+            s.push({"type": "task_error", "error": f"{type(e).__name__}: {e}"})
+        finally:
+            with s.lock:
+                s.running = False
+                s.autonomous_active = False
+            s.autonomous_driver = None
+            s.autonomous_stop_event = None
+            _persist()
+
+    _threading.Thread(target=run, daemon=True).start()
+    return {"status": "started", "mode": req.mode, "engagement_id": s.engagement_id}
+
+
+@app.post("/api/sessions/{session_id}/pipeline/stop")
+def stop_pipeline(session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(404, f"session {session_id!r} not found")
+    ev = s.autonomous_stop_event
+    if ev is not None:
+        ev.set()
+    with s.lock:
+        s.stop_requested = True
+    return {"status": "stop_requested"}
+
 
 @app.get("/api/sessions/{session_id}/autonomous/status")
 def autonomous_status(session_id: str):
