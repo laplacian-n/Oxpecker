@@ -85,6 +85,7 @@ from ..engagement import intake as _intake
 from ..engagement.program import Program as _Program
 from ..hypothesis_graph.service import HypothesisGraphService as _HypothesisGraphService
 from ..hypothesis_graph.store import NotFoundError as _GraphNotFoundError
+from ..hypothesis_graph.tools import GRAPH_TOOL_NAMES as _GRAPH_TOOL_NAMES
 from ..notebook.service import NotebookService as _NotebookService
 from ..notebook.store import NotFoundError as _NoteNotFoundError
 from ..llm import registry as _llm_registry
@@ -227,15 +228,17 @@ EVIDENCE RULE (do not violate):
 TRACK YOUR WORK (keep the hypothesis graph and notebook alive — do this continuously, not just at the end):
 - When you form a theory about a weakness, call record_hypothesis (title, what you'll test, phase)
   BEFORE you test it. Link it to a parent with parent_ordinal when it follows from an earlier one.
-- When a tool confirms or refutes that theory, call update_hypothesis_status (status=completed,
-  verdict=confirmed or refuted, evidence=the real proof you just saw). NEVER mark a hypothesis
-  confirmed or refuted until you have ACTUALLY run the test with a tool — if you recorded a
-  hypothesis to test the login SQLi, you must send that POST payload before judging it. No verdict
-  without evidence from a tool call this turn.
 - Before recording a new hypothesis, call graph_search (by ordinal, title or keyword) to check you
   are not repeating one you already have — reuse the existing ordinal instead of making a duplicate.
-- Use graph_read_branch on a hypothesis's ordinal to revisit an earlier line of attack and what it
-  found, rather than re-deriving it from memory.
+  graph_read_branch on an ordinal revisits an earlier line of attack and what it found.
+- As you actually test a hypothesis, record the attempt ON it: graph_attempt_start (its ordinal +
+  what you are about to try), then graph_attempt_complete (what you observed) — that is how an
+  attempt and its result attach to the node.
+- When the evidence is in, set the verdict with graph_set_verdict (confirmed / refuted /
+  inconclusive). NEVER set a verdict until you have ACTUALLY run the test with a tool this turn — if
+  you recorded a hypothesis to test the login SQLi, you must send that payload before judging it.
+- graph_park (with a reason) shelves a hypothesis you may return to; graph_abandon (with a reason)
+  rules one out for good; graph_set_active_path marks the line you are pursuing right now.
 - Jot record_note as you work: a technique that worked, a dead-end to avoid, a todo, an observation.
 - Call note_search before assuming what you noted earlier or whether you already ruled something
   out — do not guess. Call technique_recall when you reach a surface or bug class you have worked
@@ -1611,10 +1614,13 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             ordinal=0, text=note_text, category=cat, refs=args.get("refs", []) or []))
         return {"ok": True, "note_ordinal": ordinal}
 
-    elif name in ("graph_search", "graph_read_branch"):
-        # §12 step 3 — the engine's own read-only graph tools, mounted on the UI runtime against
-        # this engagement's graph service (the single tool plane). In-process: a graph read is not
-        # a target action, so no broker. Keyed by engagement, exactly like record_hypothesis.
+    elif name in _GRAPH_TOOL_NAMES:
+        # §12 step 3 — the engine's own hypothesis-graph tools, mounted on the UI runtime against
+        # this engagement's graph service (the single tool plane). In-process: graph mutation is not
+        # a target action, so no broker. Keyed by engagement, like record_hypothesis. The simple
+        # record_hypothesis/update_hypothesis_status lookalikes stay for back-compat and test
+        # seeding; the prompt now steers the model to these richer tools, which add the attempt
+        # lifecycle, park/abandon and active-path operations the lookalikes never had.
         from ..hypothesis_graph.tools import dispatch as _graph_tool_dispatch
         return _graph_tool_dispatch(_graph_service(session.engagement_id), name, args)
 
@@ -2115,16 +2121,15 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "record_note", "description": "Jot a note in the engagement notebook: a technique that worked, a dead-end to avoid, a todo, or an observation. Keep a running lab notebook like a real red-teamer does.", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "The note"}, "category": {"type": "string", "enum": ["technique", "dead-end", "todo", "observation"], "default": "observation"}}, "required": ["text"]}}},
 ]
 
-# §12 step 3 — mount the engine's read-only hypothesis-graph tools (search + read-branch) on the UI
-# runtime from the engine's OWN schema source, so there is one definition per tool rather than a
-# dev_server copy that can drift. The write tools (graph_hypothesis_add / attempt_* / set_verdict /
-# park / abandon / set_active_path) still reach the model through record_hypothesis /
-# update_hypothesis_status until that model-facing interface is consolidated as its own step;
-# these two reads are additive and carry no write-path risk.
+# §12 step 3 — mount the engine's FULL hypothesis-graph tool set on the UI runtime from the engine's
+# OWN schema source, so there is one definition per tool rather than a dev_server copy that can
+# drift. The reads (search/read-branch) went first; this adds the write tools (hypothesis_add,
+# attempt_start/complete, set_verdict, park, abandon, set_active_path), which the dispatch above
+# routes to the per-engagement graph service. The simple record_hypothesis/update_hypothesis_status
+# lookalikes remain for back-compat and test seeding, but the prompt now steers the model here.
 from ..hypothesis_graph.tools import SCHEMAS as _ENGINE_GRAPH_SCHEMAS  # noqa: E402
 
-_UI_GRAPH_READ_TOOLS = ("graph_search", "graph_read_branch")
-TOOL_SCHEMAS += [s for s in _ENGINE_GRAPH_SCHEMAS if s["function"]["name"] in _UI_GRAPH_READ_TOOLS]
+TOOL_SCHEMAS += list(_ENGINE_GRAPH_SCHEMAS)
 
 # Likewise the engine's read-only notebook tools, now that the notebook is the per-engagement
 # NotebookService (step 3). note_search reads this engagement's notebook; technique_recall reads

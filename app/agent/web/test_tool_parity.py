@@ -44,6 +44,13 @@ def _dispatchable(src: str) -> set[str]:
     names = set(re.findall(r'(?:^|\s)(?:el)?if\s+name\s*==\s*"([a-z_0-9]+)"', body, re.M))
     for grp in re.findall(r"name\s+in\s+\(([^)]*)\)", body):
         names |= set(re.findall(r'"([a-z_0-9]+)"', grp))
+    # Set-membership dispatch against a whole engine tool family, e.g. `name in _GRAPH_TOOL_NAMES`
+    # — resolve the identifier to the family's names so a family routed in one branch still counts
+    # as dispatchable for every tool in it.
+    from ..hypothesis_graph.tools import GRAPH_TOOL_NAMES as _GTN
+    _known_sets = {"_GRAPH_TOOL_NAMES": _GTN}
+    for ident in re.findall(r"name\s+in\s+(_[A-Za-z_]+)\b", body):
+        names |= set(_known_sets.get(ident, ()))
     return names
 
 
