@@ -1,17 +1,31 @@
 [Unit]
-Description=localAI web UI (agent.web.dev_server, run via uvicorn)
+Description=localAI web UI (agent.web.dev_server)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/nicotine/localAI
-ExecStart=/home/nicotine/localAI/.venv/bin/python -m agent.run_web_ui
+# agent.run_web_ui delegates to agent.web.dev_server's main(), which is the launcher that builds
+# the model provider, loads persisted state, and enforces the non-loopback bind-safety check. The
+# flags below are dev_server's own — every one it accepts works here. Default: loopback, driven by
+# a local llama-server at :8080 (started by localai-llama.service or by hand).
+ExecStart=/home/nicotine/localAI/.venv/bin/python -m agent.run_web_ui \
+    --host 127.0.0.1 --port 7777
+
+# ── GPU-less / OpenRouter + LAN variant (the tester setup) ─────────────────────────────────────
+# To run without a local llama-server (no GPU) and accept a client on the LAN, replace the
+# ExecStart above with the two lines below AND provide the key + an API-key file (see
+# docs/DEPLOY_UBUNTU.md). The key goes in the environment, never on the command line:
+#   Environment=OPENROUTER_API_KEY=sk-or-...        (or: EnvironmentFile=/var/lib/oxpecker/openrouter.env)
+#   Environment=AGENT_WEB_CORS_ORIGINS=http://<client-host>:<port>   (only if the client loads the page cross-origin)
+# ExecStart=/home/nicotine/localAI/.venv/bin/python -m agent.run_web_ui \
+#     --provider openrouter --model <provider/model-id> \
+#     --host 0.0.0.0 --port 7777
+# A non-loopback bind is refused unless state/web_ui_api_key.txt exists (or --insecure-no-auth is
+# passed, only safe on an isolated network).
+
 Restart=on-failure
 RestartSec=3
-# Loopback-only by design (config.WEB_UI_HOST=127.0.0.1) — this unit only keeps the process
-# alive across crashes/reboots for a single-operator local tool, it doesn't add network exposure.
-# llama-server is a separate dependency this doesn't manage: the web UI starts fine without it,
-# individual model calls just fail until it's up.
 
 [Install]
 WantedBy=default.target

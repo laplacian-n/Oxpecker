@@ -6,46 +6,33 @@ mediation on every tool call, the hash-chained audit log, taint escalation and i
 screening. `agent.web.server` is the stripped early scaffold (no audit log, no taint, no injection
 screening — three of the four §2.6.1 components a tier may never remove); running it in production
 would serve the UI with those protections absent while the docs claim they are present. So the
-entry point everything in deploy/ goes through must point here. (server.py is retired once
-dev_server is fully graph-backed; until then it stays only for its own tests.)
+entry point everything in deploy/ goes through must point here.
 
-Loopback-only by default. Pass --host 0.0.0.0 to accept connections from Electron clients on
-the LAN — when doing so, also set AGENT_WEB_CORS_ORIGINS and create an API key file
-(state/web_ui_api_key.txt).
+This module is a thin alias for `python -m agent.web.dev_server`: it delegates to that module's
+`main()`, which is the ONLY launcher that initialises the model provider (`_llm`), loads persisted
+state, and enforces the non-loopback bind-safety check. (The earlier version of this file called
+`uvicorn.run("agent.web.dev_server:app", ...)` directly and never built `_llm`, so the UI came up
+with no working model — launching through `main()` is what fixes that.) Every flag `dev_server`
+accepts is accepted here, unchanged:
+
+    python -m agent.run_web_ui --provider openrouter --model <id> --host 0.0.0.0 --port 8765
+    python -m agent.run_web_ui                        # loopback, local llama-server at :8080
+
+Loopback-only by default. For a non-loopback bind (`--host 0.0.0.0`, to accept Electron/browser
+clients on the LAN) create an API key file (state/web_ui_api_key.txt) and set
+AGENT_WEB_CORS_ORIGINS if a client loads the page from another origin — dev_server refuses an
+unauthenticated non-loopback bind unless `--insecure-no-auth` is passed. For a GPU-less host, use
+`--provider openrouter` with $OPENROUTER_API_KEY instead of a local llama-server (see
+docs/DEPLOY_UBUNTU.md).
 """
 from __future__ import annotations
 
-import argparse
-
-import uvicorn
-
-from . import config
+from .web import dev_server
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Oxpecker Agent API server")
-    parser.add_argument("--host", default=config.WEB_UI_HOST,
-                        help=f"bind address (default: {config.WEB_UI_HOST})")
-    parser.add_argument("--port", type=int, default=config.WEB_UI_PORT,
-                        help=f"bind port (default: {config.WEB_UI_PORT})")
-    parser.add_argument("--cors", nargs="*", default=None,
-                        help="allowed CORS origins (overrides AGENT_WEB_CORS_ORIGINS)")
-    args = parser.parse_args()
-
-    if args.cors is not None:
-        config.WEB_UI_CORS_ORIGINS = args.cors
-
-    if args.host != "127.0.0.1" and not config.WEB_UI_API_KEY_FILE.exists():
-        print("[!] Binding to a non-loopback address without an API key.")
-        print(f"    Create one:  echo 'your-secret' > {config.WEB_UI_API_KEY_FILE}")
-        print("    Continuing without auth — only safe on a trusted network.\n")
-
-    uvicorn.run(
-        "agent.web.dev_server:app",  # the security-complete app — see the module docstring
-        host=args.host,
-        port=args.port,
-        log_level="info",
-    )
+    # Delegate entirely: dev_server.main() parses sys.argv, so every flag passes straight through.
+    dev_server.main()
 
 
 if __name__ == "__main__":
