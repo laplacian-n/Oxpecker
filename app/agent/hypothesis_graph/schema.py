@@ -133,6 +133,8 @@ EVENT_KINDS = (
     "hypothesis.abandoned", "observation.added", "active_path.changed",
     "hypothesis.operator_note",  # operator comment/constraint (UI spec §7.4) — append-only, never
                                  # touches claim/evidence/verdict history
+    "hypothesis.primitive_gained",       # §3.5 — a confirmed hypothesis grants a capability
+    "hypothesis.primitive_contradicted",  # §8.6.5 #3 — a downstream worker could not use it
 )
 
 
@@ -172,6 +174,7 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     direct_tokens     INTEGER NOT NULL DEFAULT 0,
     abandon_reason    TEXT,
     park_reason       TEXT,
+    primitive_gained  TEXT,
     version           INTEGER NOT NULL DEFAULT 0,
     created_at        REAL NOT NULL,
     updated_at        REAL NOT NULL,
@@ -254,4 +257,8 @@ CREATE TABLE IF NOT EXISTS graph_state (
 );
 """
 
-SCHEMA_VERSION = 1
+# v2 (§3.5): the `primitive_gained` column on `hypotheses`. A primitive is DERIVED from a
+# confirmed hypothesis (not a standalone row with its own status, which would reintroduce the
+# two-stores drift inside one store), so "do we still hold it" is a query — primitive_gained set
+# AND verdict confirmed — not a stored flag anyone has to remember to revoke.
+SCHEMA_VERSION = 2
