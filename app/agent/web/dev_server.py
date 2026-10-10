@@ -85,6 +85,8 @@ from ..engagement import intake as _intake
 from ..engagement.program import Program as _Program
 from ..hypothesis_graph.service import HypothesisGraphService as _HypothesisGraphService
 from ..hypothesis_graph.store import NotFoundError as _GraphNotFoundError
+from ..notebook.service import NotebookService as _NotebookService
+from ..notebook.store import NotFoundError as _NoteNotFoundError
 from ..llm import registry as _llm_registry
 from ..sandbox import availability as _isolation
 from ..security_tools import http_recon as _http_recon
@@ -900,7 +902,6 @@ def _graph_migrate_legacy(graphs_data: dict) -> None:
         log.info("Migrated %d legacy hypothesis node(s) into the per-engagement graph store", migrated)
 
 
-_notebooks: dict[str, list[NotebookNote]] = {}
 _findings: dict[str, list[Finding]] = {}
 
 
@@ -961,48 +962,118 @@ def _findings_restore(data: dict) -> None:
 _technique_kb: list[dict] = []
 
 
-# The notebook store. Every read and write of _notebooks goes through these accessors so the
-# backing store can be swapped by rewriting them alone.
+# The notebook store (step 3). Swapped from the in-memory per-session dict to the real
+# NotebookService — ONE notebook per engagement, persisted beside the engagement's other data under
+# DATA_DIR, mirroring the hypothesis-graph swap. Keying changed per-session -> per-engagement
+# deliberately (§3.1), so the cross-session ordinal collision is gone. The response shape the UI
+# reads is unchanged: each store row maps back onto the NotebookNote the frontend destructures. The
+# store's Category enum has no `observation` (the UI's default), so `observation` maps to the store's
+# `misc` on the way in and back to `observation` on the way out — the only values dev_server ever
+# writes are the four technique/dead-end/todo/observation, so this round-trips faithfully.
+_CATEGORY_TO_STORE = {"observation": "misc"}
+_CATEGORY_FROM_STORE = {"misc": "observation"}
+_notebook_services: dict[str, _NotebookService] = {}
+_notebook_services_lock = threading.Lock()
+
+
+def _notebook_service(key: str) -> _NotebookService:
+    with _notebook_services_lock:
+        svc = _notebook_services.get(key)
+        if svc is None:
+            svc = _NotebookService(DATA_DIR / key)
+            _notebook_services[key] = svc
+        return svc
+
+
+def _notebook_reset_cache() -> None:
+    """Drop every cached service handle (tests point DATA_DIR at a tmp dir between cases)."""
+    with _notebook_services_lock:
+        _notebook_services.clear()
+
+
+def _note_from_row(n: dict) -> NotebookNote:
+    return NotebookNote(
+        ordinal=n["ordinal"], text=n.get("note") or "",
+        category=_CATEGORY_FROM_STORE.get(n.get("category"), n.get("category") or "observation"),
+        refs=list(n.get("refs") or []), resolved=(n.get("status") == "resolved"),
+        created_at=n.get("created_at") or time.time(),
+    )
+
 
 def _notebook_has_key(key: str) -> bool:
-    return key in _notebooks
+    return bool(_notebook_service(key).store.list_notes())
 
 
 def _notebook_ensure(key: str) -> None:
-    """Create an empty note bucket for `key` if it is absent."""
-    if key not in _notebooks:
-        _notebooks[key] = []
+    _notebook_service(key)
 
 
 def _notebook_notes(key: str) -> list:
-    return _notebooks.get(key, [])
+    # Ascending ordinal = creation order, which is what the UI showed before the swap (the store
+    # lists newest-first).
+    rows = sorted(_notebook_service(key).store.list_notes(), key=lambda r: r["ordinal"])
+    return [_note_from_row(n) for n in rows]
 
 
-def _notebook_add_note(key: str, note) -> None:
-    _notebook_ensure(key)
-    _notebooks[key].append(note)
+def _notebook_add_note(key: str, note) -> int:
+    """Create a note from a UI-shaped NotebookNote; the store assigns the ordinal from the
+    engagement's single space (the point of the swap) and this returns it. observation -> misc."""
+    svc = _notebook_service(key)
+    category = _CATEGORY_TO_STORE.get(note.category, note.category)
+    return svc.store.add_note(category=category, note=note.text, refs=list(note.refs or []))["ordinal"]
 
 
 def _notebook_set_resolved(key: str, ordinal: int, action: str):
-    """Apply a resolve/reopen action to the note with this ordinal under `key`.
-    Returns the note, or None if `key` holds no note with that ordinal."""
-    for n in _notebooks.get(key, []):
-        if n.ordinal == ordinal:
-            if action == "resolve":
-                n.resolved = True
-            elif action == "reopen":
-                n.resolved = False
-            return n
-    return None
+    svc = _notebook_service(key)
+    try:
+        n = svc.store.get_by_ordinal(ordinal)
+    except _NoteNotFoundError:
+        return None
+    if action == "resolve":
+        svc.store.set_status(n["note_id"], "resolved", reason="resolved from the UI")
+    elif action == "reopen":
+        svc.store.set_status(n["note_id"], "open", reason="reopened from the UI")
+    return _note_from_row(svc.store.get_by_ordinal(ordinal))
 
 
 def _notebook_snapshot() -> dict:
-    return {eid: [n.to_dict() for n in ns] for eid, ns in _notebooks.items()}
+    # Notebook is persisted in SQLite now; the JSON state no longer carries it. Empty block kept so
+    # the one-time legacy migration below is consumed by the next persist and never re-runs.
+    return {}
+
+
+def _notebook_migrate_legacy(data: dict) -> None:
+    """Fold a legacy per-session JSON notebook into the per-engagement store, once — the step-3
+    analogue of the graph's 2c. Grouped by engagement; an engagement whose notebook already has
+    notes is left alone (idempotent). observation -> misc; resolved status preserved."""
+    if not data:
+        return
+    by_engagement: dict[str, list[dict]] = {}
+    for legacy_key, notes in data.items():
+        by_engagement.setdefault(_notebook_scope_key(legacy_key), []).extend(notes or [])
+    migrated = 0
+    for engagement_id, notes in by_engagement.items():
+        svc = _notebook_service(engagement_id)
+        if svc.store.list_notes():
+            continue
+        for n in sorted(notes, key=lambda d: d.get("ordinal") or 0):
+            text = (n.get("text") or "").strip()
+            if not text:
+                continue
+            category = _CATEGORY_TO_STORE.get(n.get("category"), n.get("category") or "misc")
+            try:
+                res = svc.store.add_note(category=category, note=text, refs=list(n.get("refs") or []))
+            except Exception:  # noqa: BLE001 — a legacy category the enum rejects falls back to misc
+                res = svc.store.add_note(category="misc", note=text, refs=list(n.get("refs") or []))
+            if n.get("resolved"):
+                svc.store.set_status(res["note_id"], "resolved", reason="migrated resolved")
+            migrated += 1
+    if migrated:
+        log.info("Migrated %d legacy notebook note(s) into the per-engagement store", migrated)
 
 
 def _notebook_restore(data: dict) -> None:
-    for eid, ns in data.items():
-        _notebooks[eid] = [_mk(NotebookNote, n) for n in ns]
+    return None
 
 
 # Serializes access to the single-slot llama-server: concurrent generations (e.g. two
@@ -1078,7 +1149,6 @@ def _load_state():
         eng.program = _Program.from_dict(e.get("program"))
         _engagements[e["engagement_id"]] = eng
     _findings_restore(data.get("findings", {}))
-    _notebook_restore(data.get("notebooks", {}))
     for sd in data.get("sessions", []):
         s = Session(
             session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
@@ -1096,9 +1166,10 @@ def _load_state():
         s.summary = sd.get("summary", "")
         s.summary_upto = sd.get("summary_upto", 0)
         _sessions[s.session_id] = s
-    # Fold any legacy per-session JSON graphs into the per-engagement SQLite store (step 2c). Runs
-    # after sessions load so a legacy session-keyed bucket resolves to its engagement.
+    # Fold any legacy per-session JSON graphs/notebooks into their per-engagement SQLite stores.
+    # Runs after sessions load so a legacy session-keyed bucket resolves to its engagement.
     _graph_migrate_legacy(data.get("graphs", {}))
+    _notebook_migrate_legacy(data.get("notebooks", {}))
     log.info("Restored state: %d sessions, %d engagements, %d finding-sets",
              len(_sessions), len(_engagements), _finding_key_count())
 
@@ -1518,10 +1589,9 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         return {"ok": True, "finding_id": fid}
 
     elif name == "record_note":
-        eng_id = session.session_id
+        eng_id = session.engagement_id  # one notebook per engagement (§3.1), not per chat session
         _notebook_ensure(eng_id)
         notes = _notebook_notes(eng_id)
-        ordinal = len(notes) + 1
         cat = args.get("category", "observation")
         if cat not in ("technique", "dead-end", "todo", "observation"):
             cat = "observation"
@@ -1533,8 +1603,9 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         for n in notes:
             if (n.text or "").strip() == note_text:
                 return {"ok": True, "note_ordinal": n.ordinal, "deduped": True}
-        _notebook_add_note(eng_id, NotebookNote(ordinal=ordinal, text=note_text, category=cat,
-                                                refs=args.get("refs", []) or []))
+        # The store assigns the ordinal from the engagement's single space.
+        ordinal = _notebook_add_note(eng_id, NotebookNote(
+            ordinal=0, text=note_text, category=cat, refs=args.get("refs", []) or []))
         return {"ok": True, "note_ordinal": ordinal}
 
     elif name in ("graph_search", "graph_read_branch"):
@@ -3458,8 +3529,14 @@ def _scope_keys(path_id: str) -> list[str]:
 
 def _graph_scope_key(path_id: str) -> str:
     """The graph is one per engagement (step 2b), so a path id resolves to a single key: a session
-    id maps to its engagement, an engagement id is already the key. (Notebook/findings still use
-    the per-session _scope_keys above — only the graph moved to the per-engagement store.)"""
+    id maps to its engagement, an engagement id is already the key. (Findings still use the per-
+    session _scope_keys above; the graph and the notebook moved to their per-engagement stores.)"""
+    s = _sessions.get(path_id)
+    return s.engagement_id if s is not None else path_id
+
+def _notebook_scope_key(path_id: str) -> str:
+    """The notebook is one per engagement (step 3), resolved to a single key exactly like the
+    graph: a session id maps to its engagement, an engagement id is already the key."""
     s = _sessions.get(path_id)
     return s.engagement_id if s is not None else path_id
 
@@ -3513,9 +3590,7 @@ def hypothesis_graph_action(engagement_id: str, ordinal: int, req: OperatorGraph
 # ── Notebook ──
 @app.get("/api/engagements/{engagement_id}/notebook")
 def notebook_overview(engagement_id: str):
-    notes = []
-    for k in _scope_keys(engagement_id):
-        notes += _notebook_notes(k)
+    notes = _notebook_notes(_notebook_scope_key(engagement_id))
     if not notes:
         return {"exists": False, "notes": [], "counts": {}, "version": 0}
     counts = Counter(n.category for n in notes)
@@ -3528,11 +3603,9 @@ def notebook_overview(engagement_id: str):
 
 @app.post("/api/engagements/{engagement_id}/notebook/notes/{ordinal}/resolve")
 def notebook_resolve(engagement_id: str, ordinal: int, req: NotebookResolveRequest):
-    # Scope keys are searched in order and the first note with this ordinal wins, as before.
-    for k in _scope_keys(engagement_id):
-        n = _notebook_set_resolved(k, ordinal, req.action)
-        if n is not None:
-            return {"ok": True, "resolved": n.resolved}
+    n = _notebook_set_resolved(_notebook_scope_key(engagement_id), ordinal, req.action)
+    if n is not None:
+        return {"ok": True, "resolved": n.resolved}
     raise HTTPException(404, f"note {ordinal} not found")
 
 # ── Technique KB ──
