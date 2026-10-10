@@ -220,5 +220,92 @@ class TestVerificationRaisesAssurance(unittest.TestCase):
         self.assertEqual(self.store.get(f.finding_id).confirmed_by, "downstream")  # unchanged
 
 
+def _section(md: str, heading: str) -> str:
+    """The text of one `## ` section: from its heading up to the next `## ` heading (or EOF)."""
+    start = md.index(heading)
+    rest = md[start + len(heading):]
+    nxt = rest.find("\n## ")
+    return rest if nxt == -1 else rest[:nxt]
+
+
+BLOCKED_HEADING = "## ⚠ Not ready for submission (§8.6.5 #1)"
+SUBMITTABLE_HEADING = "## Submittable findings"
+
+
+class TestReportAssuranceAndSubmissionBoundary(unittest.TestCase):
+    def test_model_only_unreviewed_finding_is_under_not_ready_with_the_reason(self):
+        f = _finding(title="model-only one", confirmed_by="model")
+        md = render_markdown([f], "e1")
+        blocked = _section(md, BLOCKED_HEADING)
+        self.assertIn("model-only one", blocked)
+        self.assertIn("§8.6.5 #1", blocked)
+        self.assertNotIn("model-only one", _section(md, SUBMITTABLE_HEADING))
+
+    def test_differential_finding_is_under_submittable(self):
+        f = _finding(title="differential one", confirmed_by="differential")
+        md = render_markdown([f], "e1")
+        self.assertIn("differential one", _section(md, SUBMITTABLE_HEADING))
+        self.assertNotIn("differential one", _section(md, BLOCKED_HEADING))
+
+    def test_reviewed_model_finding_is_submittable(self):
+        f = _finding(title="reviewed model one", confirmed_by="model")
+        f.reviewed_by = "alice"
+        f.reviewed_at = 1234567890.0
+        md = render_markdown([f], "e1")
+        self.assertIn("reviewed model one", _section(md, SUBMITTABLE_HEADING))
+
+    def test_split_puts_each_finding_in_exactly_one_group(self):
+        md = render_markdown([
+            _finding(title="blocked one", confirmed_by="model"),
+            _finding(title="ok one", confirmed_by="human"),
+        ], "e1")
+        self.assertIn("blocked one", _section(md, BLOCKED_HEADING))
+        self.assertNotIn("ok one", _section(md, BLOCKED_HEADING))
+        self.assertIn("ok one", _section(md, SUBMITTABLE_HEADING))
+        self.assertNotIn("blocked one", _section(md, SUBMITTABLE_HEADING))
+
+    def test_confirmed_by_level_is_shown(self):
+        md = render_markdown([_finding(confirmed_by="downstream")], "e1")
+        self.assertIn("`downstream`", md)
+
+    def test_rule_disagreed_is_shown_when_set(self):
+        md = render_markdown([_finding(confirmed_by="model", rule_disagreed="xss-reflected@3")], "e1")
+        self.assertIn("xss-reflected@3", md)
+
+    def test_rule_disagreed_is_absent_when_unset(self):
+        md = render_markdown([_finding()], "e1")
+        self.assertNotIn("Rule disagreed", md)
+
+    def test_existing_fields_are_still_rendered(self):
+        md = render_markdown([_finding(confirmed_by="model")], "e1")
+        self.assertIn("**Remediation**", md)
+        self.assertIn("**Status:**", md)
+        self.assertIn("NOT REVIEWED BY A HUMAN", md)
+
+    def test_empty_report_has_both_group_headings(self):
+        md = render_markdown([], "e1")
+        self.assertIn(BLOCKED_HEADING, md)
+        self.assertIn(SUBMITTABLE_HEADING, md)
+
+
+class TestSarifAssurance(unittest.TestCase):
+    def test_model_only_unreviewed_is_not_submittable_with_a_reason(self):
+        props = render_sarif([_finding(confirmed_by="model")])["runs"][0]["results"][0]["properties"]
+        self.assertEqual(props["confirmed_by"], "model")
+        self.assertIs(props["submittable"], False)
+        self.assertIn("§8.6.5 #1", props["submission_blocker"])
+
+    def test_differential_is_submittable_with_null_blocker(self):
+        props = render_sarif([_finding(confirmed_by="differential")])["runs"][0]["results"][0]["properties"]
+        self.assertEqual(props["confirmed_by"], "differential")
+        self.assertIs(props["submittable"], True)
+        self.assertIsNone(props["submission_blocker"])
+
+    def test_rule_disagreed_is_in_properties(self):
+        props = render_sarif([_finding(rule_disagreed="xss-reflected@3")])["runs"][0]["results"][0]["properties"]
+        self.assertEqual(props["rule_disagreed"], "xss-reflected@3")
+        self.assertIsNone(render_sarif([_finding()])["runs"][0]["results"][0]["properties"]["rule_disagreed"])
+
+
 if __name__ == "__main__":
     unittest.main()

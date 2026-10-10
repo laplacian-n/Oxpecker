@@ -10,7 +10,7 @@ import time
 
 from fpdf import FPDF
 
-from .model import Finding
+from .model import Finding, submission_blocker
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -46,74 +46,109 @@ def render_markdown(findings: list[Finding], engagement_id: str) -> str:
         ]
     elif findings:
         lines += ["> ✅ All findings below have been human-reviewed.", ""]
+    # §8.6.5 #1 — split on the submission boundary. Findings the boundary blocks go first, under a
+    # heading that says why they are not deliverable; the rest go under "Submittable findings".
+    # Severity order is preserved within each group.
+    blocked: list[tuple[Finding, str]] = []
+    submittable: list[Finding] = []
+    for f in findings:
+        reason = submission_blocker(f)
+        if reason is None:
+            submittable.append(f)
+        else:
+            blocked.append((f, reason))
+
+    lines += ["## ⚠ Not ready for submission (§8.6.5 #1)", ""]
+    if blocked:
+        lines += [
+            "These findings may not be submitted as they stand. Each one needs a human review or a "
+            "higher assurance level before it can leave the engagement.",
+            "",
+        ]
+        for f, reason in blocked:
+            lines += _finding_lines(f)
+            lines += [f"> **Submission blocked:** {reason}", ""]
+    else:
+        lines += ["_None._", ""]
+
+    lines += ["## Submittable findings", ""]
+    if submittable:
+        for f in submittable:
+            lines += _finding_lines(f)
+    else:
+        lines += ["_None._", ""]
+    return "\n".join(lines)
+
+
+def _finding_lines(f: Finding) -> list[str]:
+    cvss_line = f.cvss if f.cvss is not None else "n/a"
+    if f.cvss_vector:
+        cvss_line = f"{cvss_line} ({f.cvss_version or 'CVSS'}: {f.cvss_vector})"
+    review_line = (
+        f"✅ Reviewed by {f.reviewed_by} at "
+        f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f.reviewed_at))}"
+        if f.reviewed_by else "⚠️ **NOT REVIEWED BY A HUMAN**"
+    )
+    lines = [
+        f"### [{f.severity.upper()}] {f.title}",
+        "",
+        f"*{review_line}*",
+        "",
+        f"- **Finding ID:** `{f.finding_id}`",
+        f"- **Status:** {f.status}  |  **Confidence:** {f.confidence}",
+        f"- **Assurance (confirmed_by):** `{f.confirmed_by}`",
+    ]
+    if f.rule_disagreed:
+        lines.append(f"- **Rule disagreed:** `{f.rule_disagreed}`")
     lines += [
-        "## Findings",
+        f"- **Target:** `{f.target}`" + (f"  |  **Component:** {f.affected_component}" if f.affected_component else ""),
+        f"- **Tool:** `{f.tool}`",
+        f"- **CVSS:** {cvss_line}",
+    ]
+    if f.cwe_ids:
+        lines.append(f"- **CWE:** {', '.join(f.cwe_ids)}")
+    if f.cve_ids:
+        lines.append(f"- **CVE:** {', '.join(f.cve_ids)}")
+    lines += [
+        f"- **First seen:** {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f.first_seen))}"
+        + (f"  |  **Last verified:** {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f.last_verified))} by {f.verifier}" if f.last_verified else ""),
+        "",
+        "**Description**",
+        "",
+        f.description,
         "",
     ]
-    for f in findings:
-        cvss_line = f.cvss if f.cvss is not None else "n/a"
-        if f.cvss_vector:
-            cvss_line = f"{cvss_line} ({f.cvss_version or 'CVSS'}: {f.cvss_vector})"
-        review_line = (
-            f"✅ Reviewed by {f.reviewed_by} at "
-            f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f.reviewed_at))}"
-            if f.reviewed_by else "⚠️ **NOT REVIEWED BY A HUMAN**"
-        )
-        lines += [
-            f"### [{f.severity.upper()}] {f.title}",
-            "",
-            f"*{review_line}*",
-            "",
-            f"- **Finding ID:** `{f.finding_id}`",
-            f"- **Status:** {f.status}  |  **Confidence:** {f.confidence}",
-            f"- **Target:** `{f.target}`" + (f"  |  **Component:** {f.affected_component}" if f.affected_component else ""),
-            f"- **Tool:** `{f.tool}`",
-            f"- **CVSS:** {cvss_line}",
-        ]
-        if f.cwe_ids:
-            lines.append(f"- **CWE:** {', '.join(f.cwe_ids)}")
-        if f.cve_ids:
-            lines.append(f"- **CVE:** {', '.join(f.cve_ids)}")
-        lines += [
-            f"- **First seen:** {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f.first_seen))}"
-            + (f"  |  **Last verified:** {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f.last_verified))} by {f.verifier}" if f.last_verified else ""),
-            "",
-            "**Description**",
-            "",
-            f.description,
-            "",
-        ]
-        if f.preconditions:
-            lines += ["**Preconditions**", "", f.preconditions, ""]
-        if f.demonstrated_impact:
-            lines += ["**Demonstrated impact**", "", f.demonstrated_impact, ""]
-        lines += [
-            "**Remediation**",
-            "",
-            f.remediation,
-            "",
-        ]
-        if f.limitations:
-            lines += ["**Limitations**", "", f.limitations, ""]
-        if f.references:
-            lines += ["**References**", ""]
-            lines += [f"- {ref}" for ref in f.references]
-            lines += [""]
-        if f.reproduction_recipe_ref:
-            lines += [f"**Reproduction recipe:** `{f.reproduction_recipe_ref}`", ""]
-        if f.observation_refs:
-            lines += ["**Observation references:**", ""]
-            lines += [f"- `{ref}`" for ref in f.observation_refs]
-            lines += [""]
-        if f.evidence_refs:
-            lines += ["**Evidence references** (encrypted evidence store digests):", ""]
-            lines += [f"- `{ref}`" for ref in f.evidence_refs]
-            lines += [""]
-        if f.audit_refs:
-            lines += ["**Audit trail references** (tamper-evident log entry hashes):", ""]
-            lines += [f"- `{ref}`" for ref in f.audit_refs]
-            lines += [""]
-    return "\n".join(lines)
+    if f.preconditions:
+        lines += ["**Preconditions**", "", f.preconditions, ""]
+    if f.demonstrated_impact:
+        lines += ["**Demonstrated impact**", "", f.demonstrated_impact, ""]
+    lines += [
+        "**Remediation**",
+        "",
+        f.remediation,
+        "",
+    ]
+    if f.limitations:
+        lines += ["**Limitations**", "", f.limitations, ""]
+    if f.references:
+        lines += ["**References**", ""]
+        lines += [f"- {ref}" for ref in f.references]
+        lines += [""]
+    if f.reproduction_recipe_ref:
+        lines += [f"**Reproduction recipe:** `{f.reproduction_recipe_ref}`", ""]
+    if f.observation_refs:
+        lines += ["**Observation references:**", ""]
+        lines += [f"- `{ref}`" for ref in f.observation_refs]
+        lines += [""]
+    if f.evidence_refs:
+        lines += ["**Evidence references** (encrypted evidence store digests):", ""]
+        lines += [f"- `{ref}`" for ref in f.evidence_refs]
+        lines += [""]
+    if f.audit_refs:
+        lines += ["**Audit trail references** (tamper-evident log entry hashes):", ""]
+        lines += [f"- `{ref}`" for ref in f.audit_refs]
+        lines += [""]
+    return lines
 
 
 # Unicode PDF fonts — already installed system-wide (Ubuntu's fonts-noto-core /
