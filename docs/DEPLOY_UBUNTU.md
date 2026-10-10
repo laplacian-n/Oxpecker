@@ -170,7 +170,47 @@ WantedBy=multi-user.target
 
 Note `-m agent.web.dev_server`, not the path to `dev_server.py`. The module uses
 package-relative imports, so running it as a script file fails at import with "attempted
-relative import with no known parent package" before it binds anything.
+relative import with no known parent package" before it binds anything. `-m agent.run_web_ui`
+is an exact alias — it delegates to the same `main()` — so either module name works.
+
+### GPU-less / OpenRouter, and a client on the LAN
+
+On a host with no GPU (the chat model runs via OpenRouter instead of a local llama-server), drop
+the `oxpecker-llama-chat.service` unit entirely and change the dev-server unit to name the
+provider instead of a `--llama-url`. The API key goes in the environment, **never on the command
+line** (it would otherwise show up in `ps` and the journal):
+
+```ini
+[Service]
+User=oxpecker
+WorkingDirectory=/opt/oxpecker/app
+Environment=OXPECKER_DATA_DIR=/var/lib/oxpecker/data
+Environment=AGENT_STATE_DIR=/var/lib/oxpecker/state
+# The model key — prefer an EnvironmentFile (mode 600) over an inline value:
+EnvironmentFile=/var/lib/oxpecker/openrouter.env      # contains: OPENROUTER_API_KEY=sk-or-...
+# Only needed if a client loads the page from a different origin than it calls the API on:
+# Environment=AGENT_WEB_CORS_ORIGINS=http://<client-host>:7777
+ExecStart=/opt/oxpecker/.venv/bin/python -m agent.web.dev_server \
+    --provider openrouter --model <provider/model-id> \
+    --host 0.0.0.0 --port 7777
+Restart=on-failure
+RestartSec=5
+```
+
+`--provider openrouter` needs `--model` (there is no default — which model ran a trajectory is the
+most load-bearing thing a trajectory records) and does **not** need llama-server. The embedding
+server for dense RAG (`oxpecker-llama-embed`, CPU-only, `-ngl 0`) is independent of the chat model:
+keep it for `security_reference_search`, or pass `--no-vector-rag` to skip it. Everything else on
+this page — the bind-safety refusal, the API-key file, the sandbox note — applies unchanged.
+
+**A client over the LAN.** `--host 0.0.0.0` requires `state/web_ui_api_key.txt` to exist (the
+refusal above), so create it first. Then from the Windows laptop point the Electron client — or
+just a browser — at `http://<ubuntu-host>:7777/`, and paste the key into the UI's key field (it is
+kept in `localStorage` and sent as `X-API-Key`, and as `?key=` on the SSE stream). The two shipped
+clients load the page from the server itself, so they are same-origin and need no CORS header;
+set `AGENT_WEB_CORS_ORIGINS` only if you serve the page from somewhere else. Add the target you
+want to test to the engagement's scope allowlist before the agent will touch it — the scope check
+is enforced regardless of how the model is hosted.
 
 **The usual systemd hardening directives disable this project's sandbox.**
 `RestrictNamespaces=`, `PrivateUsers=yes` and friends are exactly the settings that stop
