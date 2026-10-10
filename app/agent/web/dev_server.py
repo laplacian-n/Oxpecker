@@ -762,6 +762,62 @@ def _graph_restore(graphs_data: dict, edges_data: dict) -> None:
 
 _notebooks: dict[str, list[NotebookNote]] = {}
 _findings: dict[str, list[Finding]] = {}
+
+
+# The findings store. Every read and write of _findings goes through these accessors so the
+# backing store can be swapped by rewriting them alone.
+
+def _finding_has_key(key: str) -> bool:
+    return key in _findings
+
+
+def _findings_for(key: str) -> list:
+    return _findings.get(key, [])
+
+
+def _findings_ensure(key: str) -> None:
+    """Create an empty finding bucket for `key` if it is absent."""
+    if key not in _findings:
+        _findings[key] = []
+
+
+def _finding_add(key: str, finding) -> None:
+    if key not in _findings:
+        _findings[key] = []
+    _findings[key].append(finding)
+
+
+def _finding_delete(key: str, finding_id: str) -> bool:
+    """Remove the finding with `finding_id` from `key`'s bucket. False if it was not there."""
+    fs = _findings.get(key, [])
+    if not any(f.finding_id == finding_id for f in fs):
+        return False
+    _findings[key] = [f for f in fs if f.finding_id != finding_id]
+    return True
+
+
+def _finding_review(key: str, finding_id: str, reviewed_by: str):
+    """Stamp `reviewed_by` onto the finding with `finding_id` under `key`. Returns it, or None."""
+    for f in _findings.get(key, []):
+        if f.finding_id == finding_id:
+            f.reviewed_by = reviewed_by
+            return f
+    return None
+
+
+def _finding_key_count() -> int:
+    return len(_findings)
+
+
+def _findings_snapshot() -> dict:
+    return {eid: [f.to_dict() for f in fs] for eid, fs in _findings.items()}
+
+
+def _findings_restore(data: dict) -> None:
+    for eid, fs in data.items():
+        _findings[eid] = [_mk(Finding, f) for f in fs]
+
+
 _technique_kb: list[dict] = []
 
 
@@ -854,7 +910,7 @@ def _persist():
                  "authorized_by": e.authorized_by, "valid_until": e.valid_until, "created_at": e.created_at}
                 for e in list(_engagements.values())
             ],
-            "findings": {eid: [f.to_dict() for f in fs] for eid, fs in _findings.items()},
+            "findings": _findings_snapshot(),
             **_graph_snapshot(),
             "notebooks": _notebook_snapshot(),
         }
@@ -881,8 +937,7 @@ def _load_state():
         # program terms while still reporting that it had some.
         eng.program = _Program.from_dict(e.get("program"))
         _engagements[e["engagement_id"]] = eng
-    for eid, fs in data.get("findings", {}).items():
-        _findings[eid] = [_mk(Finding, f) for f in fs]
+    _findings_restore(data.get("findings", {}))
     _graph_restore(data.get("graphs", {}), data.get("graph_edges", {}))
     _notebook_restore(data.get("notebooks", {}))
     for sd in data.get("sessions", []):
@@ -903,7 +958,7 @@ def _load_state():
         s.summary_upto = sd.get("summary_upto", 0)
         _sessions[s.session_id] = s
     log.info("Restored state: %d sessions, %d engagements, %d finding-sets",
-             len(_sessions), len(_engagements), len(_findings))
+             len(_sessions), len(_engagements), _finding_key_count())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1303,16 +1358,15 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         # "raw" blob and no real title/description — that used to create an empty finding).
         if not title or not desc:
             return {"ok": False, "error": "a finding needs both a title and a description"}
-        if eng_id not in _findings:
-            _findings[eng_id] = []
+        _findings_ensure(eng_id)
         # Dedup by title so repeated calls in one turn don't pile up duplicates.
-        for f in _findings[eng_id]:
+        for f in _findings_for(eng_id):
             if (f.title or "").strip().lower() == title.lower():
                 return {"ok": True, "finding_id": f.finding_id, "deduped": True}
         # Monotonic id from the max existing ordinal (not len) — len-based ids collide
         # after a finding is deleted (e.g. f-1,f-3 → len 2 → a second "f-3").
         max_ord = 0
-        for f in _findings[eng_id]:
+        for f in _findings_for(eng_id):
             m = re.match(r"f-(\d+)$", f.finding_id or "")
             if m:
                 max_ord = max(max_ord, int(m.group(1)))
@@ -1324,7 +1378,7 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
             description=args.get("description", ""),
             target=args.get("target", ""),
         )
-        _findings[eng_id].append(finding)
+        _finding_add(eng_id, finding)
         return {"ok": True, "finding_id": fid}
 
     elif name == "record_note":
@@ -3244,7 +3298,7 @@ def _scope_keys(path_id: str) -> list[str]:
     if path_id in _sessions:
         return [path_id]
     keys = [sid for sid, s in _sessions.items() if s.engagement_id == path_id]
-    if _graph_has_key(path_id) or _notebook_has_key(path_id) or path_id in _findings:
+    if _graph_has_key(path_id) or _notebook_has_key(path_id) or _finding_has_key(path_id):
         keys.append(path_id)
     return keys
 
@@ -3341,7 +3395,7 @@ def technique_kb_forget(ordinal: int):
 def list_findings(engagement_id: str):
     findings = []
     for k in _scope_keys(engagement_id):
-        findings += _findings.get(k, [])
+        findings += _findings_for(k)
     reviewed_count = sum(1 for f in findings if f.reviewed_by)
     return {
         "findings": [f.to_dict() for f in findings],
@@ -3352,9 +3406,7 @@ def list_findings(engagement_id: str):
 @app.delete("/api/engagements/{engagement_id}/findings/{finding_id}")
 def delete_finding(engagement_id: str, finding_id: str):
     for k in _scope_keys(engagement_id):
-        fs = _findings.get(k, [])
-        if any(f.finding_id == finding_id for f in fs):
-            _findings[k] = [f for f in fs if f.finding_id != finding_id]
+        if _finding_delete(k, finding_id):
             _persist()
             return {"deleted": True}
     return {"deleted": False}
@@ -3362,11 +3414,10 @@ def delete_finding(engagement_id: str, finding_id: str):
 @app.post("/api/engagements/{engagement_id}/findings/{finding_id}/review")
 def review_finding(engagement_id: str, finding_id: str, req: ReviewFindingRequest):
     for k in _scope_keys(engagement_id):
-        for f in _findings.get(k, []):
-            if f.finding_id == finding_id:
-                f.reviewed_by = req.reviewed_by
-                _persist()
-                return f.to_dict()
+        f = _finding_review(k, finding_id, req.reviewed_by)
+        if f is not None:
+            _persist()
+            return f.to_dict()
     raise HTTPException(404, f"finding {finding_id!r} not found")
 
 # ── Guided run (back-compat path for the old "autonomous/start" endpoint) ──
