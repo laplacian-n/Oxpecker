@@ -23,6 +23,12 @@ log = logging.getLogger("agent.pipeline.strategist")
 # blocked/awaiting_approval are waiting on something other than a worker.
 CANDIDATE_STATUSES = ("draft", "open", "queued", "running")
 
+# How many times a single hypothesis may be dispatched before the strategist gives up on it and
+# resolves it inconclusive. Bounds the retry loop so one hypothesis whose worker keeps timing out
+# (common with a slow reasoning model) cannot keep ANALYSIS running until the whole-engagement
+# wall-clock — the "it's been stuck for ages" symptom.
+MAX_ATTEMPTS_PER_HYPOTHESIS = 3
+
 _SYSTEM = (
     "You are the strategist in a security-testing engagement. You are shown the open hypotheses "
     "about the target and must choose which experiments to run next — each experiment is one "
@@ -40,7 +46,28 @@ class Strategist:
         self.max_experiments = max_experiments
 
     def _candidates(self) -> list[dict]:
-        return [h for h in self.store.list_hypotheses() if h.get("lifecycle_status") in CANDIDATE_STATUSES]
+        live: list[dict] = []
+        for h in self.store.list_hypotheses():
+            if h.get("lifecycle_status") not in CANDIDATE_STATUSES:
+                continue
+            # Give up on a hypothesis that keeps getting tested without ever reaching a verdict —
+            # e.g. a worker that times out leaves its hypothesis 'running' with no verdict, and the
+            # strategist would otherwise re-dispatch it every wave forever (a real hang: ANALYSIS
+            # never concludes). Past the retry budget, resolve it inconclusive so it leaves the
+            # candidate pool and the phase can finish.
+            if (h.get("verdict", "unassessed") == "unassessed"
+                    and len(self.store.list_experiments(h["hypothesis_id"])) >= MAX_ATTEMPTS_PER_HYPOTHESIS):
+                try:
+                    self.store.set_verdict(
+                        h["hypothesis_id"], h["version"], "inconclusive",
+                        confidence_band="low",
+                        confidence_reason=(f"no verdict after {MAX_ATTEMPTS_PER_HYPOTHESIS} "
+                                           "attempts — ran out of its retry budget"))
+                except Exception:  # noqa: BLE001 — a racing write just means someone else resolved it
+                    pass
+                continue
+            live.append(h)
+        return live
 
     def _digest(self, candidates: list[dict], omitted: int) -> str:
         lines = ["Open hypotheses:"]
