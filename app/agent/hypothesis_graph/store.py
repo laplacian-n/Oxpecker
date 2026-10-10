@@ -63,13 +63,30 @@ class HypothesisGraphStore:
         self.db_path = engagement_dir / "hypothesis_graph.db"
         with self._connect() as conn:
             conn.executescript(SCHEMA)
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
+            self._migrate(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO graph_state (id, graph_version, next_ordinal) VALUES (1, 0, 1)"
             )
+
+    def _migrate(self, conn) -> None:
+        """Bring an existing DB up to SCHEMA_VERSION. This has to exist because `executescript(SCHEMA)`
+        uses CREATE TABLE IF NOT EXISTS — it creates the full current schema on a fresh DB, but it
+        does NOT touch a table that already exists, so a new column never reaches a DB from an
+        earlier version. A fresh DB therefore works and an existing engagement breaks silently
+        without this (the exact failure a host with real data would hit). Each step is guarded by a
+        structural check (PRAGMA table_info), not by the stored version — the original build wrote
+        the version with INSERT OR IGNORE, so it is stuck at its first value and cannot be trusted;
+        the column's actual presence is the source of truth. The version meta is then upserted (a
+        real UPDATE, not INSERT OR IGNORE) so it finally tracks reality for future migrations."""
+        # v1 -> v2: the `primitive_gained` column on `hypotheses` (§3.5 / §8.6.5 #3).
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(hypotheses)").fetchall()}
+        if "primitive_gained" not in cols:
+            conn.execute("ALTER TABLE hypotheses ADD COLUMN primitive_gained TEXT")
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
 
     @contextmanager
     def _connect(self):
@@ -288,6 +305,61 @@ class HypothesisGraphStore:
                 "UPDATE hypotheses SET coverage=?, updated_at=? WHERE hypothesis_id=?",
                 (max(0.0, min(1.0, coverage)), _now(), hypothesis_id),
             )
+
+    # -- primitives (§3.5 / §8.6.5 #3) -------------------------------------------------------
+
+    def set_primitive_gained(
+        self, hypothesis_id: str, expected_version: int, primitive: str, *, actor: str = "agent",
+    ) -> int:
+        """Record that this hypothesis grants `primitive` (a capability — e.g. 'arbitrary_file_read').
+        It is a field on the hypothesis, not a row of its own: the primitive is held only while the
+        hypothesis stands (see `held_primitives`), so there is no separate status to revoke. Setting
+        the field does not by itself make the primitive 'held' — that is the query, and it requires a
+        confirmed verdict (§8.6.5 #3: a model-asserted primitive is a claim with a built-in test)."""
+        if not primitive or not primitive.strip():
+            raise GraphValidationError("primitive_gained requires a non-empty capability name")
+        with self._connect() as conn:
+            new_version = self._update_hypothesis(
+                conn, hypothesis_id, expected_version, {"primitive_gained": primitive.strip()}
+            )
+            self._emit(conn, "hypothesis.primitive_gained",
+                       {"primitive": primitive.strip(), "actor": actor}, hypothesis_id=hypothesis_id)
+            return new_version
+
+    def held_primitives(self) -> list[dict]:
+        """The primitives currently held: hypotheses that granted one AND are still confirmed
+        (§8.6.5 #3). This is derived, never stored — a hypothesis closed by a CONTRADICTS
+        (verdict != confirmed) drops out of this answer on the next read, with no revoke step to
+        forget. The invariant 'you cannot hold a primitive whose granting hypothesis is not
+        confirmed' is therefore true by construction."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM hypotheses WHERE primitive_gained IS NOT NULL "
+                "AND verdict = ? ORDER BY ordinal",
+                (Verdict.CONFIRMED.value,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def contradict_primitive(
+        self, contradicting_hypothesis_id: str, granting_hypothesis_id: str, *, reason: str,
+    ) -> None:
+        """A downstream worker could not use a primitive: file a CONTRADICTS observation against the
+        hypothesis that granted it and close that hypothesis, with the reason recorded (§8.6.5 #3).
+        The closed hypothesis is a *negative example of self-confirmation* — exactly what training
+        should learn from. CONTRADICTS already exists as an edge type, so this is wiring, not new
+        structure. Refuting the granting hypothesis also drops it from `held_primitives` by
+        construction (the held query requires a confirmed verdict)."""
+        if not reason or not reason.strip():
+            raise GraphValidationError("contradicting a primitive requires a reason")
+        granting = self.get_hypothesis(granting_hypothesis_id)  # raises NotFoundError if absent
+        self.add_edge(contradicting_hypothesis_id, granting_hypothesis_id,
+                      EdgeType.CONTRADICTS.value, reason=reason.strip())
+        # Close the granting hypothesis: its primitive did not hold up, so its claim is refuted.
+        self.set_verdict(granting_hypothesis_id, granting["version"], Verdict.REFUTED.value)
+        with self._connect() as conn:
+            self._emit(conn, "hypothesis.primitive_contradicted",
+                       {"reason": reason.strip(), "contradicted_by": contradicting_hypothesis_id},
+                       hypothesis_id=granting_hypothesis_id)
 
     def add_direct_tokens(self, hypothesis_id: str, tokens: int) -> None:
         with self._connect() as conn:
