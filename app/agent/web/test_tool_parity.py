@@ -48,7 +48,8 @@ def _dispatchable(src: str) -> set[str]:
     # — resolve the identifier to the family's names so a family routed in one branch still counts
     # as dispatchable for every tool in it.
     from ..hypothesis_graph.tools import GRAPH_TOOL_NAMES as _GTN
-    _known_sets = {"_GRAPH_TOOL_NAMES": _GTN}
+    from ..notebook.tools import NOTEBOOK_TOOL_NAMES as _NTN
+    _known_sets = {"_GRAPH_TOOL_NAMES": _GTN, "_NOTEBOOK_TOOL_NAMES": _NTN}
     for ident in re.findall(r"name\s+in\s+(_[A-Za-z_]+)\b", body):
         names |= set(_known_sets.get(ident, ()))
     return names

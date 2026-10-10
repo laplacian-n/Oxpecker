@@ -88,6 +88,7 @@ from ..hypothesis_graph.store import NotFoundError as _GraphNotFoundError
 from ..hypothesis_graph.tools import GRAPH_TOOL_NAMES as _GRAPH_TOOL_NAMES
 from ..notebook.service import NotebookService as _NotebookService
 from ..notebook.store import NotFoundError as _NoteNotFoundError
+from ..notebook.tools import NOTEBOOK_TOOL_NAMES as _NOTEBOOK_TOOL_NAMES
 from ..llm import registry as _llm_registry
 from ..sandbox import availability as _isolation
 from ..security_tools import http_recon as _http_recon
@@ -243,6 +244,9 @@ TRACK YOUR WORK (keep the hypothesis graph and notebook alive — do this contin
 - Call note_search before assuming what you noted earlier or whether you already ruled something
   out — do not guess. Call technique_recall when you reach a surface or bug class you have worked
   before, to reuse a technique you saved on a past engagement instead of re-deriving it.
+- When a todo note is done or a dead-end is settled, close it with note_resolve (give the reason).
+  When a note turns out to be a real lead worth testing, note_promote it into a hypothesis in the
+  graph instead of retyping it.
 - Call record_finding for every CONFIRMED vulnerability, with evidence.
 A real red-teamer leaves a trail — the operator watches the hypothesis tree and notebook fill up
 as you go, so keep them current round by round.
@@ -1624,14 +1628,15 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         from ..hypothesis_graph.tools import dispatch as _graph_tool_dispatch
         return _graph_tool_dispatch(_graph_service(session.engagement_id), name, args)
 
-    elif name in ("note_search", "technique_recall"):
-        # §12 step 3 — the engine's read-only notebook tools, mounted on the UI runtime against this
+    elif name in _NOTEBOOK_TOOL_NAMES:
+        # §12 step 3 — the engine's full notebook tool set, mounted on the UI runtime against this
         # engagement's notebook service (the single tool plane). In-process, keyed by engagement
-        # like record_note. technique_recall reaches the account-scoped global technique KB the
-        # service already carries. The write tools (note_add/resolve/promote) still go through
-        # record_note until that model-facing interface is consolidated.
+        # like record_note. technique_recall reaches the account-scoped global technique KB; and
+        # note_promote turns a note into a hypothesis, so it is handed this engagement's graph
+        # service. record_note stays as the simple capture lookalike; the prompt steers here.
         from ..notebook.tools import dispatch as _notebook_tool_dispatch
-        return _notebook_tool_dispatch(_notebook_service(session.engagement_id), name, args)
+        return _notebook_tool_dispatch(_notebook_service(session.engagement_id), name, args,
+                                       graph=_graph_service(session.engagement_id))
 
     elif name == "port_discovery":
         # Delegates to the same security_tools implementation the CLI uses, with a Policy built
@@ -2131,14 +2136,13 @@ from ..hypothesis_graph.tools import SCHEMAS as _ENGINE_GRAPH_SCHEMAS  # noqa: E
 
 TOOL_SCHEMAS += list(_ENGINE_GRAPH_SCHEMAS)
 
-# Likewise the engine's read-only notebook tools, now that the notebook is the per-engagement
-# NotebookService (step 3). note_search reads this engagement's notebook; technique_recall reads
-# the account-scoped global technique library. Additive — the note write tools still reach the
-# model through record_note.
+# Likewise the engine's full notebook tool set, now that the notebook is the per-engagement
+# NotebookService (step 3): note_search/technique_recall read, note_add/note_resolve/note_promote
+# write (note_promote turns a note into a graph hypothesis). record_note stays as the simple
+# capture lookalike for back-compat and test seeding; the prompt steers the model to these.
 from ..notebook.tools import SCHEMAS as _ENGINE_NOTEBOOK_SCHEMAS  # noqa: E402
 
-_UI_NOTEBOOK_READ_TOOLS = ("note_search", "technique_recall")
-TOOL_SCHEMAS += [s for s in _ENGINE_NOTEBOOK_SCHEMAS if s["function"]["name"] in _UI_NOTEBOOK_READ_TOOLS]
+TOOL_SCHEMAS += list(_ENGINE_NOTEBOOK_SCHEMAS)  # full notebook tool set now reachable (step 3)
 
 SECURITY_TOOL_SCHEMAS = [
     # What the "security tools" toggle gates, now that it gates something. These reach the
