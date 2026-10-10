@@ -260,6 +260,10 @@ const api={
   async autonomousStatus(sid){return(await fetch('/api/sessions/'+sid+'/autonomous/status',{headers:apiHeaders()})).json()},
   async setThinking(sid,thinking){return(await fetch('/api/sessions/'+sid+'/thinking',{method:'POST',headers:apiHeaders(),body:JSON.stringify({thinking})})).json()},
   async stopAutonomous(sid){return(await fetch('/api/sessions/'+sid+'/autonomous/stop',{method:'POST',headers:apiHeaders()})).json()},
+  // The real autonomous pipeline (agent/pipeline/autonomous_driver.py): the agent drives a full
+  // RECON→CLOSEOUT engagement itself, streaming phase/wave events the SSE handler already renders.
+  async startPipeline(sid,data){return(await fetch('/api/sessions/'+sid+'/pipeline/start',{method:'POST',headers:apiHeaders(),body:JSON.stringify(data)})).json()},
+  async stopPipeline(sid){return(await fetch('/api/sessions/'+sid+'/pipeline/stop',{method:'POST',headers:apiHeaders()})).json()},
 };
 
 /* SSE */
@@ -390,7 +394,15 @@ async function sendMessage(){
   // greeting like "สวัสดี" shouldn't kick off recon, so a trivial message is sent as plain chat
   // even in a guided-mode session; anything actionable runs under the stage protocol.
   const actionable=/https?:\/\/|\b\d{1,3}(\.\d{1,3}){3}\b|\b(scan|recon|exploit|pentest|vuln|attack|inject|enumerate|fuzz|brute|target|report|validate|analy|เจาะ|สแกน|ช่องโหว่|โจมตี|เป้าหมาย|รายงาน|ยืนยัน|วิเคราะห์|รีคอน)\b/i.test(text)||text.length>40;
-  const guided=S.mode!=='assistant'&&actionable;
+  // Autonomous mode hands the goal to the pipeline, which drives the whole engagement itself —
+  // its phase/wave events arrive over the same SSE and are rendered like any other.
+  if(S.mode==='autonomous'){
+    try{
+      await api.startPipeline(sid,{engagement_id:S.engagementId,profile:'web_api',mode:'autonomous',user_message:text});
+    }catch(e){S.running=false;clearInterval(S.elapsedTimer);toast('Pipeline start failed: '+e.message);render();}
+    return;
+  }
+  const guided=S.mode==='guided'&&actionable;
   try{
     await api.sendMessage(sid,text,guided,guided?S.stage:null);
   }catch(e){S.running=false;clearInterval(S.elapsedTimer);toast('Send failed: '+e.message);render();}
@@ -400,7 +412,7 @@ async function deleteSession(sid,ev){
   try{await api.deleteSession(sid);S.sessions=S.sessions.filter(s=>s.id!==sid);delete S.threads[sid];
   if(S.activeSession===sid)goHome();else render();toast('Session deleted');}catch(e){toast('Delete failed: '+e.message)}
 }
-function stopRun(){if(!S.activeSession)return;S.running=false;S.streamingText='';S.streamingReasoning='';clearInterval(S.elapsedTimer);api.stopAutonomous(S.activeSession).catch(()=>{});render();toast('Stopped');}
+function stopRun(){if(!S.activeSession)return;S.running=false;S.streamingText='';S.streamingReasoning='';clearInterval(S.elapsedTimer);(S.mode==='autonomous'?api.stopPipeline(S.activeSession):api.stopAutonomous(S.activeSession)).catch(()=>{});render();toast('Stopped');}
 async function sendSteer(){
   const t=S.steerText.trim();if(!t||!S.activeSession)return;
   try{await api.steer(S.activeSession,t);S.steerText='';S.steerOpen=false;
@@ -657,7 +669,7 @@ function renderConnBanner(){
 
 /* Home Screen */
 function renderHome(){
-  const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Guided',consult:'Guided'}[S.mode]||'Assistant';
+  const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Autonomous',consult:'Autonomous'}[S.mode]||'Assistant';
   return`<div style="flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;overflow:hidden">
     <canvas id="homeCanvas" style="position:absolute;inset:0;width:100%;height:100%;color:${A};pointer-events:none"></canvas>
     <div style="position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,0,0,.78) 0%,rgba(0,0,0,.42) 45%,transparent 80%);pointer-events:none"></div>
@@ -709,7 +721,8 @@ function renderMenuDropdown(minW){
     items.push({value:'direct',label:'direct',desc:'No sandbox beyond the binary blocklist',cur:S.isolation==='direct'});
   }else if(S.menu==='mode'){
     items.push({value:'assistant',label:'Assistant',desc:'Free chat — you drive every turn, no staged protocol.',cur:S.mode==='assistant'});
-    items.push({value:'guided',label:'Guided',desc:'Staged pentest: the agent works the current stage, reports, then waits. You move stages (RECON→ANALYSIS→VALIDATION→REPORT) by chatting or the stage bar.',cur:S.mode!=='assistant'});
+    items.push({value:'guided',label:'Guided',desc:'Staged pentest: the agent works the current stage, reports, then waits. You move stages (RECON→ANALYSIS→VALIDATION→REPORT) by chatting or the stage bar.',cur:S.mode==='guided'});
+    items.push({value:'autonomous',label:'Autonomous',desc:'The agent runs the whole engagement itself — RECON→CLOSEOUT with the wave engine, no per-turn steering. Your first message is the goal.',cur:S.mode==='autonomous'});
   }else if(S.menu==='think'){
     items.push({value:false,label:'Off',desc:'Answers/tool-calls come straight out. Best reliability on a 4B.',cur:!S.thinking});
     items.push({value:true,label:'On',desc:'Shows the model\'s <think> reasoning before each answer. Slower, uses more tokens.',cur:S.thinking});
@@ -803,7 +816,7 @@ function renderChat(){
   const session=S.sessions.find(s=>s.id===S.activeSession);
   const title=session?session.title:'Session';
   const thread=S.threads[S.activeSession]||[];
-  const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Guided',consult:'Guided'}[S.mode]||'Assistant';
+  const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Autonomous',consult:'Autonomous'}[S.mode]||'Assistant';
   const metaChips=[
     {text:modeLabel,color:S.mode==='assistant'?'#7d7d7d':A70,bd:'#1f1f1f',bg:'transparent'},
     {text:S.engagementId,color:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
@@ -824,7 +837,7 @@ function renderChat(){
         <div class="hv hv-color" data-action="copySessionId" style="display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:7px;cursor:pointer;font:500 12px 'Instrument Sans';color:#9a9a9a">${icons.copy}${S.idCopied?'Copied':''}</div>
       </div>
     </div>
-    ${S.mode!=='assistant'?renderStageBar():''}
+    ${S.mode==='guided'?renderStageBar():''}
     ${renderRunBar()}
     <div style="flex:1;display:flex;min-height:0;position:relative">
       <div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">
