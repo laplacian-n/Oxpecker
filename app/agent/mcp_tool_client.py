@@ -27,6 +27,29 @@ from mcp.client.stdio import stdio_client
 _STOP = object()
 
 
+def _parse_tool_result(result) -> dict:
+    """Map an MCP `CallToolResult` to the plain dict the loop expects.
+
+    The structured field is `structuredContent` (camelCase, as the MCP wire schema and the SDK's
+    pydantic model name it). Reading `result.structured_content` raised AttributeError on *every*
+    tool call, so a wave worker died the instant the model first used a tool — which is why
+    autonomous recon produced zero hypotheses and every report came back empty. getattr covers both
+    spellings, so a future SDK that adds a snake_case alias keeps working. Falls back to the first
+    JSON text block, then to an explicit empty-result error."""
+    structured = getattr(result, "structuredContent", None)
+    if structured is None:
+        structured = getattr(result, "structured_content", None)
+    if structured is not None:
+        return structured
+    for block in getattr(result, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            try:
+                return json.loads(block.text)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": f"non-JSON tool output: {block.text[:300]}"}
+    return {"ok": False, "error": "empty tool result"}
+
+
 class MCPToolClient:
     def __init__(self, server_module: str, server_args: list[str], connect_timeout_s: float = 30):
         args = ["-m", server_module, *server_args]
@@ -83,15 +106,7 @@ class MCPToolClient:
 
         name, arguments = payload
         result = await session.call_tool(name, arguments)
-        if result.structured_content is not None:
-            return result.structured_content
-        for block in result.content:
-            if block.type == "text":
-                try:
-                    return json.loads(block.text)
-                except json.JSONDecodeError:
-                    return {"ok": False, "error": f"non-JSON tool output: {block.text[:300]}"}
-        return {"ok": False, "error": "empty tool result"}
+        return _parse_tool_result(result)
 
     def _submit(self, kind: str, payload=None, timeout: float | None = None):
         fut: concurrent.futures.Future = concurrent.futures.Future()
