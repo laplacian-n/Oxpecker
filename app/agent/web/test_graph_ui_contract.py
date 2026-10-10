@@ -53,7 +53,7 @@ class GraphUiContractTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self._saved = {
             name: dict(getattr(dev_server, name))
-            for name in ("_sessions", "_notebooks", "_findings")
+            for name in ("_sessions", "_findings")
         }
         for name in self._saved:
             getattr(dev_server, name).clear()

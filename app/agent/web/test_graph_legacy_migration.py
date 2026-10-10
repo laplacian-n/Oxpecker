@@ -30,7 +30,7 @@ class GraphLegacyMigrationTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="graph-legacy-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self._saved = {n: dict(getattr(dev_server, n))
-                       for n in ("_sessions", "_engagements", "_notebooks", "_findings")}
+                       for n in ("_sessions", "_engagements", "_findings")}
         for n in self._saved:
             getattr(dev_server, n).clear()
         self._patchers = [
