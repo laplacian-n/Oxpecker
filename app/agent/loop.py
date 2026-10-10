@@ -138,6 +138,7 @@ class AgentLoop:
         force_no_think: bool = False,
         stop_event=None,
         client=None,
+        serialize_engagement: bool = True,
     ):
         # Default to the local llama-server (unchanged behaviour); a caller — notably a wave
         # worker that must not touch the GPU — may inject an OpenRouter-backed client instead
@@ -170,6 +171,16 @@ class AgentLoop:
         # and the loop returns a 'cancelled' result at the next turn boundary, rather than being
         # force-killed mid-generation (a thread cannot be). What it had already recorded stays.
         self.stop_event = stop_event
+        # Whether run_task() takes the per-engagement RLock (locks.py). True for a standalone
+        # session, which must serialize against other sessions touching the same engagement. False
+        # for a wave worker (§2.5): the AutonomousDriver already holds that lock for the whole run,
+        # and the worker runs on a *separate* thread (wave.py starts one Thread per worker), so an
+        # RLock — re-entrant only on the holding thread — would block the worker forever against the
+        # lock the driver thread holds. That self-deadlock made every autonomous recon wave hang
+        # until it was abandoned by the wall-clock, so recon produced zero hypotheses and every
+        # report came back empty. The workers of one run are that run, not competing sessions; the
+        # driver's single lock already serializes the engagement, so the workers must not re-take it.
+        self.serialize_engagement = serialize_engagement
         self._spend_ledger: SpendLedger | None = None
         self.engagement_id = engagement_id
         self.prompt_version: str | None = None  # set on first _system_message() call
@@ -393,7 +404,8 @@ class AgentLoop:
         # actually touches engagement-scoped shared state (hypothesis graph / security tools) —
         # a plain chat session sharing the default engagement_id string but never reading/writing
         # its stores has nothing to serialize against and shouldn't pay for or wait on this.
-        if self.hypothesis_graph is not None or self.security_mcp_client is not None:
+        if self.serialize_engagement and (
+                self.hypothesis_graph is not None or self.security_mcp_client is not None):
             with engagement_lock(self.engagement_id):
                 return self._run_task_inner(user_input)
         return self._run_task_inner(user_input)
