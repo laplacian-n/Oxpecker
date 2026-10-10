@@ -46,7 +46,7 @@ from ..engagement.event_log import EngagementEventLog
 from ..engagement.intake import EngagementIntake, IntakeValidationError, create_engagement
 from ..engagement.store import EngagementStore
 from . import engagement_access
-from ..findings.model import FindingNotFoundError, FindingsStore
+from ..findings.model import FindingNotFoundError, FindingsStore, can_submit, submission_blocker
 from ..hypothesis_graph.service import HypothesisGraphService
 from ..hypothesis_graph.store import ConflictError, GraphValidationError, NotFoundError
 from ..notebook.service import NotebookService
@@ -876,8 +876,17 @@ def list_findings(engagement_id: str) -> dict:
     # otherwise (the exact bug class handoff.md's load-bearing-facts section warns about).
     findings = FindingsStore(engagement_id, findings_dir=config.FINDINGS_DIR).list_all()
     reviewed_count = sum(1 for f in findings if f.reviewed_by)
+    # submittable / submission_blocker are computed here, never stored: the §8.6.5 #1 boundary is
+    # a property of the finding, so the list shows the same answer an export would give.
     return {
-        "findings": [f.to_dict() for f in findings],
+        "findings": [
+            {
+                **f.to_dict(),
+                "submittable": can_submit(f),
+                "submission_blocker": submission_blocker(f),
+            }
+            for f in findings
+        ],
         "count": len(findings),
         "reviewed_count": reviewed_count,
     }
