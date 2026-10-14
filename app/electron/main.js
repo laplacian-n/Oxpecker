@@ -14,11 +14,14 @@
  * editing code. Nothing heavy is bundled — Python, llama-server and the model are the
  * user's own (see doc/handoff.md). This is the MVP "Option C + B" shell.
  */
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+// "This computer" isolation: runs the server's delegated tool I/O on this machine. See
+// client_executor.js and preload.js.
+const clientExecutor = require('./client_executor');
 
 // Auto-update via GitHub Releases (no-ops in dev / when unpackaged).
 let autoUpdater = null;
@@ -254,13 +257,24 @@ function createWindow() {
     width: 1280, height: 860, backgroundColor: '#000000',
     title: 'Oxpecker', autoHideMenuBar: true,
     icon: path.join(PROJECT_ROOT, 'build', 'icon.png'),
-    webPreferences: { contextIsolation: true, nodeIntegration: false, webSecurity: !bundled },
+    webPreferences: {
+      contextIsolation: true, nodeIntegration: false, webSecurity: !bundled,
+      // Narrow bridge for "this computer" isolation (window.oxpecker.*). Exposes nothing else.
+      preload: path.join(__dirname, 'preload.js'),
+    },
   });
   // open external links in the system browser, not inside the app
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   mainWindow.loadURL(loadingHtml());
   mainWindow.webContents.once('did-finish-load', () => { startEverything().catch((e) => fail(String(e))); });
 }
+
+// "This computer" isolation: the UI (any mode — server-served, remote or bundled) tells us the
+// server + key when the operator is on a this_computer session, and we pull and run that session's
+// delegated jobs. The server has already enforced scope before offering a job.
+ipcMain.handle('oxpecker:start-executor', (_e, { serverBase, apiKey }) =>
+  clientExecutor.start(serverBase, apiKey));
+ipcMain.handle('oxpecker:stop-executor', () => clientExecutor.stop());
 
 app.whenReady().then(() => { createWindow(); initAutoUpdate(); });
 app.on('window-all-closed', () => { killAll(); if (process.platform !== 'darwin') app.quit(); });

@@ -100,6 +100,14 @@ from ..sandbox import availability as _isolation
 from ..security_tools import http_recon as _http_recon
 from ..security_tools import port_discovery as _port_discovery
 from ..tools import run_command as _run_command
+from . import client_jobs as _client_jobs
+
+# Broker for "this computer" isolation: parks a tool's I/O until the operator's desktop app runs
+# it on their own machine and posts the result back. See client_jobs.py.
+_CLIENT_JOBS = _client_jobs.ClientJobBroker()
+# Tools whose actual I/O can be delegated to the desktop app when isolation == "this_computer".
+# Each entry maps the tool name to a client-side timeout (seconds) for the round trip.
+_CLIENT_DELEGATED = {"run_command": 120.0, "http_request": 45.0, "port_discovery": 120.0}
 from . import debug_trace as _debug
 from . import scope as _scope
 from ..llm.llama import LlamaCppProvider as _LlamaCppProvider
@@ -564,6 +572,11 @@ class Session:
     created_at: float = field(default_factory=time.time)
     use_security_tools: bool = False
     engagement_id: str = "lab-default"
+    # WHERE tool I/O runs. "cloud" = on this server, inside its sandbox (the isolation_tier below
+    # picks the sandbox). "this_computer" = handed to the operator's desktop app to run from their
+    # own machine's network position (scope is still enforced here first). The two values the UI
+    # offers; isolation_tier stays the cloud sub-tier, resolved automatically.
+    isolation: str = "cloud"
     isolation_tier: str = "bubblewrap"
     # What the last run_command actually executed under. `isolation_tier` above is the
     # operator's REQUEST; this is the outcome. They can differ, and this is None when a command
@@ -1173,7 +1186,7 @@ def _persist():
             "sessions": [
                 {"session_id": s.session_id, "messages": s.messages, "created_at": s.created_at,
                  "use_security_tools": s.use_security_tools, "engagement_id": s.engagement_id,
-                 "isolation_tier": s.isolation_tier,
+                 "isolation": s.isolation, "isolation_tier": s.isolation_tier,
                  "effective_isolation_tier": s.effective_isolation_tier, "profile": s.profile,
                  "autonomous_mode": s.autonomous_mode, "thinking": s.thinking,
                  "stage": s.stage, "guided": s.guided, "system_prompt": s.system_prompt,
@@ -1223,6 +1236,7 @@ def _load_state():
         s = Session(
             session_id=sd["session_id"], use_security_tools=sd.get("use_security_tools", False),
             engagement_id=sd.get("engagement_id", "lab-default"),
+            isolation=sd.get("isolation", "cloud"),
             isolation_tier=sd.get("isolation_tier", "bubblewrap"),
             effective_isolation_tier=sd.get("effective_isolation_tier"),
             profile=sd.get("profile", "safe"),
@@ -1371,6 +1385,25 @@ _TOOL_NAME_ALIASES = {
 }
 
 
+def _delegate_to_client(session: Session, kind: str, payload: dict) -> dict:
+    """Hand a tool's already-authorised I/O to the desktop app ("this computer" isolation).
+
+    Blocks until the app returns a result, or returns a clean tool error if no app is connected
+    or it does not answer in time. The scope/broker gates have already run before this is called.
+    """
+    timeout_s = _CLIENT_DELEGATED.get(kind, 60.0)
+    try:
+        result = _CLIENT_JOBS.submit(session.session_id, kind, payload, timeout_s=timeout_s)
+    except _client_jobs.ExecutorNotConnected as e:
+        return {"ok": False, "error": str(e), "isolation": "this_computer",
+                "executor_connected": False}
+    except _client_jobs.ClientJobTimeout as e:
+        return {"ok": False, "error": str(e), "isolation": "this_computer"}
+    if isinstance(result, dict):
+        result.setdefault("isolation", "this_computer")
+    return result
+
+
 def _run_tool(name: str, args: dict, session: Session) -> dict:
     """Execute a tool call. Returns the tool result dict."""
     name = _TOOL_NAME_ALIASES.get(name, name)
@@ -1405,6 +1438,11 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
                                           "tool instead: {\"url\":\"<full url incl. path>\", "
                                           "\"method\":\"GET|POST\", \"headers\":{...}, \"body\":{...}}. "
                                           "It returns the real status, headers, and body — no shell quoting."}
+        # "this computer": the destructive/http/scan steering above has already run on the server,
+        # so the argv reaching the desktop app is one we have screened. The app runs it on the
+        # operator's own machine (no server sandbox — it is their computer, which is the point).
+        if getattr(session, "isolation", "cloud") == "this_computer":
+            return _delegate_to_client(session, "run_command", {"argv": argv})
         # Executed through agent/tools/run_command.py — the same path the CLI uses — so this
         # inherits its blocked-binary preflight, credential-path refusal, workspace confinement
         # and output capping, and runs inside the isolation tier the operator selected. It used
@@ -1573,6 +1611,12 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
                 data = str(body).encode()
         hdrs = {str(k): str(v) for k, v in headers.items()}
         hdrs.setdefault("User-Agent", "Oxpecker/1.0")
+        # "this computer": scope has been checked above against the engagement; hand the (already
+        # in-scope) request to the desktop app so it originates from the operator's network.
+        if getattr(session, "isolation", "cloud") == "this_computer":
+            return _delegate_to_client(session, "http_request", {
+                "url": url, "method": method, "headers": hdrs,
+                "body": data.decode("utf-8", "replace") if data is not None else None})
         try:
             req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1776,6 +1820,13 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         pre = _scope.check_url(f"http://{host}/", eng)
         if not pre.allowed:
             return pre.as_tool_error()
+        # "this computer": host is in scope (checked above). Cap the ports with the same policy
+        # the cloud path uses, then scan from the operator's machine via the desktop app.
+        if getattr(session, "isolation", "cloud") == "this_computer":
+            policy = _scope.policy_from_engagement(eng)
+            max_ports = getattr(policy, "max_ports_per_scan", None) or len(ports)
+            return _delegate_to_client(session, "port_discovery",
+                                       {"host": host, "ports": ports[:max_ports]})
         try:
             return _port_discovery.run(host, ports, _scope.policy_from_engagement(eng))
         except PermissionError as e:
@@ -3126,6 +3177,9 @@ class CreateSessionRequest(BaseModel):
     use_security_tools: bool = False
     engagement_id: str = "lab-default"
     dangerous_local: bool = False
+    # "cloud" (run on the server, sandboxed) or "this_computer" (run on the operator's desktop
+    # app, from their machine's network). Scope is enforced on the server either way.
+    isolation: str = "cloud"
     isolation_tier: str = "bubblewrap"
     thinking: bool = False
     # Optional custom system prompt for the assistant (chat) path — for testing how the prompt
@@ -3331,6 +3385,29 @@ def default_system_prompt():
     return {"prompt": DEFAULT_SYSTEM_PROMPT}
 
 
+# ── "this computer" isolation: desktop-app job channel ──
+# The desktop app long-polls /next for a tool whose I/O the server has authorised but delegated
+# to the operator's machine, runs it, and posts the result to /result. Both are gated by the same
+# API key as every other /api/* route (require_api_key middleware). Sync defs so the blocking
+# long-poll runs in Starlette's threadpool instead of stalling the event loop.
+class ClientJobResultRequest(BaseModel):
+    result: dict
+
+@app.get("/api/client-jobs/next")
+def client_jobs_next(wait: float = 25.0):
+    # Cap the hold so a dropped connection frees the threadpool slot within half a minute.
+    wait = max(0.0, min(float(wait), 30.0))
+    job = _CLIENT_JOBS.claim(wait_s=wait)
+    return {"job": job}
+
+@app.post("/api/client-jobs/{job_id}/result")
+def client_jobs_result(job_id: str, req: ClientJobResultRequest):
+    delivered = _CLIENT_JOBS.deliver(job_id, req.result)
+    # delivered False just means the submitter already gave up (timeout) — not an error the app
+    # can do anything about, so report it without failing the request.
+    return {"ok": True, "delivered": delivered}
+
+
 # ── Static / index ──
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -3389,11 +3466,15 @@ def create_session(req: CreateSessionRequest):
             f"unknown isolation_tier {req.isolation_tier!r}; choose from "
             f"{list(_isolation.TIERS)}",
         )
+    if req.isolation not in ("cloud", "this_computer"):
+        raise HTTPException(
+            400, f"unknown isolation {req.isolation!r}; choose 'cloud' or 'this_computer'")
     sid = str(uuid.uuid4())[:12]
     session = Session(
         session_id=sid,
         use_security_tools=req.use_security_tools,
         engagement_id=req.engagement_id,
+        isolation=req.isolation,
         isolation_tier=req.isolation_tier,
         profile=req.profile,
         thinking=req.thinking,
@@ -3405,6 +3486,7 @@ def create_session(req: CreateSessionRequest):
         "session_id": sid, "workspace_root": str(DATA_DIR),
         "profile": req.profile, "use_security_tools": req.use_security_tools,
         "engagement_id": req.engagement_id,
+        "isolation": req.isolation,
         "isolation_tier": req.isolation_tier,
     }
 
@@ -3455,6 +3537,10 @@ def get_session(session_id: str):
         # really do. Reported separately and from the live probe so the UI cannot show a tier
         # nothing enforced — which is exactly what `isolation_tier` alone did while no code read
         # it at execution time.
+        # Where this session's tool I/O runs: "cloud" (this server's sandbox) or "this_computer"
+        # (the operator's desktop app). Distinct from "isolation" below, which is the host's
+        # sandbox capability, and from isolation_tier, the cloud sub-tier.
+        "isolation_mode": s.isolation,
         "isolation_tier": s.isolation_tier,
         "effective_isolation_tier": s.effective_isolation_tier,
         "isolation": _isolation.describe_host(),

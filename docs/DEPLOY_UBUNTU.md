@@ -298,6 +298,21 @@ than from the server. It then **opens even when the server is down** and shows t
 and report it cached while last online; it reaches the server (entered once on the connect screen)
 only for live data, AI and runs. Default is `false` — the server-served flow.
 
+**"This computer" isolation.** Each chat picks where its tools run, in the Isolation pill:
+
+| mode | where tool I/O runs |
+|---|---|
+| `cloud` (default) | on this server, inside the sandbox tier above — each operator gets their own sandbox |
+| `this computer` | on the operator's own machine, via the desktop app — so you can test a target *that machine* can reach |
+
+In `this computer` mode the server still drives the agent, calls the model and **enforces scope
+before anything runs**; only the final network/command I/O is handed to the desktop app, which runs
+it (`run_command`, `http_request`, `port_discovery`) from its own network position and posts the
+result back. It needs the Oxpecker **desktop app** (a plain browser tab has no executor, so those
+tools report "no executor connected"); shipping it to an installed `.exe` needs a new release
+(auto-update), since the executor lives in the app. Commands run on the client are **not**
+sandboxed — it is the operator's own computer, by design.
+
 ## Reaching it from Windows
 
 **Preferred — a tunnel, no code change and no open port:**

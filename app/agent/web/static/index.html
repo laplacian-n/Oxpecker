@@ -173,7 +173,10 @@ const S = {
   conn: 'online',
 
   securityTools: true,   // always on — the operator no longer toggles this
-  isolation: 'bubblewrap',
+  // WHERE tool I/O runs: 'cloud' (on the server, in its sandbox) or 'this_computer' (on this
+  // machine via the desktop app, for testing from this machine's network). The server resolves
+  // cloud's sandbox automatically, so the operator no longer picks bubblewrap/wsl2/direct.
+  isolation: 'cloud',
   tier: 'high',          // autonomous orchestration tier: low | medium | high
   systemPrompt: '',      // custom chat system prompt (blank = server default); for refusal testing
   engagementId: 'lab-default',
@@ -417,15 +420,31 @@ function goHome(){
   S.ctxUsage=null;S.streamingText='';S.streamingReasoning='';
   clearInterval(S.elapsedTimer);disconnectSSE();render();
 }
+// "This computer" isolation: tell the desktop app to start (or stop) running this machine's
+// delegated tool jobs. window.oxpecker exists only inside the Electron app (preload.js); in a
+// plain browser this is a no-op and this_computer sessions report "no executor connected".
+function syncClientExecutor(){
+  try{
+    if(!window.oxpecker)return;
+    if(S.isolation==='this_computer'){
+      window.oxpecker.startClientExecutor(SERVER_BASE||location.origin,S.apiKey||'');
+    }else{
+      window.oxpecker.stopClientExecutor();
+    }
+  }catch(e){}
+}
+
 async function sendMessage(){
   const text=S.input.trim();if(!text||S.running)return;
   let sid=S.activeSession;
   if(!sid){
     try{
-      const res=await api.createSession({use_security_tools:S.securityTools,engagement_id:S.engagementId,isolation_tier:S.isolation,thinking:S.thinking,system_prompt:S.systemPrompt});
+      const res=await api.createSession({use_security_tools:S.securityTools,engagement_id:S.engagementId,isolation:S.isolation,isolation_tier:'bubblewrap',thinking:S.thinking,system_prompt:S.systemPrompt});
       sid=res.session_id;
       S.sessions.unshift({id:sid,title:text.slice(0,60),sub:'Just now',live:true,ts:Date.now()/1000,count:0});
       S.threads[sid]=[];S.activeSession=sid;S.view='chat';connectSSE(sid);
+      // "this computer": this desktop app will run this session's delegated tool I/O locally.
+      syncClientExecutor();
     }catch(e){toast('Failed to create session: '+e.message);return;}
   }
   S.input='';S.running=true;S.elapsed=0;S.streamingText='';S.streamingReasoning='';
@@ -723,7 +742,7 @@ function renderHome(){
         <textarea id="homeInput" placeholder="Describe the target, scope, or task…" style="position:relative;width:100%;min-height:56px;background:transparent;border:none;outline:none;resize:none;color:#ededed;font:400 15px/1.5 'Instrument Sans'">${esc(S.input)}</textarea>
         <div style="position:relative;display:flex;align-items:center;gap:10px;margin-top:6px">
           <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;flex:1;min-width:0">
-            ${renderConfigPill('iso',icons.monitor,'Isolation: '+S.isolation,'#b5b5b5',280)}
+            ${renderConfigPill('iso',icons.monitor,'Isolation: '+(S.isolation==='this_computer'?'this computer':'cloud'),'#b5b5b5',300)}
             <div class="hv2" data-action="openEngagements" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;cursor:pointer;white-space:nowrap;font:500 12px 'Instrument Sans';color:#b5b5b5;border:1px solid transparent">${icons.doc}${esc(S.engagementId)}</div>
             ${renderConfigPill('mode',icons.bolt,modeLabel,S.mode==='assistant'?'#b5b5b5':A70,300)}
             ${S.mode==='autonomous'?renderConfigPill('tier',icons.bolt,'Depth: '+S.tier,A70,300):''}
@@ -748,12 +767,11 @@ function renderConfigPill(key,icon,label,color,minW){
 function renderMenuDropdown(minW){
   const items=[];
   if(S.menu==='iso'){
-    items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default) \u2014 Linux hosts',cur:S.isolation==='bubblewrap'});
-    // The only tier a Windows host can run local commands under: the same bubblewrap profile,
-    // inside the WSL2 guest. Needs WSL2 with bubblewrap installed in the distribution; the
-    // server exec-verifies that and refuses the run if it is not true, rather than downgrading.
-    items.push({value:'wsl2',label:'wsl2',desc:'bubblewrap inside the WSL2 guest \u2014 Windows hosts; no seccomp',cur:S.isolation==='wsl2'});
-    items.push({value:'direct',label:'direct',desc:'No sandbox beyond the binary blocklist',cur:S.isolation==='direct'});
+    items.push({value:'cloud',label:'cloud',desc:'Tools run on the Oxpecker server, inside its sandbox. Each operator gets their own sandbox. The default.',cur:S.isolation==='cloud'});
+    // "this computer" hands each tool's I/O to the desktop app to run from THIS machine's network,
+    // so you can test a target this laptop can reach. Needs the Oxpecker desktop app (not a plain
+    // browser tab); scope is still enforced on the server before anything runs here.
+    items.push({value:'this_computer',label:'this computer',desc:'Tools run on this machine via the desktop app \u2014 test from this computer\u2019s own network. Scope is still enforced on the server.',cur:S.isolation==='this_computer'});
   }else if(S.menu==='mode'){
     items.push({value:'assistant',label:'Assistant',desc:'Just ask and answer — you drive every turn, no autonomous run.',cur:S.mode==='assistant'});
     items.push({value:'autonomous',label:'Autonomous',desc:'The agent runs the whole engagement itself. Your first message is the goal; pick the depth next to this.',cur:S.mode==='autonomous'});
@@ -856,7 +874,7 @@ function renderChat(){
     {text:modeLabel,color:S.mode==='assistant'?'#7d7d7d':A70,bd:'#1f1f1f',bg:'transparent'},
     ...(S.mode==='autonomous'?[{text:'depth: '+S.tier,color:A70,bd:'#1f1f1f',bg:'transparent'}]:[]),
     {text:S.engagementId,color:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
-    {text:S.isolation,color:S.isolation==='direct'?A70:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
+    {text:S.isolation==='this_computer'?'this computer':'cloud',color:S.isolation==='this_computer'?A70:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
   ];
   return`<div id="chatView" style="flex:1;display:flex;flex-direction:column;min-height:0;position:relative">
     <div style="display:flex;align-items:center;gap:16px;padding:12px 24px 12px ${S.sidebarOpen?'24':'60'}px;border-bottom:1px solid #1a1a1a;background:#000;flex:none">
@@ -1715,7 +1733,7 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'openMenu': S.menu=S.menu===el.dataset.key?null:el.dataset.key; render(); break;
     case 'pickMenu': {
       const key=el.dataset.key, val=el.dataset.value;
-      if(key==='iso'){if(val==='direct'&&S.isolation!=='direct'){S.modal='direct';S.menu=null;render();return;}S.isolation=val;}
+      if(key==='iso'){S.isolation=val;syncClientExecutor();}
       else if(key==='mode')S.mode=val;
       else if(key==='tier')S.tier=val;
       else if(key==='think'){S.thinking=val==='true';if(S.activeSession)api.setThinking(S.activeSession,S.thinking).catch(()=>{});}
