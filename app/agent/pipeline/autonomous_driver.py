@@ -38,6 +38,7 @@ from ..broker.kill_switch import KillSwitch
 from ..engagement.bootstrap import bootstrap_engagement
 from ..engagement.locks import engagement_lock
 from ..engagement.store import PHASES, EngagementStore
+from ..findings.model import FindingsStore
 from ..loop import AgentLoop
 from .executor import TASKS_REQUIRING_MODEL
 from .orchestrator import PipelineOrchestrator
@@ -335,6 +336,28 @@ class AutonomousDriver:
                 pass
         return registry.DEFAULT_PROVIDER
 
+    def _promote_findings(self) -> None:
+        """Turn the confirmed/supported hypotheses the wave established into candidate findings
+        before REPORT renders and before the gate verifies — the deterministic bridge from the
+        graph (where verdicts live) to the findings store (what the report and the gate read).
+        Without it a run that proved real weaknesses still reported "0 finding(s)" (the graph knew,
+        the store did not). Lands them at the conservative floor; the gate and human review are
+        still downstream. Best-effort: a promotion failure is emitted, never fatal to the run."""
+        from .finding_promotion import promote_hypotheses_to_findings
+
+        try:
+            scope = self._scope_entries()
+            created = promote_hypotheses_to_findings(
+                self._graph_store(), FindingsStore(self.engagement_id),
+                engagement_id=self.engagement_id, session_id=self.session_id,
+                default_target=scope[0] if scope else "",
+            )
+            self._emit("findings_promoted", count=len(created),
+                       hypotheses=[c["hypothesis_id"] for c in created])
+        except Exception as e:  # noqa: BLE001 — promotion must not sink a run that did the work
+            log.warning("finding promotion failed for %s: %s", self.engagement_id, e)
+            self._emit("findings_promoted", count=0, error=f"{type(e).__name__}: {e}")
+
     def _run_finding_gate(self) -> None:
         """At the VALIDATION->REPORT boundary of a graph run, verify every candidate finding before
         it can reach the report — the §8.6.5 #1 checkpoint, the one place a `confirmed_by: model`
@@ -439,6 +462,10 @@ class AutonomousDriver:
                 # REPORT — the one enforceable gate before a finding reaches a submission. Flat runs
                 # keep today's behaviour (the finding gate is a graph-tier, pre-report step).
                 if phase == "VALIDATION" and tiers.uses_graph("VALIDATION", self.tier):
+                    # Promote first (graph verdicts -> candidate findings), then verify: the gate
+                    # has nothing to check until the confirmed/supported hypotheses are in the
+                    # findings store the gate and the report both read.
+                    self._promote_findings()
                     self._run_finding_gate()
 
             if not advanced and not production.made_progress:

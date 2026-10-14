@@ -92,6 +92,18 @@ class TestFindingsStoreReview(unittest.TestCase):
         reopened = FindingsStore("e1", findings_dir=self.tmp)
         self.assertEqual(reopened.get(f.finding_id).reviewed_by, "alice")
 
+    def test_remove_deletes_only_the_matching_finding_and_persists(self):
+        a = self.store.add(_finding(title="A"))
+        b = self.store.add(_finding(title="B"))
+        self.assertTrue(self.store.remove(a.finding_id))
+        remaining = [f.finding_id for f in FindingsStore("e1", findings_dir=self.tmp).list_all()]
+        self.assertEqual(remaining, [b.finding_id])
+
+    def test_remove_unknown_id_is_a_false_noop(self):
+        self.store.add(_finding())
+        self.assertFalse(self.store.remove("not-a-real-id"))
+        self.assertEqual(len(self.store.list_all()), 1)
+
 
 class TestReportReviewStatus(unittest.TestCase):
     def test_unreviewed_finding_gets_the_warning_banner_and_tag(self):

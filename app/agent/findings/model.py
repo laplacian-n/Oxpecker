@@ -120,6 +120,15 @@ class Finding:
 
     discovered_at: float = field(default_factory=time.time)  # kept for backward compatibility
 
+    # The hypothesis-graph hypothesis this finding was promoted from, when it was (graph-tier
+    # autonomous runs promote a confirmed/supported hypothesis into a finding — see
+    # agent/pipeline/finding_promotion.py). None for findings recorded directly by the model
+    # (record_finding) or imported manually. Its only behavioural role is idempotency: the
+    # promoter skips a hypothesis that already has a finding carrying its id here, so re-running
+    # the VALIDATION->REPORT boundary never double-promotes. Backward compatible — old records
+    # lack the key and load with the default.
+    source_hypothesis_id: str | None = None
+
     # Human review gate (added — nothing above enforces `status`/`confidence`/`verifier` were
     # ever actually looked at by a person; a model can write "confirmed" to those fields itself).
     # None until a human explicitly reviews it via FindingsStore.mark_reviewed() — never set by
@@ -185,7 +194,12 @@ def unsubmittable(findings: "list[Finding]") -> "list[tuple[Finding, str]]":
 
 
 class FindingsStore:
-    def __init__(self, engagement_id: str, findings_dir: Path = config.FINDINGS_DIR):
+    def __init__(self, engagement_id: str, findings_dir: Path | None = None):
+        # Resolve config.FINDINGS_DIR at call time, not as a default-argument value frozen at import
+        # — so a test (or an operator) that repoints config.FINDINGS_DIR is actually honoured by
+        # every caller using the default, and the in-process dev_server UI and the autonomous driver
+        # never disagree about where findings live.
+        findings_dir = findings_dir if findings_dir is not None else config.FINDINGS_DIR
         findings_dir.mkdir(parents=True, exist_ok=True)
         self.engagement_id = engagement_id
         self.path = findings_dir / f"{engagement_id}.jsonl"
@@ -287,6 +301,20 @@ class FindingsStore:
             raise FindingNotFoundError(f"no finding {finding_id!r} in {self.path}")
         _write_atomic(self.path, "".join(json.dumps(f.to_dict()) + "\n" for f in rewritten))
         return updated
+
+    def remove(self, finding_id: str) -> bool:
+        """Delete a finding from the store, returning whether one was removed. JSONL has no
+        in-place delete, so this rewrites the file without the matching record (same atomic
+        whole-file rewrite as mark_reviewed). Used by the operator's delete action in the UI; a
+        missing id is a no-op (returns False), not an error, so a double-click is harmless."""
+        if not self.path.exists():
+            return False
+        findings = self.list_all()
+        kept = [f for f in findings if f.finding_id != finding_id]
+        if len(kept) == len(findings):
+            return False
+        _write_atomic(self.path, "".join(json.dumps(f.to_dict()) + "\n" for f in kept))
+        return True
 
     def mark_reviewed(self, finding_id: str, reviewed_by: str) -> Finding:
         """The human review gate (see Finding.reviewed_by's own comment) — an operator action,

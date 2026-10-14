@@ -84,6 +84,8 @@ from .. import injection_guard as _injection_guard
 from ..engagement import intake as _intake
 from ..engagement.intake import EngagementIntake as _EngagementIntake
 from ..engagement.program import Program as _Program
+from ..findings.model import FindingsStore as _OnDiskFindingsStore
+from ..findings.model import FindingNotFoundError as _OnDiskFindingNotFound
 from ..hypothesis_graph.service import HypothesisGraphService as _HypothesisGraphService
 from ..hypothesis_graph.store import NotFoundError as _GraphNotFoundError
 from ..hypothesis_graph.tools import GRAPH_TOOL_NAMES as _GRAPH_TOOL_NAMES
@@ -975,6 +977,36 @@ def _findings_snapshot() -> dict:
 def _findings_restore(data: dict) -> None:
     for eid, fs in data.items():
         _findings[eid] = [_mk(Finding, f) for f in fs]
+
+
+def _ondisk_finding_ui(f) -> dict:
+    """Map an on-disk findings-store Finding (agent.findings.model.Finding) onto the UI's finding
+    shape. Keeps every key the frontend already reads (finding_id/title/severity/description/
+    target/text/reviewed_by/created_at) and adds the richer context the on-disk model carries
+    (confidence/status/confirmed_by/source_hypothesis_id/limitations) — harmless to clients that
+    ignore unknown keys."""
+    return {
+        "finding_id": f.finding_id, "title": f.title, "severity": f.severity,
+        "description": f.description, "target": f.target,
+        "text": f.demonstrated_impact or "", "reviewed_by": f.reviewed_by or "",
+        "created_at": f.first_seen,
+        "confidence": f.confidence, "status": f.status, "confirmed_by": f.confirmed_by,
+        "source_hypothesis_id": f.source_hypothesis_id, "limitations": f.limitations,
+    }
+
+
+def _ondisk_findings_ui(engagement_id: str) -> list[dict]:
+    """The findings an autonomous/MCP run wrote to the on-disk FindingsStore (JSONL), as UI dicts.
+    The in-memory _findings holds only assistant-mode findings (the dev_server's own record_finding
+    handler); a graph-tier autonomous run records verdicts on the hypothesis graph and the driver
+    promotes the confirmed/supported ones into this on-disk store (finding_promotion.py). Without
+    surfacing it here the Findings tab showed 0 for every autonomous run. Best-effort: a missing or
+    unreadable store yields nothing rather than failing the request."""
+    try:
+        findings = _OnDiskFindingsStore(engagement_id).list_all()
+    except Exception:  # noqa: BLE001 — the tab must render even if the on-disk store is unreadable
+        return []
+    return [_ondisk_finding_ui(f) for f in findings]
 
 
 _technique_kb: list[dict] = []
@@ -3810,15 +3842,26 @@ def technique_kb_forget(ordinal: int):
 # ── Findings ──
 @app.get("/api/engagements/{engagement_id}/findings")
 def list_findings(engagement_id: str):
-    findings = []
+    # In-memory first (assistant-mode findings), then the on-disk store (autonomous/promoted
+    # findings), deduped by id so a finding in both appears once. Without the on-disk half, every
+    # autonomous run's Findings tab reads 0 even when the report is full.
+    findings: list[dict] = []
+    seen: set[str] = set()
+    reviewed_count = 0
     for k in _scope_keys(engagement_id):
-        findings += _findings_for(k)
-    reviewed_count = sum(1 for f in findings if f.reviewed_by)
-    return {
-        "findings": [f.to_dict() for f in findings],
-        "count": len(findings),
-        "reviewed_count": reviewed_count,
-    }
+        for f in _findings_for(k):
+            seen.add(f.finding_id)
+            findings.append(f.to_dict())
+            if f.reviewed_by:
+                reviewed_count += 1
+    for d in _ondisk_findings_ui(engagement_id):
+        if d["finding_id"] in seen:
+            continue
+        seen.add(d["finding_id"])
+        findings.append(d)
+        if d.get("reviewed_by"):
+            reviewed_count += 1
+    return {"findings": findings, "count": len(findings), "reviewed_count": reviewed_count}
 
 @app.delete("/api/engagements/{engagement_id}/findings/{finding_id}")
 def delete_finding(engagement_id: str, finding_id: str):
@@ -3826,6 +3869,9 @@ def delete_finding(engagement_id: str, finding_id: str):
         if _finding_delete(k, finding_id):
             _persist()
             return {"deleted": True}
+    # Not in memory — it may be an on-disk (autonomous/promoted) finding.
+    if _OnDiskFindingsStore(engagement_id).remove(finding_id):
+        return {"deleted": True}
     return {"deleted": False}
 
 @app.post("/api/engagements/{engagement_id}/findings/{finding_id}/review")
@@ -3835,7 +3881,13 @@ def review_finding(engagement_id: str, finding_id: str, req: ReviewFindingReques
         if f is not None:
             _persist()
             return f.to_dict()
-    raise HTTPException(404, f"finding {finding_id!r} not found")
+    # Not in memory — review it in the on-disk store so an operator can clear an autonomous
+    # finding's human-review gate from the same UI button.
+    try:
+        f = _OnDiskFindingsStore(engagement_id).mark_reviewed(finding_id, req.reviewed_by)
+    except _OnDiskFindingNotFound:
+        raise HTTPException(404, f"finding {finding_id!r} not found")
+    return _ondisk_finding_ui(f)
 
 # ── Guided run (back-compat path for the old "autonomous/start" endpoint) ──
 # No longer a 6-phase auto-pipeline: it runs ONE guided turn and stops for the operator.

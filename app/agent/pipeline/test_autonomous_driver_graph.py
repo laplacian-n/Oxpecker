@@ -96,6 +96,27 @@ class HighTierDriverGraphTest(unittest.TestCase):
         # the gate fires exactly once — on the VALIDATION->REPORT hand-off, not on RECON/ANALYSIS
         self.assertEqual(len(gate_calls), 1)
 
+    def test_promotion_runs_once_before_the_gate_at_validation_to_report(self):
+        driver = AutonomousDriver(
+            engagement_id=self.engagement_id, profile_name="web_api", mode="autonomous",
+            session_id="s", on_event=self.events.append, tier="high",
+        )
+        real_runner_for = driver._runner_for_phase
+
+        def fake_runner_for(phase):
+            if tiers.uses_graph(phase, driver.tier):
+                return _FakeGraphRunner(driver, phase)
+            return real_runner_for(phase)
+
+        order = []
+        with patch.object(driver, "_runner_for_phase", side_effect=fake_runner_for), \
+             patch.object(driver, "_promote_findings", side_effect=lambda: order.append("promote")), \
+             patch.object(driver, "_run_finding_gate", side_effect=lambda: order.append("gate")):
+            driver.run()
+        # promotion fires exactly once, and before the gate (the gate has nothing to verify until
+        # the confirmed/supported hypotheses are in the findings store).
+        self.assertEqual(order, ["promote", "gate"])
+
     def test_run_finding_gate_skips_cleanly_when_no_verifier_is_configured(self):
         (self.tmp / self.engagement_id).mkdir(parents=True, exist_ok=True)
         (self.tmp / self.engagement_id / "roe.json").write_text('{"tier": "high"}')  # no verifier
