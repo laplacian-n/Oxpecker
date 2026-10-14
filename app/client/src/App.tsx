@@ -7,7 +7,7 @@ import { Chat } from "./surfaces/Chat";
 import { FlowView } from "./surfaces/FlowView";
 import { Work } from "./surfaces/Work";
 import { WorkerRail } from "./surfaces/WorkerRail";
-import { Placeholder } from "./surfaces/Placeholder";
+import { Browser } from "./surfaces/Browser";
 import { Landing } from "./surfaces/Landing";
 import { sessionOptions } from "./session";
 
@@ -143,6 +143,11 @@ function ChatRouteInner({ subscription }: { subscription: EngagementSubscription
   return <Chat subscription={subscription} engagementId={engagementId} apiOptions={sessionOptions()} />;
 }
 
+function BrowserRouteInner({ subscription }: { subscription: EngagementSubscription }) {
+  const { engagementId = "" } = useParams();
+  return <Browser subscription={subscription} engagementId={engagementId} />;
+}
+
 export function App() {
   return (
     <HashRouter>
@@ -151,7 +156,7 @@ export function App() {
         <Route path="/:engagementId/chat" element={<Surface gate="chat" render={(s) => <ChatRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/work" element={<Surface gate="notebook" render={(s) => <WorkRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/flow" element={<Surface gate="flow" render={(s) => <FlowView subscription={s} />} />} />
-        <Route path="/:engagementId/browser" element={<Surface gate="browser" render={(s) => <Placeholder name="Browser" subscription={s} />} />} />
+        <Route path="/:engagementId/browser" element={<Surface gate="browser" render={(s) => <BrowserRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/worker/:workerId" element={<WorkerSurface />} />
         {/* Unknown routes land on the picker, not a hard-coded engagement that may not exist. */}
         <Route path="*" element={<Navigate to="/" replace />} />
