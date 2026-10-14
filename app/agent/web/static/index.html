@@ -235,6 +235,38 @@ function apiHeaders(){
   if(S.apiKey)h['X-API-Key']=S.apiKey;
   return h;
 }
+
+// ── Offline cache + optional server base (local-first, step A) ──
+// When the UI is served by the backend (default), SERVER_BASE is '' and /api calls are same-origin,
+// exactly as before. When the UI is bundled and loaded from file:// (desktop, a later step), a
+// stored base is prepended. GET responses for the read endpoints are cached locally, so an already-
+// open window can still show findings/graph/notebook/report after the server goes away; a failed
+// GET falls back to that cache and shows an offline banner. All best-effort and wrapped — a storage
+// or network oddity never breaks a request that would otherwise work.
+const SERVER_BASE=(function(){try{return localStorage.getItem('serverBase')||''}catch(e){return ''}})();
+const _CACHEABLE=/\/api\/(engagements(\?|$|\/[^/]+\/(findings|hypothesis-graph|notebook|report))|sessions(\?|$|\/[^/]+$))/;
+const _rawFetch=window.fetch.bind(window);
+function _offlineBanner(on){
+  try{let b=document.getElementById('offlineBanner');
+    if(on){if(!b){b=document.createElement('div');b.id='offlineBanner';b.textContent='Offline — showing cached data (the server is unreachable). Actions and new runs need the server.';b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:oklch(62% 0.21 25);color:#000;font:600 12px system-ui;text-align:center;padding:5px';document.body.appendChild(b);}}
+    else if(b){b.remove();}
+  }catch(e){}
+}
+window.fetch=function(url,opts){
+  let u=url;
+  try{if(typeof u==='string'&&u.charAt(0)==='/'&&SERVER_BASE)u=SERVER_BASE+u;}catch(e){}
+  const method=(opts&&opts.method)||'GET';
+  const ckey=(typeof url==='string')?url:'';
+  const cacheable=method==='GET'&&_CACHEABLE.test(ckey);
+  return _rawFetch(u,opts).then(function(r){
+    _offlineBanner(false);
+    if(cacheable&&r.ok){try{r.clone().json().then(function(d){try{localStorage.setItem('oxc:'+ckey,JSON.stringify(d))}catch(e){}}).catch(function(){});}catch(e){}}
+    return r;
+  }).catch(function(err){
+    if(cacheable){try{const c=localStorage.getItem('oxc:'+ckey);if(c!=null){_offlineBanner(true);return new Response(c,{status:200,headers:{'Content-Type':'application/json'}});}}catch(e){}}
+    throw err;
+  });
+};
 const api={
   async health(){return(await fetch('/api/health',{headers:apiHeaders()})).json()},
   async defaultSystemPrompt(){return(await fetch('/api/default-system-prompt',{headers:apiHeaders()})).json()},
