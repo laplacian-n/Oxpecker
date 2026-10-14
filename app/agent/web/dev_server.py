@@ -3778,8 +3778,9 @@ def _materialize_engine_engagement(eng: Engagement) -> bool:
     now exist.
     """
     engagement_dir = _config.ENGAGEMENTS_ROOT / eng.engagement_id
-    if (engagement_dir / "roe.json").exists():
-        return True
+    # An existing engagement is an edit: rewrite its engine files (scope/deny/roe) from the updated
+    # fields, keeping its graph/events/findings. A fresh one is written normally.
+    editing = (engagement_dir / "roe.json").exists()
     try:
         intake = _EngagementIntake(
             engagement_id=eng.engagement_id,
@@ -3793,9 +3794,9 @@ def _materialize_engine_engagement(eng: Engagement) -> bool:
             operator_sign_off=True,  # the operator created this engagement through the UI
             deny_targets=list(eng.deny_targets or []),
         )
-        _intake.create_engagement(intake, _config.ENGAGEMENTS_ROOT)
-        log.info("Materialized engine engagement files for %r at %s",
-                 eng.engagement_id, engagement_dir)
+        _intake.create_engagement(intake, _config.ENGAGEMENTS_ROOT, overwrite=editing)
+        log.info("%s engine engagement files for %r at %s",
+                 "Rewrote" if editing else "Materialized", eng.engagement_id, engagement_dir)
         return True
     except Exception as e:  # noqa: BLE001 — incomplete fields or a race; never break UI creation
         log.info("Engine engagement files not written for %r (%s: %s) — autonomous run unavailable "

@@ -119,20 +119,25 @@ def _validate_scope_line(line: str, errors: list, field_name: str) -> None:
 
 
 def create_engagement(
-    intake: EngagementIntake, engagements_root: Path = config.ENGAGEMENTS_ROOT
+    intake: EngagementIntake, engagements_root: Path = config.ENGAGEMENTS_ROOT,
+    *, overwrite: bool = False,
 ) -> Path:
-    """Validates and writes roe.json/scope.txt/deny.txt for a new named engagement. Raises
+    """Validates and writes roe.json/scope.txt/deny.txt for a named engagement. Raises
     IntakeValidationError and writes nothing if validation fails — never a partially-written
-    engagement directory."""
+    engagement directory.
+
+    `overwrite=True` rewrites those three files for an engagement that already exists (an edit),
+    leaving every other file in the directory — the hypothesis graph, the event log, findings —
+    untouched. Without it an existing engagement is refused, so a plain create never clobbers one."""
     intake.validate()
 
     engagement_dir = engagements_root / intake.engagement_id
-    if engagement_dir.exists():
+    if engagement_dir.exists() and not overwrite:
         raise IntakeValidationError(
             f"engagement {intake.engagement_id!r} already exists at {engagement_dir} — "
             "use a different engagement_id or remove the old one explicitly first"
         )
-    engagement_dir.mkdir(parents=True)
+    engagement_dir.mkdir(parents=True, exist_ok=True)
 
     roe = {
         "engagement_id": intake.engagement_id,

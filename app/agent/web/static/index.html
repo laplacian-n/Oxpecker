@@ -377,6 +377,9 @@ async function openSession(sid){
 function goHome(){
   stopGraphPoll();
   S.activeSession=null;S.view='home';S.panel=null;S.steerOpen=false;S.running=false;
+  // A new chat starts clean: drop the previous session's context reading and any in-flight stream,
+  // so the context indicator does not carry the old conversation's usage into the fresh one.
+  S.ctxUsage=null;S.streamingText='';S.streamingReasoning='';
   clearInterval(S.elapsedTimer);disconnectSSE();render();
 }
 async function sendMessage(){
@@ -1569,8 +1572,9 @@ function renderModal(){
       <div style="font:600 15px 'Instrument Sans';margin-bottom:12px">Engagement</div>
       ${S.engagements.map(e=>`<div class="hv2" data-action="pickEngagement" data-id="${esc(e.engagement_id)}" style="padding:9px 10px;border-radius:8px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
         <div><div style="font:500 13px 'Instrument Sans'">${esc(e.engagement_id)}</div><div style="font:400 11.5px 'Instrument Sans';color:#7d7d7d;margin-top:2px">${esc(e.description||'')}</div></div>
-        <div style="display:flex;align-items:center;gap:10px;flex:none">
+        <div style="display:flex;align-items:center;gap:8px;flex:none">
           <span style="color:${A70}">${e.engagement_id===S.engagementId?'✓':''}</span>
+          <span class="hv" data-action="editEngagement" data-id="${esc(e.engagement_id)}" title="Edit engagement" style="color:#7d7d7d;cursor:pointer;padding:2px 6px;border-radius:5px;font-size:13px;line-height:1">✎</span>
           <span class="hv" data-action="deleteEngagement" data-id="${esc(e.engagement_id)}" title="Delete engagement" style="color:#7d7d7d;cursor:pointer;padding:2px 7px;border-radius:5px;font-size:16px;line-height:1">×</span>
         </div>
       </div>`).join('')}
@@ -1578,9 +1582,9 @@ function renderModal(){
     </div>`;
   }else if(S.modal==='new'){
     content=`<div>
-      <div style="font:600 15px 'Instrument Sans';margin-bottom:6px">New engagement</div>
+      <div style="font:600 15px 'Instrument Sans';margin-bottom:6px">${S.newEng.editing?'Edit engagement':'New engagement'}</div>
       <div style="font:600 11.5px 'Instrument Sans';color:#7d7d7d;margin:10px 0 4px">Engagement ID</div>
-      <input id="neId" value="${esc(S.newEng.id)}" placeholder="e.g. client-acme" style="width:100%;background:#111;border:1px solid #262626;border-radius:7px;padding:8px 10px;font:400 13px 'Instrument Sans';color:#ededed;outline:none">
+      <input id="neId" value="${esc(S.newEng.id)}" placeholder="e.g. client-acme" ${S.newEng.editing?'readonly':''} style="width:100%;background:#111;border:1px solid #262626;border-radius:7px;padding:8px 10px;font:400 13px 'Instrument Sans';color:${S.newEng.editing?'#7d7d7d':'#ededed'};outline:none">
       <div style="font:600 11.5px 'Instrument Sans';color:#7d7d7d;margin:10px 0 4px">Scope (one CIDR / host per line)</div>
       <textarea id="neScope" placeholder="10.0.2.0/24" style="width:100%;min-height:70px;background:#111;border:1px solid #262626;border-radius:7px;padding:8px 10px;font:400 12.5px 'JetBrains Mono',monospace;color:#ededed;outline:none;resize:vertical">${esc(S.newEng.scope)}</textarea>
       <div style="font:600 11.5px 'Instrument Sans';color:#7d7d7d;margin:10px 0 4px">Deny list (optional)</div>
@@ -1588,7 +1592,7 @@ function renderModal(){
       ${S.newEng.error?`<div style="color:${A70};font:400 12px 'Instrument Sans';margin-top:8px">${esc(S.newEng.error)}</div>`:''}
       <div style="display:flex;gap:8px;margin-top:16px">
         <button data-action="backEng" style="flex:1;padding:8px;border:1px solid #2e2e2e;border-radius:7px;background:transparent;color:#ededed;font:500 13px 'Instrument Sans';cursor:pointer">Back</button>
-        <button data-action="saveEng" style="flex:1;padding:8px;border:none;border-radius:7px;background:${A};color:#000;font:600 13px 'Instrument Sans';cursor:pointer">Create</button>
+        <button data-action="saveEng" style="flex:1;padding:8px;border:none;border-radius:7px;background:${A};color:#000;font:600 13px 'Instrument Sans';cursor:pointer">${S.newEng.editing?'Save':'Create'}</button>
       </div>
     </div>`;
   }else if(S.modal==='direct'){
@@ -1688,7 +1692,10 @@ document.getElementById('app').addEventListener('click',function(e){
       if(confirm('Delete engagement "'+id+'"? This permanently removes its data and cannot be undone.'))
         api.deleteEngagement(id).then(()=>{loadEngagements();toast('Engagement deleted');}).catch(e=>toast('Failed: '+e.message));
       } break;
-    case 'newEngagement': S.modal='new'; S.newEng={id:'',scope:'',deny:'',error:''}; render(); break;
+    case 'newEngagement': S.modal='new'; S.newEng={id:'',scope:'',deny:'',error:'',editing:false}; render(); break;
+    case 'editEngagement': {const e=(S.engagements||[]).find(x=>x.engagement_id===el.dataset.id);
+      if(e){S.newEng={id:e.engagement_id,scope:(e.allow_targets||[]).join('\n'),deny:(e.deny_targets||[]).join('\n'),error:'',editing:true};S.modal='new';render();}
+      } break;
     case 'backEng': S.modal='list'; render(); break;
     case 'saveEng': saveEngagement(); break;
     case 'closeModal': S.modal=null; render(); break;
@@ -1869,8 +1876,10 @@ async function saveEngagement(){
   const scope=(document.getElementById('neScope')?.value||'').trim();
   if(!/^[a-z0-9][a-z0-9-]{1,30}$/.test(id)){S.newEng.error='ID must be 2-31 chars: lowercase letters, digits, hyphens.';render();return;}
   if(!scope){S.newEng.error='Scope is required.';render();return;}
-  try{await api.createEngagement({engagement_id:id,description:scope.split('\n')[0],allow_targets:scope.split('\n').map(s=>s.trim()).filter(Boolean),allowed_action_classes:['passive_recon','active_web_request','active_scan_light','browser_recon','knowledge_search'],authorized_by:'web-ui'});
-  S.engagementId=id;S.modal=null;toast('Engagement created');loadEngagements();render();}catch(e){S.newEng.error='Failed: '+e.message;render();}
+  const deny=(document.getElementById('neDeny')?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  const editing=S.newEng.editing;
+  try{await api.createEngagement({engagement_id:id,description:scope.split('\n')[0],allow_targets:scope.split('\n').map(s=>s.trim()).filter(Boolean),deny_targets:deny,allowed_action_classes:['passive_recon','active_web_request','active_scan_light','browser_recon','knowledge_search'],authorized_by:'web-ui'});
+  S.engagementId=id;S.modal=null;toast(editing?'Engagement updated':'Engagement created');loadEngagements();render();}catch(e){S.newEng.error='Failed: '+e.message;render();}
 }
 
 let _approvalPoll;

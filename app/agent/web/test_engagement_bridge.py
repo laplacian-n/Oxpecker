@@ -107,6 +107,16 @@ class EngagementBridgeTest(unittest.TestCase):
                                         self.client.get("/api/engagements").json()])
         self.assertFalse(d.exists(), "the engine dir should be removed")
 
+    def test_reposting_an_engagement_updates_it_and_rematerialises(self):
+        self._create()
+        # Edit: same id, changed scope + deny. create_engagement upserts, so this is the edit path.
+        r = self._create(allow_targets=["10.0.0.0/24"], deny_targets=["10.0.0.1"])
+        self.assertEqual(r.status_code, 200, r.text)
+        eng = dev_server._engagements["eng-bridge"]
+        self.assertEqual(eng.allow_targets, ["10.0.0.0/24"])
+        self.assertIn("10.0.0.1", eng.deny_targets)
+        self.assertIn("10.0.0.0/24", (self.tmp / "eng-bridge" / "scope.txt").read_text())
+
     def test_deleting_an_unknown_engagement_404s(self):
         self.assertEqual(self.client.delete("/api/engagements/nope").status_code, 404)
 
