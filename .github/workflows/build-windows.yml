@@ -3,15 +3,21 @@
 # address and API key in the program (electron/connect.html), so there is nothing to configure in a
 # file. This runs on a Windows runner because a Windows NSIS installer is built natively there.
 #
-# Trigger it by hand (Actions -> build-windows -> Run workflow) to get a downloadable artifact, or
-# push a tag like v0.1.6 to build a tagged installer. Publishing to a GitHub Release is left off by
-# default (--publish never); flip to a release by adding a step, or run `npm run release` locally.
+# Two ways to run it:
+#   * Actions -> build-windows -> Run workflow: builds a downloadable artifact (no Release).
+#   * Push a tag like v0.1.6: builds AND publishes the installer + latest.yml to a GitHub Release,
+#     which is the feed electron-updater checks — so every already-installed app auto-updates to it
+#     (electron/main.js initAutoUpdate downloads it and offers a restart). Bump the version in
+#     app/package.json before tagging, and tag the same version.
 name: build-windows
 
 on:
   workflow_dispatch: {}
   push:
     tags: ['v*']
+
+permissions:
+  contents: write   # a tag build publishes the installer to a GitHub Release (the update feed)
 
 jobs:
   build:
@@ -31,9 +37,18 @@ jobs:
       # The desktop shell's own deps (electron, electron-builder, electron-updater).
       - run: npm ci
 
-      # Build the NSIS installer. --publish never keeps it an artifact here; nothing is uploaded to
-      # a Release unless a GH_TOKEN-authorised publish step is added.
-      - run: npx electron-builder --win --publish never
+      # On a tag, publish to the GitHub Release so installed apps auto-update; on a manual run,
+      # build an artifact only. electron-builder reads the github publish target from package.json.
+      - name: Build (and publish on a tag)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            npx electron-builder --win --publish always
+          else
+            npx electron-builder --win --publish never
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

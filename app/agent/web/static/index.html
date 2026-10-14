@@ -248,6 +248,7 @@ const api={
   async resolveConsult(id,answer){return(await fetch('/api/consults/'+id+'/resolve',{method:'POST',headers:apiHeaders(),body:JSON.stringify({answer,resolved_by:'web-ui'})})).json()},
   async listEngagements(){return(await fetch('/api/engagements',{headers:apiHeaders()})).json()},
   async createEngagement(data){return(await fetch('/api/engagements',{method:'POST',headers:apiHeaders(),body:JSON.stringify(data)})).json()},
+  async deleteEngagement(id){const r=await fetch('/api/engagements/'+encodeURIComponent(id),{method:'DELETE',headers:apiHeaders()});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||('HTTP '+r.status));return r.json()},
   async getGraph(engId,phase){const q=phase?'?phase='+phase:'';return(await fetch('/api/engagements/'+engId+'/hypothesis-graph'+q,{headers:apiHeaders()})).json()},
   async getGraphNode(engId,ordinal){return(await fetch('/api/engagements/'+engId+'/hypothesis-graph/nodes/'+ordinal,{headers:apiHeaders()})).json()},
   async graphAction(engId,ordinal,data){return(await fetch('/api/engagements/'+engId+'/hypothesis-graph/nodes/'+ordinal+'/operator-action',{method:'POST',headers:apiHeaders(),body:JSON.stringify(data)})).json()},
@@ -650,7 +651,7 @@ function renderSidebar(){
     <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:1px">${sessionList}</div>
     <div style="border-top:1px solid #1a1a1a;padding:10px 4px 2px;display:flex;align-items:center;gap:6px;font:400 11px 'JetBrains Mono',monospace;color:#8a8a8a">
       <span data-action="toggleConn" style="width:9px;height:9px;margin:0 3px;border-radius:50%;background:${S.conn==='online'?'#ededed':A};cursor:pointer;flex:none"></span>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">qwen3.5 · local</span>
+      <span style="flex:1"></span>
       <span class="hv" data-action="openSettings" title="Settings" style="padding:4px;border-radius:5px;cursor:pointer;display:flex">${icons.gear}</span>
       <span class="hv" data-action="openKey" style="padding:4px;border-radius:5px;cursor:pointer;display:flex">${icons.key}</span>
       <span class="hv" data-action="openHelp" style="padding:2px 7px;border-radius:5px;cursor:pointer;font:600 12px 'JetBrains Mono',monospace">?</span>
@@ -1572,7 +1573,10 @@ function renderModal(){
       <div style="font:600 15px 'Instrument Sans';margin-bottom:12px">Engagement</div>
       ${S.engagements.map(e=>`<div class="hv2" data-action="pickEngagement" data-id="${esc(e.engagement_id)}" style="padding:9px 10px;border-radius:8px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
         <div><div style="font:500 13px 'Instrument Sans'">${esc(e.engagement_id)}</div><div style="font:400 11.5px 'Instrument Sans';color:#7d7d7d;margin-top:2px">${esc(e.description||'')}</div></div>
-        <span style="color:${A70}">${e.engagement_id===S.engagementId?'✓':''}</span>
+        <div style="display:flex;align-items:center;gap:10px;flex:none">
+          <span style="color:${A70}">${e.engagement_id===S.engagementId?'✓':''}</span>
+          <span class="hv" data-action="deleteEngagement" data-id="${esc(e.engagement_id)}" title="Delete engagement" style="color:#7d7d7d;cursor:pointer;padding:2px 7px;border-radius:5px;font-size:16px;line-height:1">×</span>
+        </div>
       </div>`).join('')}
       <div data-action="newEngagement" style="padding:12px 10px 9px;border-top:1px solid #1f1f1f;margin-top:6px;border-radius:8px;cursor:pointer;font:500 13px 'Instrument Sans';color:${A70}">+ New engagement</div>
     </div>`;
@@ -1676,6 +1680,10 @@ document.getElementById('app').addEventListener('click',function(e){
     } break;
     case 'openEngagements': S.modal='list'; S.menu=null; loadEngagements(); render(); break;
     case 'pickEngagement': S.engagementId=el.dataset.id; S.modal=null; render(); break;
+    case 'deleteEngagement': {const id=el.dataset.id;
+      if(confirm('Delete engagement "'+id+'"? This permanently removes its data and cannot be undone.'))
+        api.deleteEngagement(id).then(()=>{loadEngagements();toast('Engagement deleted');}).catch(e=>toast('Failed: '+e.message));
+      } break;
     case 'newEngagement': S.modal='new'; S.newEng={id:'',scope:'',deny:'',error:''}; render(); break;
     case 'backEng': S.modal='list'; render(); break;
     case 'saveEng': saveEngagement(); break;

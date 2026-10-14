@@ -3784,6 +3784,39 @@ def _materialize_engine_engagement(eng: Engagement) -> bool:
 def list_engagements():
     return [e.to_dict() for e in _engagements.values()]
 
+
+@app.delete("/api/engagements/{engagement_id}")
+def delete_engagement(engagement_id: str):
+    """Remove an engagement and its data. Refuses while a run is active on it (stop it first), so a
+    delete never races a wave mutating the same stores. Best-effort on the on-disk cleanup: the
+    engagement leaves the list regardless, and a leftover directory is never fatal."""
+    if engagement_id not in _engagements:
+        raise HTTPException(404, f"no engagement {engagement_id!r}")
+    if any(s.engagement_id == engagement_id and s.running for s in _sessions.values()):
+        raise HTTPException(409, "a run is active on this engagement; stop it before deleting")
+    _engagements.pop(engagement_id, None)
+    # Drop its in-memory stores and on-disk data. Each guarded — a delete must complete even if one
+    # store is already gone.
+    import shutil as _shutil
+    with _graph_services_lock:
+        _graph_services.pop(engagement_id, None)
+    for key in _scope_keys(engagement_id):
+        _findings.pop(key, None)
+    for d in {_config.ENGAGEMENTS_ROOT / engagement_id, DATA_DIR / engagement_id}:
+        try:
+            if d.is_dir():
+                _shutil.rmtree(d)
+        except OSError:
+            pass
+    try:
+        fpath = _config.FINDINGS_DIR / f"{engagement_id}.jsonl"
+        if fpath.exists():
+            fpath.unlink()
+    except OSError:
+        pass
+    _persist()
+    return {"deleted": True}
+
 # ── Hypothesis Graph ──
 def _scope_keys(path_id: str) -> list[str]:
     """Graph/notebook/findings are stored per-SESSION. A path id is either a session_id

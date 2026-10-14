@@ -95,6 +95,32 @@ class EngagementBridgeTest(unittest.TestCase):
         # A second materialise call must not raise on the existing dir.
         self.assertTrue(dev_server._materialize_engine_engagement(eng))
 
+    def test_deleting_an_engagement_removes_it_and_its_dir(self):
+        self._create()
+        d = self.tmp / "eng-bridge"
+        self.assertTrue(d.exists())
+        r = self.client.delete("/api/engagements/eng-bridge")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["deleted"])
+        self.assertNotIn("eng-bridge", dev_server._engagements)
+        self.assertNotIn("eng-bridge", [e["engagement_id"] for e in
+                                        self.client.get("/api/engagements").json()])
+        self.assertFalse(d.exists(), "the engine dir should be removed")
+
+    def test_deleting_an_unknown_engagement_404s(self):
+        self.assertEqual(self.client.delete("/api/engagements/nope").status_code, 404)
+
+    def test_delete_is_refused_while_a_run_is_active(self):
+        self._create()
+        from ..web.dev_server import Session
+        s = Session(session_id="s-run", engagement_id="eng-bridge")
+        s.running = True
+        dev_server._sessions["s-run"] = s
+        self.addCleanup(lambda: dev_server._sessions.pop("s-run", None))
+        r = self.client.delete("/api/engagements/eng-bridge")
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("eng-bridge", dev_server._engagements)  # not deleted
+
 
 if __name__ == "__main__":
     unittest.main()
