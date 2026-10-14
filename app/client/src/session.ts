@@ -52,3 +52,28 @@ export function sessionOptions(): { apiKey?: string; baseUrl?: string } {
   const baseUrl = getBaseUrl();
   return { ...(apiKey ? { apiKey } : {}), ...(baseUrl ? { baseUrl } : {}) };
 }
+
+// Adopt a key (and optional server) handed in the URL — `?key=...&server=...` — then scrub them
+// from the address so the secret does not linger in the bar or in history. This is what lets the
+// app open straight in: the Electron shell (or a bookmarked link) loads /app/?key=<key>, the
+// client stores it, and the operator never pastes a key. A key already in localStorage is left
+// untouched when the URL carries none, so a normal reload keeps the session.
+export function bootstrapSessionFromUrl(
+  loc: { search: string; pathname: string; hash: string } = window.location,
+  history: { replaceState: (d: unknown, t: string, u: string) => void } = window.history,
+): void {
+  try {
+    const params = new URLSearchParams(loc.search);
+    const key = params.get("key");
+    const server = params.get("server");
+    if (!key && !server) return;
+    if (key) setApiKey(key);
+    if (server) setBaseUrl(server);
+    params.delete("key");
+    params.delete("server");
+    const qs = params.toString();
+    history.replaceState(null, "", `${loc.pathname}${qs ? `?${qs}` : ""}${loc.hash}`);
+  } catch {
+    /* no window, or storage/history unavailable — the landing's key field is the fallback */
+  }
+}

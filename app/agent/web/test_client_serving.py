@@ -77,5 +77,54 @@ class ClientServingTest(unittest.TestCase):
         self.assertNotIn("TOP SECRET", resp.text)
 
 
+class EnsureClientBuiltTest(unittest.TestCase):
+    """_ensure_client_built gives one-command launch a working UI: it builds the bundle when it is
+    missing and npm is present, and is never fatal otherwise."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ensure-build-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "client").mkdir()
+        (self.tmp / "client" / "package.json").write_text("{}")
+        self.dist = self.tmp / "client" / "dist"
+
+    def _patch_dist(self):
+        return patch.object(dev_server, "CLIENT_DIST", self.dist)
+
+    def test_builds_when_missing_and_npm_present(self):
+        calls = []
+
+        def runner(args, **kw):
+            calls.append(args)
+            if args[:2] == ["npm", "install"]:
+                (self.tmp / "client" / "node_modules").mkdir(exist_ok=True)
+
+        with self._patch_dist(), patch("shutil.which", return_value="/usr/bin/npm"):
+            ran = dev_server._ensure_client_built(runner=runner)
+        self.assertTrue(ran)
+        self.assertIn(["npm", "install"], calls)
+        self.assertIn(["npm", "run", "build"], calls)
+
+    def test_skips_when_already_built(self):
+        self.dist.mkdir(parents=True)
+        called = []
+        with self._patch_dist():
+            ran = dev_server._ensure_client_built(runner=lambda *a, **k: called.append(a))
+        self.assertFalse(ran)
+        self.assertEqual(called, [])
+
+    def test_no_npm_is_not_fatal(self):
+        with self._patch_dist(), patch("shutil.which", return_value=None):
+            ran = dev_server._ensure_client_built(runner=lambda *a, **k: self.fail("must not run"))
+        self.assertFalse(ran)
+
+    def test_a_build_failure_is_swallowed(self):
+        def boom(*a, **k):
+            raise RuntimeError("npm exploded")
+        with self._patch_dist(), patch("shutil.which", return_value="/usr/bin/npm"):
+            ran = dev_server._ensure_client_built(runner=boom)
+        self.assertFalse(ran)  # logged, not raised
+
+
 if __name__ == "__main__":
     unittest.main()

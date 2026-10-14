@@ -4189,6 +4189,39 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Startup
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _ensure_client_built(*, runner=None) -> bool:
+    """Build the operator-client bundle (app/client) if it is missing and npm is available, so one
+    launch command gives a working UI with no manual build step. Returns whether a build ran.
+
+    Best-effort and never fatal: no package.json, no npm, or a failed build all just leave /app/
+    serving its 'how to build' page. `runner` is injectable so the decision logic is testable
+    without invoking npm."""
+    import shutil
+    import subprocess
+
+    run = runner or (lambda *a, **k: subprocess.run(*a, **k))
+    if CLIENT_DIST.is_dir():
+        return False  # already built
+    client_dir = CLIENT_DIST.parent
+    if not (client_dir / "package.json").exists():
+        return False  # no client source here (a minimal checkout)
+    if shutil.which("npm") is None:
+        log.warning("operator client is not built and npm was not found — /app/ will show the "
+                    "build instructions; install Node, or build it yourself, to use the new UI")
+        return False
+    try:
+        if not (client_dir / "node_modules").is_dir():
+            log.info("installing operator-client dependencies (one time)...")
+            run(["npm", "install"], cwd=str(client_dir), check=True)
+        log.info("building the operator client (one time)...")
+        run(["npm", "run", "build"], cwd=str(client_dir), check=True)
+        log.info("operator client built at %s", CLIENT_DIST)
+        return True
+    except Exception as e:  # noqa: BLE001 — a build failure must not stop the server starting
+        log.warning("operator-client build failed (%s); /app/ will show the build instructions", e)
+        return False
+
+
 def _is_loopback(host: str) -> bool:
     """Whether binding `host` keeps the server off the network.
 
@@ -4403,9 +4436,15 @@ def main():
             rag_count = _rag.index_directory(RAG_CORPUS_DIR)
         log.info("RAG: %d documents indexed (TF-IDF)", rag_count)
 
+    # Build the operator client once, here, so a single launch command yields a working UI at
+    # /app/ with no separate build step — the "easy to open" path. A server without npm just serves
+    # the build instructions instead (never fatal).
+    _ensure_client_built()
+
     # Start server
     import uvicorn
     log.info("Starting Oxpecker dev server on http://%s:%d", args.host, args.port)
+    log.info("Open the operator client at http://%s:%d/app/", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

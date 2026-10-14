@@ -153,6 +153,12 @@ async function startEverything() {
   // in config.local.json to fall back to the classic UI (e.g. on a server where the client bundle
   // has not been built yet).
   const uiPath = cfg.uiPath || '/app/';
+  // Hand the server's API key to the client in the URL so the operator never pastes it: the client
+  // adopts ?key= on load and scrubs it from the address (session.ts). Set "apiKey" in
+  // config.local.json. Only applied to the new client (the classic UI reads its own key field).
+  const keyQuery = (cfg.apiKey && uiPath.startsWith('/app'))
+    ? (uiPath.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(cfg.apiKey)
+    : '';
 
   // Remote mode: the server runs on another host (the Ubuntu box) — spawn nothing locally, just
   // load its UI. Set "remoteUrl" in config.local.json (e.g. "http://192.168.1.50:7777"); once the
@@ -163,7 +169,7 @@ async function startEverything() {
     console.log(`[oxpecker] remote mode — loading ${base}, spawning nothing locally`);
     const ok = await waitForHealth(`${base}/health`, 'remote Oxpecker server', 20000);
     if (!ok) return fail(`Could not reach the remote Oxpecker server at ${base}. Is it running and reachable on the LAN (and bound with --host 0.0.0.0)?`);
-    mainWindow.loadURL(base + uiPath);
+    mainWindow.loadURL(base + uiPath + keyQuery);
     return;
   }
 
@@ -205,7 +211,7 @@ async function startEverything() {
   if (!okDev) return fail('The Oxpecker backend (dev_server.py) did not start. Is Python installed? Try: py -m pip install fastapi "uvicorn[standard]" scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 "mcp<2" playwright');
 
   setStatus('Ready');
-  mainWindow.loadURL(appUrl + uiPath);
+  mainWindow.loadURL(appUrl + uiPath + keyQuery);
 }
 
 function fail(message) {
