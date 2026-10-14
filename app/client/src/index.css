@@ -1,0 +1,93 @@
+/* Baseline styling for the operator client. CLIENT_UI_DESIGN.md §13 leaves the full visual design
+   open; this is the legibility floor — the dark palette and typography of the classic UI — so the
+   surfaces read as a product rather than raw HTML, without pre-empting that design pass. Tokens on
+   :root so the later design work reskins by changing them, not by hunting hex codes. */
+:root {
+  --bg: #0a0a0a;
+  --panel: #141414;
+  --panel-2: #1c1c1c;
+  --border: #262626;
+  --text: #ededed;
+  --muted: #8a8a8a;
+  --accent: oklch(62% 0.21 25);
+  --link: #8ab4ff;
+  --ok: #4ec9a3;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Instrument Sans", system-ui, -apple-system, sans-serif;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button, input {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 11px;
+}
+button { cursor: pointer; }
+button:hover { border-color: #3a3a3a; }
+
+/* ── App shell ── */
+.app { display: flex; flex-direction: column; height: 100vh; }
+nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+nav a, nav .nav-hidden {
+  padding: 5px 10px;
+  border-radius: 7px;
+  color: var(--muted);
+}
+nav a.active, nav a[aria-current="page"] { background: var(--panel-2); color: var(--text); }
+.nav-home { font-size: 18px; }
+.nav-hidden { opacity: 0.5; cursor: not-allowed; font-size: 12px; }
+.eng-id { font-weight: 600; }
+.tier-badge {
+  font-size: 11px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px;
+}
+nav button { margin-left: auto; }
+main { flex: 1; overflow: auto; padding: 16px; }
+.surface { padding: 8px; }
+
+/* ── Landing ── */
+.landing { max-width: 40rem; margin: 8vh auto; padding: 0 16px; }
+.landing h1 { font-weight: 600; letter-spacing: -0.01em; }
+.landing-connect { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin: 16px 0; }
+.landing-connect label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.landing-connect input { min-width: 14rem; }
+.landing-connect .hint { color: #5a5a5a; }
+.landing-error { color: var(--accent); }
+.engagement-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.engagement-list li a {
+  display: block; padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+  color: var(--text);
+}
+.engagement-list li a:hover { border-color: #3a3a3a; text-decoration: none; }
+.eng-desc { color: var(--muted); }
+
+/* ── Work surface tabs ── */
+[role="tablist"] { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+[role="tab"] { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); }
+[role="tab"][aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ── Chat ── */
+.chat-log { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.chat-log li { padding: 6px 10px; background: var(--panel); border-radius: 8px; }

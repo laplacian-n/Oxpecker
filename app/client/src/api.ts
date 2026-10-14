@@ -39,6 +39,10 @@ async function postJson(path: string, body: unknown, opts: ApiOptions): Promise<
 }
 
 export const api = {
+  // The engagements the operator may open — the landing's list. A 401 here is the signal the key
+  // is missing or wrong (the landing surfaces that), rather than a surface failing later.
+  engagements: (opts: ApiOptions = {}): Promise<any[]> =>
+    getJson(`/api/engagements`, opts),
   hypothesisGraph: (engagementId: string, opts: ApiOptions = {}) =>
     getJson(`/api/engagements/${engagementId}/hypothesis-graph`, opts),
   notebook: (engagementId: string, opts: ApiOptions = {}) =>

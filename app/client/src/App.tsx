@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { HashRouter, Routes, Route, Navigate, NavLink, useParams } from "react-router-dom";
+import { HashRouter, Routes, Route, Navigate, NavLink, Link, useParams } from "react-router-dom";
 import { EngagementSubscription } from "./subscription";
 import { useEngagement } from "./useEngagement";
 import { surfacesForTier, SurfaceName } from "./tier/surfacing";
@@ -8,6 +8,8 @@ import { FlowView } from "./surfaces/FlowView";
 import { Work } from "./surfaces/Work";
 import { WorkerRail } from "./surfaces/WorkerRail";
 import { Placeholder } from "./surfaces/Placeholder";
+import { Landing } from "./surfaces/Landing";
+import { sessionOptions } from "./session";
 
 // HashRouter, not BrowserRouter: the built client is loaded from a file:// URL by the Electron
 // shell and served as a static bundle by the Python server, neither of which does server-side
@@ -19,9 +21,14 @@ function tearOff() {
   window.open(`${window.location.pathname}${window.location.hash}`, "_blank", "width=900,height=700");
 }
 
-// One subscription per (window, engagement). Started on mount, closed on unmount.
+// One subscription per (window, engagement). Started on mount, closed on unmount. The operator's
+// key and server (session.ts) are read here, so every surface's one data path authenticates
+// without each surface having to remember to thread the key.
 function useRouteSubscription(engagementId: string) {
-  const subscription = useMemo(() => new EngagementSubscription({ engagementId }), [engagementId]);
+  const subscription = useMemo(
+    () => new EngagementSubscription({ engagementId, ...sessionOptions() }),
+    [engagementId],
+  );
   useEffect(() => {
     void subscription.start();
     return () => subscription.close();
@@ -44,6 +51,8 @@ function TierNav({ subscription, engagementId }: { subscription: EngagementSubsc
   ];
   return (
     <nav>
+      <Link to="/" data-testid="nav-home" className="nav-home" title="engagements">⌂</Link>
+      <span className="eng-id" data-testid="nav-engagement">{engagementId}</span>
       <span className="tier-badge" data-testid="tier-badge">
         tier: {projection.tier}
       </span>
@@ -123,19 +132,23 @@ function WorkerSurface() {
 
 function WorkRouteInner({ subscription }: { subscription: EngagementSubscription }) {
   const { engagementId = "" } = useParams();
-  return <Work subscription={subscription} engagementId={engagementId} />;
+  // The Work surface fetches the tree/notebook/findings over REST (not the event stream), so it
+  // needs the operator's key too — read from the one session, same as the subscription.
+  return <Work subscription={subscription} engagementId={engagementId} apiOptions={sessionOptions()} />;
 }
 
 export function App() {
   return (
     <HashRouter>
       <Routes>
+        <Route path="/" element={<Landing />} />
         <Route path="/:engagementId/chat" element={<Surface gate="chat" render={(s) => <Chat subscription={s} />} />} />
         <Route path="/:engagementId/work" element={<Surface gate="notebook" render={(s) => <WorkRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/flow" element={<Surface gate="flow" render={(s) => <FlowView subscription={s} />} />} />
         <Route path="/:engagementId/browser" element={<Surface gate="browser" render={(s) => <Placeholder name="Browser" subscription={s} />} />} />
         <Route path="/:engagementId/worker/:workerId" element={<WorkerSurface />} />
-        <Route path="*" element={<Navigate to="/lab-default/chat" replace />} />
+        {/* Unknown routes land on the picker, not a hard-coded engagement that may not exist. */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </HashRouter>
   );
