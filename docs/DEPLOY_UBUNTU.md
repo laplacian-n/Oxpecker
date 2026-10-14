@@ -285,10 +285,12 @@ it talks to this server over the LAN and lets the operator type the server addre
   built on a Windows runner, so no Windows machine is needed to produce it.
 - **Use it.** Install and open it. The first screen asks for the **server address**
   (`http://<ubuntu-host>:7777`) and the **API key** (the contents of `state/web_ui_api_key.txt`).
-  It remembers both for next time and connects straight to the engagement list. Nothing runs
-  locally — the agent and all data stay on the server.
+  It remembers both for next time and opens the familiar Oxpecker UI, already authenticated.
+  Nothing runs locally — the agent and all data stay on the server.
 
-A browser at `http://<ubuntu-host>:7777/app/` is the same client without installing anything.
+A browser at `http://<ubuntu-host>:7777/` is the same UI without installing anything. The newer
+multi-surface client is available at `/app/` (set `"uiPath": "/app/"` in `electron/config.local.json`
+to make the desktop app open that instead).
 
 ## Reaching it from Windows
 

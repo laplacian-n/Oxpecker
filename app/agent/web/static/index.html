@@ -1860,6 +1860,15 @@ function stopApprovalPolling(){if(_approvalPoll){clearInterval(_approvalPoll);_a
 /* INIT */
 (async function init(){
   try{S.apiKey=localStorage.getItem('webUiApiKey')||''}catch(e){}
+  // Adopt an API key handed in the URL (?key=...) — the desktop shell's connect screen passes it,
+  // so the app opens already authenticated — then scrub it from the address so the secret does not
+  // linger in the bar. A key already saved is kept when the URL carries none.
+  try{
+    const _p=new URLSearchParams(location.search), _k=_p.get('key');
+    if(_k){S.apiKey=_k;try{localStorage.setItem('webUiApiKey',_k)}catch(e){}
+      _p.delete('key');const _qs=_p.toString();
+      history.replaceState(null,'',location.pathname+(_qs?('?'+_qs):'')+location.hash);}
+  }catch(e){}
   render();
   await loadSessions();
   await loadEngagements();

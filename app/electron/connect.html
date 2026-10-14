@@ -82,7 +82,9 @@
       localStorage.setItem(K, key);
     } catch (e) { /* not fatal — the key still goes through the URL below */ }
     var q = key ? ("?key=" + encodeURIComponent(key)) : "";
-    window.location.href = server + "/app/" + q;
+    // Open the familiar UI at / (it adopts ?key= and remembers it). The newer surfaces live at
+    // /app/ for anyone who wants them, but they are not what the app opens.
+    window.location.href = server + "/" + q;
   }
 
   btn.addEventListener("click", connect);

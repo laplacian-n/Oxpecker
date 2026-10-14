@@ -148,15 +148,14 @@ async function ensureServer(c, healthUrl, label) {
 async function startEverything() {
   cfg = loadConfig();
 
-  // Which UI the shell opens. The new operator client (CLIENT_UI_DESIGN.md) is served by the
-  // backend at /app/; the classic index.html is at /. Default to the new client; set "uiPath": "/"
-  // in config.local.json to fall back to the classic UI (e.g. on a server where the client bundle
-  // has not been built yet).
-  const uiPath = cfg.uiPath || '/app/';
-  // Hand the server's API key to the client in the URL so the operator never pastes it: the client
-  // adopts ?key= on load and scrubs it from the address (session.ts). Set "apiKey" in
-  // config.local.json. Only applied to the new client (the classic UI reads its own key field).
-  const keyQuery = (cfg.apiKey && uiPath.startsWith('/app'))
+  // Which UI the shell opens. The familiar UI is index.html at /; the newer multi-surface client
+  // (CLIENT_UI_DESIGN.md) is served at /app/. Default to the familiar one — set "uiPath": "/app/"
+  // in config.local.json to open the newer client instead.
+  const uiPath = cfg.uiPath || '/';
+  // Hand the server's API key to the UI in the URL so the operator never pastes it: both the
+  // classic UI and the newer client adopt ?key= on load and scrub it from the address. Set
+  // "apiKey" in config.local.json.
+  const keyQuery = cfg.apiKey
     ? (uiPath.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(cfg.apiKey)
     : '';
 
