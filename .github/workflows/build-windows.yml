@@ -1,0 +1,42 @@
+# Builds the Windows desktop client (.exe) with electron-builder. The app is a thin client: the
+# produced installer talks to a remote Oxpecker server and lets the operator enter the server
+# address and API key in the program (electron/connect.html), so there is nothing to configure in a
+# file. This runs on a Windows runner because a Windows NSIS installer is built natively there.
+#
+# Trigger it by hand (Actions -> build-windows -> Run workflow) to get a downloadable artifact, or
+# push a tag like v0.1.6 to build a tagged installer. Publishing to a GitHub Release is left off by
+# default (--publish never); flip to a release by adding a step, or run `npm run release` locally.
+name: build-windows
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The desktop shell's own deps (electron, electron-builder, electron-updater).
+      - run: npm ci
+
+      # Build the NSIS installer. --publish never keeps it an artifact here; nothing is uploaded to
+      # a Release unless a GH_TOKEN-authorised publish step is added.
+      - run: npx electron-builder --win --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxpecker-windows-installer
+          path: app/dist/*.exe
+          if-no-files-found: error

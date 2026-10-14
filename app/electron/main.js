@@ -173,6 +173,16 @@ async function startEverything() {
     return;
   }
 
+  // Packaged thin client with no server pre-configured: show the in-app connect screen, where the
+  // operator types the server address and the API key (the owner's ask: enter the key in the
+  // program, no config file). It remembers both across launches and hands them to the server's web
+  // client via the URL. A distributed .exe talks to a remote server, so it spawns nothing locally.
+  if (app.isPackaged) {
+    console.log('[oxpecker] packaged thin client — showing the connect screen');
+    mainWindow.loadFile(path.join(__dirname, 'connect.html'));
+    return;
+  }
+
   const chatUrl = `http://127.0.0.1:${cfg.chatLlama.port}/health`;
   const embedUrl = cfg.embedLlama ? `http://127.0.0.1:${cfg.embedLlama.port}/health` : null;
   const devUrl = `http://127.0.0.1:${cfg.devServer.port}/api/health`;

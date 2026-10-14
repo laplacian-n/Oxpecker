@@ -274,6 +274,22 @@ Hardening that disables the sandbox is a net loss. If you want both, leave the n
 directives off and harden elsewhere (`ProtectSystem=`, `NoNewPrivileges=` and the filesystem
 directives do not interfere with `bwrap`'s unshare).
 
+## The Windows app (.exe)
+
+Instead of a browser, Windows users can run the packaged desktop client. It is a **thin client**:
+it talks to this server over the LAN and lets the operator type the server address and the API key
+**in the program** — no config file to edit.
+
+- **Get the installer.** On GitHub → Actions → **build-windows** → *Run workflow* (or push a `v*`
+  tag); download the `oxpecker-windows-installer` artifact (`Oxpecker-Setup-<version>.exe`). It is
+  built on a Windows runner, so no Windows machine is needed to produce it.
+- **Use it.** Install and open it. The first screen asks for the **server address**
+  (`http://<ubuntu-host>:7777`) and the **API key** (the contents of `state/web_ui_api_key.txt`).
+  It remembers both for next time and connects straight to the engagement list. Nothing runs
+  locally — the agent and all data stay on the server.
+
+A browser at `http://<ubuntu-host>:7777/app/` is the same client without installing anything.
+
 ## Reaching it from Windows
 
 **Preferred — a tunnel, no code change and no open port:**
