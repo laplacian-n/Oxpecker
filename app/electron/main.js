@@ -148,6 +148,12 @@ async function ensureServer(c, healthUrl, label) {
 async function startEverything() {
   cfg = loadConfig();
 
+  // Which UI the shell opens. The new operator client (CLIENT_UI_DESIGN.md) is served by the
+  // backend at /app/; the classic index.html is at /. Default to the new client; set "uiPath": "/"
+  // in config.local.json to fall back to the classic UI (e.g. on a server where the client bundle
+  // has not been built yet).
+  const uiPath = cfg.uiPath || '/app/';
+
   // Remote mode: the server runs on another host (the Ubuntu box) — spawn nothing locally, just
   // load its UI. Set "remoteUrl" in config.local.json (e.g. "http://192.168.1.50:7777"); once the
   // page loads, paste the API key into the UI's key field. /health is the unauthenticated probe
@@ -157,7 +163,7 @@ async function startEverything() {
     console.log(`[oxpecker] remote mode — loading ${base}, spawning nothing locally`);
     const ok = await waitForHealth(`${base}/health`, 'remote Oxpecker server', 20000);
     if (!ok) return fail(`Could not reach the remote Oxpecker server at ${base}. Is it running and reachable on the LAN (and bound with --host 0.0.0.0)?`);
-    mainWindow.loadURL(base);
+    mainWindow.loadURL(base + uiPath);
     return;
   }
 
@@ -199,7 +205,7 @@ async function startEverything() {
   if (!okDev) return fail('The Oxpecker backend (dev_server.py) did not start. Is Python installed? Try: py -m pip install fastapi "uvicorn[standard]" scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 "mcp<2" playwright');
 
   setStatus('Ready');
-  mainWindow.loadURL(appUrl);
+  mainWindow.loadURL(appUrl + uiPath);
 }
 
 function fail(message) {

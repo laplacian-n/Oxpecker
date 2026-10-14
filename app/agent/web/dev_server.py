@@ -104,7 +104,13 @@ from . import debug_trace as _debug
 from . import scope as _scope
 from ..llm.llama import LlamaCppProvider as _LlamaCppProvider
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -3308,6 +3314,47 @@ def health_check():
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+# ── The new operator client (CLIENT_UI_DESIGN.md) ──
+# The React client in app/client is the product (§2); index.html above is kept as a reference
+# implementation until step 8 reduces it. It is served here, same-origin, so its relative API
+# calls and ?key= auth reach this very server with no CORS. The bundle is built (not committed —
+# dist/ is gitignored), so a server that has not run the build serves a helpful 503 rather than a
+# blank page. Not under /api/, so the key middleware does not gate the shell — exactly like / — and
+# the client authenticates its own /api/ calls.
+CLIENT_DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
+
+
+@app.get("/app")
+def client_root_redirect():
+    # The built index.html references assets as ./assets/... (vite base "./"), which only resolves
+    # correctly when the document is served at a path ending in '/'. Redirect so /app/assets/... is
+    # what the browser requests.
+    return RedirectResponse("/app/")
+
+
+@app.get("/app/")
+@app.get("/app/{path:path}")
+def serve_client(path: str = ""):
+    if not CLIENT_DIST.is_dir():
+        return HTMLResponse(
+            "<!doctype html><meta charset='utf-8'>"
+            "<body style=\"background:#0a0a0a;color:#ededed;font:15px system-ui;padding:48px;max-width:40rem;margin:auto\">"
+            "<h2>Oxpecker client not built</h2>"
+            "<p>The operator client has not been built on this server yet. Run, from the repo:</p>"
+            "<pre style='background:#1c1c1c;padding:12px;border-radius:8px'>npm --prefix app/client install\n"
+            "npm --prefix app/client run build</pre>"
+            "<p>then reload this page. The classic UI is still at <a style='color:#8ab4ff' href='/'>/</a>.</p>",
+            status_code=503,
+        )
+    # Serve the requested file when it exists inside dist (the built assets); otherwise the SPA
+    # entry (index.html) — HashRouter does its own routing, so every non-file path is index.html.
+    if path:
+        target = (CLIENT_DIST / path).resolve()
+        if target.is_file() and str(target).startswith(str(CLIENT_DIST.resolve())):
+            return FileResponse(target)
+    return FileResponse(CLIENT_DIST / "index.html")
 
 # ── Sessions ──
 @app.post("/api/sessions")

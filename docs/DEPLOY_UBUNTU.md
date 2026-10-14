@@ -66,6 +66,23 @@ implementation, so `/api/sessions/{id}/ws` silently stops being a WebSocket rout
 plain HTTP (404). The shipped UI uses SSE and does not need it, but a client that opens the
 WebSocket will fail confusingly without it.
 
+### Build the operator client
+
+The new operator client (CLIENT_UI_DESIGN.md) is a React bundle that `dev_server` serves at
+`/app/`. It is built from source on the server — the bundle is not committed — so build it once
+after cloning (and after any pull that changes `app/client/`):
+
+```bash
+# needs Node 18+ (nvm, or `sudo apt install -y nodejs npm`)
+sudo -u oxpecker npm --prefix /opt/oxpecker/app/client install
+sudo -u oxpecker npm --prefix /opt/oxpecker/app/client run build
+```
+
+Until it is built, `/app/` serves a short "client not built" page with this command; the classic
+UI at `/` keeps working regardless. A browser or the Electron client then opens
+`http://<ubuntu-host>:7777/app/` (the Electron shell defaults to `/app/`; set `"uiPath": "/"` in
+`electron/config.local.json` to use the classic UI instead).
+
 `tree` is not a Python dependency, but `config.COMMAND_ALLOWLIST` lets the model call it via
 `run_command`, and it is not installed by any other package on a stock Ubuntu image. Found by
 running every allowlisted command for real under the seccomp filter instead of a four-command
