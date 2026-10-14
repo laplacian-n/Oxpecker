@@ -579,6 +579,7 @@ class Session:
     autonomous_driver: object | None = None
     autonomous_stop_event: object | None = None
     thinking: bool = False     # expose the model's <think> reasoning to the UI when True
+    system_prompt: str = ""    # custom chat system prompt (blank = DEFAULT_SYSTEM_PROMPT)
     last_prompt_tokens: int = 0  # real prompt-token count from llama-server's last turn
     summary: str = ""          # running condensed summary of folded-away older turns
     summary_upto: int = 0      # messages[:summary_upto] are represented by `summary`
@@ -1175,7 +1176,7 @@ def _persist():
                  "isolation_tier": s.isolation_tier,
                  "effective_isolation_tier": s.effective_isolation_tier, "profile": s.profile,
                  "autonomous_mode": s.autonomous_mode, "thinking": s.thinking,
-                 "stage": s.stage, "guided": s.guided,
+                 "stage": s.stage, "guided": s.guided, "system_prompt": s.system_prompt,
                  "summary": s.summary, "summary_upto": s.summary_upto}
                 for s in list(_sessions.values())
             ],
@@ -2630,8 +2631,12 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
     if session.use_security_tools:
         tools.extend(SECURITY_TOOL_SCHEMAS)
 
+    # A custom prompt (set in Settings) replaces the default persona for refusal testing; the tool
+    # list, the injection-guard addendum and the engagement scope note are still layered on, and the
+    # broker/scope/deny gates are enforced server-side no matter what the prompt says.
+    base_prompt = getattr(session, "system_prompt", "") or DEFAULT_SYSTEM_PROMPT
     system_content = (
-        DEFAULT_SYSTEM_PROMPT.replace("@@TOOL_LIST@@", _tool_list_block(tools))
+        base_prompt.replace("@@TOOL_LIST@@", _tool_list_block(tools))
         + "\n\n" + _injection_guard.SYSTEM_INSTRUCTION_ADDENDUM
     )
     if eng:
@@ -3123,6 +3128,11 @@ class CreateSessionRequest(BaseModel):
     dangerous_local: bool = False
     isolation_tier: str = "bubblewrap"
     thinking: bool = False
+    # Optional custom system prompt for the assistant (chat) path — for testing how the prompt
+    # affects the model's willingness on authorised tasks. Blank uses DEFAULT_SYSTEM_PROMPT. It
+    # never relaxes the server-side gates (scope, broker, deny list, injection guard), which run
+    # regardless of what the prompt says.
+    system_prompt: str = ""
 
 class MessageRequest(BaseModel):
     content: str
@@ -3313,6 +3323,14 @@ def health_check():
         "timestamp": time.time(),
     }
 
+@app.get("/api/default-system-prompt")
+def default_system_prompt():
+    """The built-in assistant system prompt, so the Settings editor can start from it rather than a
+    blank box. The @@TOOL_LIST@@ placeholder is left in — it is filled per session from the tools
+    actually enabled, so the editor shows the real template."""
+    return {"prompt": DEFAULT_SYSTEM_PROMPT}
+
+
 # ── Static / index ──
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -3379,6 +3397,7 @@ def create_session(req: CreateSessionRequest):
         isolation_tier=req.isolation_tier,
         profile=req.profile,
         thinking=req.thinking,
+        system_prompt=req.system_prompt,
     )
     _sessions[sid] = session
     _persist()

@@ -171,6 +171,7 @@ const S = {
   securityTools: true,   // always on — the operator no longer toggles this
   isolation: 'bubblewrap',
   tier: 'high',          // autonomous orchestration tier: low | medium | high
+  systemPrompt: '',      // custom chat system prompt (blank = server default); for refusal testing
   engagementId: 'lab-default',
   mode: 'assistant',
   thinking: false,
@@ -236,6 +237,7 @@ function apiHeaders(){
 }
 const api={
   async health(){return(await fetch('/api/health',{headers:apiHeaders()})).json()},
+  async defaultSystemPrompt(){return(await fetch('/api/default-system-prompt',{headers:apiHeaders()})).json()},
   async listSessions(){return(await fetch('/api/sessions',{headers:apiHeaders()})).json()},
   async createSession(opts){return(await fetch('/api/sessions',{method:'POST',headers:apiHeaders(),body:JSON.stringify(opts)})).json()},
   async deleteSession(id){return(await fetch('/api/sessions/'+id,{method:'DELETE',headers:apiHeaders()})).json()},
@@ -382,7 +384,7 @@ async function sendMessage(){
   let sid=S.activeSession;
   if(!sid){
     try{
-      const res=await api.createSession({use_security_tools:S.securityTools,engagement_id:S.engagementId,isolation_tier:S.isolation,thinking:S.thinking});
+      const res=await api.createSession({use_security_tools:S.securityTools,engagement_id:S.engagementId,isolation_tier:S.isolation,thinking:S.thinking,system_prompt:S.systemPrompt});
       sid=res.session_id;
       S.sessions.unshift({id:sid,title:text.slice(0,60),sub:'Just now',live:true,ts:Date.now()/1000,count:0});
       S.threads[sid]=[];S.activeSession=sid;S.view='chat';connectSSE(sid);
@@ -1612,8 +1614,16 @@ function renderModal(){
         </div>
         ${sw}
       </div>
+      <div style="margin-top:18px;border-top:1px solid #1a1a1a;padding-top:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+          <div style="font:500 13.5px 'Instrument Sans';color:#ededed">System prompt</div>
+          <span data-action="loadDefaultPrompt" class="hv2" style="font:500 11.5px 'Instrument Sans';color:${A70};cursor:pointer;padding:3px 8px;border-radius:6px">Load default</span>
+        </div>
+        <div style="font:400 11.5px/1.45 'Instrument Sans';color:#7d7d7d;margin-bottom:7px">Custom prompt for the assistant (chat), for testing how wording affects refusals on authorised tasks. Blank uses the built-in default. Scope, the broker and the deny list are enforced regardless. Applies to new sessions.</div>
+        <textarea id="sysPromptInput" placeholder="Blank = default prompt" style="width:100%;min-height:150px;max-height:40vh;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:9px 11px;font:400 12px/1.5 'JetBrains Mono',monospace;color:#ededed;outline:none;resize:vertical">${esc(S.systemPrompt)}</textarea>
+      </div>
       <div style="display:flex;margin-top:16px">
-        <button data-action="closeModal" style="flex:1;padding:8px;border:none;border-radius:7px;background:${A};color:#000;font:600 13px 'Instrument Sans';cursor:pointer">Done</button>
+        <button data-action="saveSettings" style="flex:1;padding:8px;border:none;border-radius:7px;background:${A};color:#000;font:600 13px 'Instrument Sans';cursor:pointer">Done</button>
       </div>
     </div>`;
   }else if(S.modal==='key'){
@@ -1686,7 +1696,15 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'openKey': S.modal='key'; render(); break;
     case 'openHelp': S.modal='help'; render(); break;
     case 'openSettings': S.modal='settings'; render(); break;
+    case 'loadDefaultPrompt': api.defaultSystemPrompt().then(d=>{S.systemPrompt=d.prompt||'';render();}).catch(e=>toast('Failed: '+e.message)); break;
+    case 'saveSettings': {
+      const t=document.getElementById('sysPromptInput');
+      if(t){S.systemPrompt=t.value;try{localStorage.setItem('systemPrompt',S.systemPrompt)}catch(e){}}
+      S.modal=null;render();toast(S.systemPrompt?'Custom system prompt saved':'Using the default prompt');
+    } break;
     case 'toggleThinking': {
+      // Preserve an in-progress prompt edit across this re-render.
+      const t=document.getElementById('sysPromptInput');if(t)S.systemPrompt=t.value;
       S.thinking=!S.thinking;
       if(S.activeSession)api.setThinking(S.activeSession,S.thinking).catch(()=>{});
       render();
@@ -1862,6 +1880,7 @@ function stopApprovalPolling(){if(_approvalPoll){clearInterval(_approvalPoll);_a
 /* INIT */
 (async function init(){
   try{S.apiKey=localStorage.getItem('webUiApiKey')||''}catch(e){}
+  try{S.systemPrompt=localStorage.getItem('systemPrompt')||''}catch(e){}
   // Adopt an API key handed in the URL (?key=...) — the desktop shell's connect screen passes it,
   // so the app opens already authenticated — then scrub it from the address so the secret does not
   // linger in the bar. A key already saved is kept when the URL carries none.
