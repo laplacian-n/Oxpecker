@@ -36,6 +36,7 @@ from .. import tiers
 from ..broker.consult_queue import ConsultQueue
 from ..broker.kill_switch import KillSwitch
 from ..engagement.bootstrap import bootstrap_engagement
+from ..engagement.emit import emit as emit_event
 from ..engagement.locks import engagement_lock
 from ..engagement.store import PHASES, EngagementStore
 from ..findings.model import FindingsStore
@@ -128,6 +129,12 @@ class AutonomousDriver:
         self.on_event({
             "type": event_type, "engagement_id": self.engagement_id, "ts": time.time(), **fields,
         })
+        # Mirror to the engagement-wide event log so the new operator client — which subscribes to
+        # that stream (CLIENT_UI_DESIGN.md §4), not this run's session SSE — shows phase/recon/wave
+        # progress, not just the worker/graph events the broker and wave already emit there. emit()
+        # is itself best-effort (it never raises into its caller), so a log that cannot be written
+        # does not break the run.
+        emit_event(self.engagement_id, event_type, fields)
 
     def _hard_blocker(self) -> str | None:
         if KillSwitch().is_engaged():

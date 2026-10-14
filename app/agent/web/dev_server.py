@@ -4164,6 +4164,45 @@ def stop_pipeline(session_id: str):
     return {"status": "stop_requested"}
 
 
+class EngagementRunRequest(BaseModel):
+    mode: str = "autonomous"
+    profile: str = "web_api"
+    user_message: str = ""
+
+
+@app.post("/api/engagements/{engagement_id}/pipeline/start")
+def start_engagement_pipeline(engagement_id: str, req: EngagementRunRequest):
+    """Start an autonomous run for an engagement — the engagement-level entry the new operator
+    client uses (it is engagement-centric and has no session concept). Reuses an idle session bound
+    to this engagement, or creates one, then starts the same pipeline as the session-level endpoint.
+    The driver's events are mirrored to the engagement event stream, so the client shows progress
+    over its own subscription regardless of which session ran it."""
+    eng = _engagements.get(engagement_id)
+    if eng is None:
+        raise HTTPException(404, f"no engagement {engagement_id!r}")
+    s = next((x for x in _sessions.values()
+              if x.engagement_id == engagement_id and not x.running), None)
+    if s is None:
+        sid = str(uuid.uuid4())[:12]
+        s = Session(session_id=sid, use_security_tools=True, engagement_id=engagement_id,
+                    profile=req.profile)
+        _sessions[sid] = s
+    return start_pipeline(s.session_id, AutonomousStartRequest(
+        engagement_id=engagement_id, profile=req.profile, mode=req.mode,
+        user_message=req.user_message))
+
+
+@app.post("/api/engagements/{engagement_id}/pipeline/stop")
+def stop_engagement_pipeline(engagement_id: str):
+    """Stop any running pipeline for this engagement — the engagement-level counterpart, so the
+    client can stop a run it started without tracking the session id."""
+    stopped = [x.session_id for x in _sessions.values()
+               if x.engagement_id == engagement_id and x.running]
+    for sid in stopped:
+        stop_pipeline(sid)
+    return {"stopped": stopped}
+
+
 @app.get("/api/sessions/{session_id}/autonomous/status")
 def autonomous_status(session_id: str):
     s = _sessions.get(session_id)

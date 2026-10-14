@@ -53,4 +53,10 @@ export const api = {
   // approval_required event carried — and commands go over REST, not the one-way event stream.
   resolveApproval: (requestId: string, approved: boolean, opts: ApiOptions = {}) =>
     postJson(`/api/approvals/${requestId}/resolve`, { approved, resolved_by: "web-ui" }, opts),
+  // Start/stop an autonomous run for the engagement (§6.1 — chat is the control surface). Commands
+  // go over REST; progress comes back on the engagement event stream the subscription reads.
+  startRun: (engagementId: string, body: { mode?: string; user_message?: string }, opts: ApiOptions = {}) =>
+    postJson(`/api/engagements/${engagementId}/pipeline/start`, body, opts),
+  stopRun: (engagementId: string, opts: ApiOptions = {}) =>
+    postJson(`/api/engagements/${engagementId}/pipeline/stop`, {}, opts),
 };

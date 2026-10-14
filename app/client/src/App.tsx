@@ -137,12 +137,18 @@ function WorkRouteInner({ subscription }: { subscription: EngagementSubscription
   return <Work subscription={subscription} engagementId={engagementId} apiOptions={sessionOptions()} />;
 }
 
+function ChatRouteInner({ subscription }: { subscription: EngagementSubscription }) {
+  const { engagementId = "" } = useParams();
+  // Chat starts/stops the run over REST, so it needs the engagement id and the key.
+  return <Chat subscription={subscription} engagementId={engagementId} apiOptions={sessionOptions()} />;
+}
+
 export function App() {
   return (
     <HashRouter>
       <Routes>
         <Route path="/" element={<Landing />} />
-        <Route path="/:engagementId/chat" element={<Surface gate="chat" render={(s) => <Chat subscription={s} />} />} />
+        <Route path="/:engagementId/chat" element={<Surface gate="chat" render={(s) => <ChatRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/work" element={<Surface gate="notebook" render={(s) => <WorkRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/flow" element={<Surface gate="flow" render={(s) => <FlowView subscription={s} />} />} />
         <Route path="/:engagementId/browser" element={<Surface gate="browser" render={(s) => <Placeholder name="Browser" subscription={s} />} />} />
