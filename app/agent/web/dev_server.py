@@ -3163,6 +3163,9 @@ class AutonomousStartRequest(BaseModel):
     profile: str = "web_api"
     mode: str
     user_message: str = ""
+    # Orchestration tier for this run (low|medium|high): low = one agent, no strategist/graph, just
+    # context + tool calls; high = the full parallel wave design. None uses the engagement default.
+    tier: str | None = None
 
 class ReviewFindingRequest(BaseModel):
     reviewed_by: str
@@ -4160,7 +4163,7 @@ def start_pipeline(session_id: str, req: AutonomousStartRequest):
             driver = AutonomousDriver(
                 engagement_id=s.engagement_id, profile_name=req.profile, mode=req.mode,
                 session_id=s.session_id, device_id="web-ui", on_event=on_event,
-                stop_event=stop_event,
+                stop_event=stop_event, tier=req.tier,
             )
             s.autonomous_driver = driver
             result = driver.run()
@@ -4201,6 +4204,7 @@ class EngagementRunRequest(BaseModel):
     mode: str = "autonomous"
     profile: str = "web_api"
     user_message: str = ""
+    tier: str | None = None
 
 
 @app.post("/api/engagements/{engagement_id}/pipeline/start")
@@ -4222,7 +4226,7 @@ def start_engagement_pipeline(engagement_id: str, req: EngagementRunRequest):
         _sessions[sid] = s
     return start_pipeline(s.session_id, AutonomousStartRequest(
         engagement_id=engagement_id, profile=req.profile, mode=req.mode,
-        user_message=req.user_message))
+        user_message=req.user_message, tier=req.tier))
 
 
 @app.post("/api/engagements/{engagement_id}/pipeline/stop")

@@ -112,6 +112,14 @@ class PipelineStartTest(unittest.TestCase):
         # Clean up the blocked fake run.
         self.client.post("/api/sessions/s1/pipeline/stop")
 
+    def test_the_selected_tier_reaches_the_driver(self):
+        r = self.client.post("/api/sessions/s1/pipeline/start",
+                             json={"engagement_id": "eng1", "mode": "autonomous", "tier": "low"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(_FakeDriver.emitted.wait(timeout=5))
+        self.assertEqual(_FakeDriver.constructed.get("tier"), "low")
+        self.client.post("/api/sessions/s1/pipeline/stop")
+
     def test_stop_sets_the_driver_stop_event(self):
         self.client.post("/api/sessions/s1/pipeline/start",
                          json={"engagement_id": "eng1", "profile": "web_api", "mode": "autonomous"})

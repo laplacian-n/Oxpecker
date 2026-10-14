@@ -168,8 +168,9 @@ const S = {
   elapsedTimer: null,
   conn: 'online',
 
-  securityTools: false,
+  securityTools: true,   // always on — the operator no longer toggles this
   isolation: 'bubblewrap',
+  tier: 'high',          // autonomous orchestration tier: low | medium | high
   engagementId: 'lab-default',
   mode: 'assistant',
   thinking: false,
@@ -399,7 +400,7 @@ async function sendMessage(){
   // its phase/wave events arrive over the same SSE and are rendered like any other.
   if(S.mode==='autonomous'){
     try{
-      await api.startPipeline(sid,{engagement_id:S.engagementId,profile:'web_api',mode:'autonomous',user_message:text});
+      await api.startPipeline(sid,{engagement_id:S.engagementId,profile:'web_api',mode:'autonomous',user_message:text,tier:S.tier});
     }catch(e){S.running=false;clearInterval(S.elapsedTimer);toast('Pipeline start failed: '+e.message);render();}
     return;
   }
@@ -682,10 +683,10 @@ function renderHome(){
         <textarea id="homeInput" placeholder="Describe the target, scope, or task…" style="position:relative;width:100%;min-height:56px;background:transparent;border:none;outline:none;resize:none;color:#ededed;font:400 15px/1.5 'Instrument Sans'">${esc(S.input)}</textarea>
         <div style="position:relative;display:flex;align-items:center;gap:10px;margin-top:6px">
           <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;flex:1;min-width:0">
-            ${renderConfigPill('sec',icons.shieldSm,'Security tools: '+(S.securityTools?'on':'off'),S.securityTools?A70:'#b5b5b5',260)}
             ${renderConfigPill('iso',icons.monitor,'Isolation: '+S.isolation,'#b5b5b5',280)}
             <div class="hv2" data-action="openEngagements" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;cursor:pointer;white-space:nowrap;font:500 12px 'Instrument Sans';color:#b5b5b5;border:1px solid transparent">${icons.doc}${esc(S.engagementId)}</div>
             ${renderConfigPill('mode',icons.bolt,modeLabel,S.mode==='assistant'?'#b5b5b5':A70,300)}
+            ${S.mode==='autonomous'?renderConfigPill('tier',icons.bolt,'Depth: '+S.tier,A70,300):''}
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex:none">
             ${renderCtxButton()}
@@ -706,14 +707,7 @@ function renderConfigPill(key,icon,label,color,minW){
 
 function renderMenuDropdown(minW){
   const items=[];
-  if(S.menu==='sec'){
-    /* These two lines described a tool set this server does not have — the Off text omitted
-       port_discovery, http_request and knowledge_search, which are always available, and the On
-       text named osint_record and browser_fetch, which dev_server has never dispatched (they
-       belong to loop.py, the CLI runtime). What the toggle actually gates is http_recon. */
-    items.push({value:false,label:'Off',desc:'port_discovery, http_request, files, knowledge_search, and the record_* tools',cur:!S.securityTools});
-    items.push({value:true,label:'On',desc:'Adds http_recon — passive HTTP metadata, scope-checked per redirect hop',cur:S.securityTools});
-  }else if(S.menu==='iso'){
+  if(S.menu==='iso'){
     items.push({value:'bubblewrap',label:'bubblewrap',desc:'Kernel-namespaced sandbox + seccomp filter (default) \u2014 Linux hosts',cur:S.isolation==='bubblewrap'});
     // The only tier a Windows host can run local commands under: the same bubblewrap profile,
     // inside the WSL2 guest. Needs WSL2 with bubblewrap installed in the distribution; the
@@ -721,9 +715,12 @@ function renderMenuDropdown(minW){
     items.push({value:'wsl2',label:'wsl2',desc:'bubblewrap inside the WSL2 guest \u2014 Windows hosts; no seccomp',cur:S.isolation==='wsl2'});
     items.push({value:'direct',label:'direct',desc:'No sandbox beyond the binary blocklist',cur:S.isolation==='direct'});
   }else if(S.menu==='mode'){
-    items.push({value:'assistant',label:'Assistant',desc:'Free chat — you drive every turn, no staged protocol.',cur:S.mode==='assistant'});
-    items.push({value:'guided',label:'Guided',desc:'Staged pentest: the agent works the current stage, reports, then waits. You move stages (RECON→ANALYSIS→VALIDATION→REPORT) by chatting or the stage bar.',cur:S.mode==='guided'});
-    items.push({value:'autonomous',label:'Autonomous',desc:'The agent runs the whole engagement itself — RECON→CLOSEOUT with the wave engine, no per-turn steering. Your first message is the goal.',cur:S.mode==='autonomous'});
+    items.push({value:'assistant',label:'Assistant',desc:'Just ask and answer — you drive every turn, no autonomous run.',cur:S.mode==='assistant'});
+    items.push({value:'autonomous',label:'Autonomous',desc:'The agent runs the whole engagement itself. Your first message is the goal; pick the depth next to this.',cur:S.mode==='autonomous'});
+  }else if(S.menu==='tier'){
+    items.push({value:'low',label:'Low',desc:'One agent, no strategist or graph — just the context and tool calls. Simplest and cheapest.',cur:S.tier==='low'});
+    items.push({value:'medium',label:'Medium',desc:'Sequential waves — a strategist plans, one worker at a time, no parallelism.',cur:S.tier==='medium'});
+    items.push({value:'high',label:'High',desc:'Parallel waves — the full strategist + worker + hypothesis-graph design. The most thorough.',cur:S.tier==='high'});
   }else if(S.menu==='think'){
     items.push({value:false,label:'Off',desc:'Answers/tool-calls come straight out. Best reliability on a 4B.',cur:!S.thinking});
     items.push({value:true,label:'On',desc:'Shows the model\'s <think> reasoning before each answer. Slower, uses more tokens.',cur:S.thinking});
@@ -804,10 +801,7 @@ function renderCtxPopup(){
     <div style="height:1px;background:#1f1f1f;margin:14px 0"></div>
     <div class="hv2" data-action="toggleCtxDetail" style="display:inline-block;padding:5px 10px;border:1px solid #2e2e2e;border-radius:6px;cursor:pointer;font:500 12px 'Instrument Sans';color:#b5b5b5">${S.ctxDetail?'Hide details':'Show details'}</div>
     ${S.ctxDetail?`<div style="margin-top:10px;display:flex;flex-direction:column;gap:4px">
-      <div style="display:flex;justify-content:space-between;font:400 12px 'JetBrains Mono',monospace;color:#8a8a8a"><span>model</span><span>qwen3.5-4b</span></div>
       <div style="display:flex;justify-content:space-between;font:400 12px 'JetBrains Mono',monospace;color:#8a8a8a"><span>thinking</span><span>${S.thinking?'on':'off'}</span></div>
-      <div style="display:flex;justify-content:space-between;font:400 12px 'JetBrains Mono',monospace;color:#8a8a8a"><span>temperature</span><span>0.6</span></div>
-      <div style="display:flex;justify-content:space-between;font:400 12px 'JetBrains Mono',monospace;color:#8a8a8a"><span>top_p / top_k</span><span>0.95 / 20</span></div>
     </div>`:''}
   </div>`;
 }
@@ -820,9 +814,9 @@ function renderChat(){
   const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Autonomous',consult:'Autonomous'}[S.mode]||'Assistant';
   const metaChips=[
     {text:modeLabel,color:S.mode==='assistant'?'#7d7d7d':A70,bd:'#1f1f1f',bg:'transparent'},
+    ...(S.mode==='autonomous'?[{text:'depth: '+S.tier,color:A70,bd:'#1f1f1f',bg:'transparent'}]:[]),
     {text:S.engagementId,color:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
     {text:S.isolation,color:S.isolation==='direct'?A70:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
-    {text:'security: '+(S.securityTools?'on':'off'),color:'#7d7d7d',bd:'#1f1f1f',bg:'transparent'},
   ];
   return`<div id="chatView" style="flex:1;display:flex;flex-direction:column;min-height:0;position:relative">
     <div style="display:flex;align-items:center;gap:16px;padding:12px 24px 12px ${S.sidebarOpen?'24':'60'}px;border-bottom:1px solid #1a1a1a;background:#000;flex:none">
@@ -1672,9 +1666,9 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'openMenu': S.menu=S.menu===el.dataset.key?null:el.dataset.key; render(); break;
     case 'pickMenu': {
       const key=el.dataset.key, val=el.dataset.value;
-      if(key==='sec')S.securityTools=val==='true';
-      else if(key==='iso'){if(val==='direct'&&S.isolation!=='direct'){S.modal='direct';S.menu=null;render();return;}S.isolation=val;}
+      if(key==='iso'){if(val==='direct'&&S.isolation!=='direct'){S.modal='direct';S.menu=null;render();return;}S.isolation=val;}
       else if(key==='mode')S.mode=val;
+      else if(key==='tier')S.tier=val;
       else if(key==='think'){S.thinking=val==='true';if(S.activeSession)api.setThinking(S.activeSession,S.thinking).catch(()=>{});}
       S.menu=null; render();
     } break;
