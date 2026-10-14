@@ -43,7 +43,7 @@
       "artifactName": "Oxpecker-Setup-${version}.${ext}"
     },
     "publish": [
-      { "provider": "github", "owner": "laplacian-n", "repo": "Oxpecker" }
+      { "provider": "github", "owner": "laplacian-n", "repo": "Oxpecker", "releaseType": "release" }
     ]
   }
 }
