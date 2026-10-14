@@ -81,7 +81,10 @@ from ..broker import broker as _broker_mod
 from ..broker.contracts import ActionRequest as _ActionRequest
 from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
+from .. import tiers as _tiers
 from ..engagement import intake as _intake
+from ..engagement.event_log import EngagementEventLog as _EngagementEventLog
+from ..engagement.event_log import project as _project_events
 from ..engagement.intake import EngagementIntake as _EngagementIntake
 from ..engagement.program import Program as _Program
 from ..findings.model import FindingsStore as _OnDiskFindingsStore
@@ -3840,6 +3843,89 @@ def technique_kb_forget(ordinal: int):
     return {"deleted": False}
 
 # ── Findings ──
+# ── Engagement event stream (CLIENT_UI_DESIGN.md §4) ──
+# The new operator client (app/client) draws every surface from one ordered, persistent,
+# engagement-wide event stream — not the per-session SSE above. The log itself (EngagementEventLog,
+# the sequence allocation, the project() fold) lives in agent/engagement/; these two endpoints are
+# the read surface, ported here so the client can run against the server the operator actually
+# launches (dev_server), which already serves this engagement's graph/notebook/findings.
+def _check_api_version(request: Request) -> None:
+    """§4.3: a client declares its API version; a server that cannot serve that MAJOR version says
+    so (409) rather than half-working. Absent (an old client, a curl, a test) is allowed, so this
+    is additive — enforcement begins the moment a client declares a version."""
+    declared = request.headers.get("x-api-version") or request.query_params.get("api_version")
+    if not declared:
+        return
+    if declared.split(".")[0] != API_VERSION.split(".")[0]:
+        raise HTTPException(
+            409,
+            f"client API version {declared} is incompatible with server {API_VERSION}; "
+            "this endpoint will not serve a different major version",
+        )
+
+
+def _engagement_event_log(engagement_id: str):
+    """The engagement's event log, or None when it has emitted nothing yet (no events.db) — the
+    same don't-create-on-a-GET guard the graph/notebook/findings reads use. Resolved from
+    config.ENGAGEMENTS_ROOT at call time (never cached), so a run that repoints the root — a test,
+    or main() aligning it to DATA_DIR — is honoured instead of a first-call value being frozen in."""
+    return _EngagementEventLog.open_if_exists(_config.ENGAGEMENTS_ROOT / engagement_id)
+
+
+@app.get("/api/engagements/{engagement_id}/snapshot")
+def engagement_snapshot(engagement_id: str, request: Request, at: int | None = None) -> dict:
+    """The §4.2 read-model projection as of sequence `at` (default latest), so a new window does
+    not replay a long engagement from zero and the time scrubber (§6.5) can ask for an earlier
+    state. The engagement's tier rides along (§8: the client offers exactly that tier's surfaces).
+    Empty, never 404, for an engagement that has emitted nothing — a clean empty state."""
+    _check_api_version(request)
+    tier = _tiers.engagement_tier(engagement_id)
+    log_obj = _engagement_event_log(engagement_id)
+    if log_obj is None:
+        return {**_project_events([], at_seq=0, latest_seq=0), "tier": tier}
+    return {**log_obj.snapshot(at_seq=at), "tier": tier}
+
+
+async def _engagement_sse(engagement_id: str, after: int, is_disconnected, *, poll: float = 0.1):
+    """The SSE body: a control event first so the client can state the gap ("you missed N events",
+    §5.5) without a second request, then every event after `after` (a fresh subscriber passes 0 —
+    the whole log), then new events tailed as they are appended from this process or another (the
+    wave runs in threads and the security_mcp subprocess). Each event's seq is the SSE `id:`, which
+    the browser echoes back as Last-Event-ID on reconnect. Factored out so it is testable —
+    Starlette's TestClient buffers a whole response, so an infinite generator can't run through it."""
+    log_obj = _engagement_event_log(engagement_id)
+    latest = log_obj.latest_seq() if log_obj is not None else 0
+    missed = max(latest - after, 0) if after else 0
+    hello = {"seq": 0, "kind": "subscription_resumed",
+             "payload": {"resumed_after": after, "latest_seq": latest, "missed": missed}}
+    yield f"event: control\ndata: {json.dumps(hello)}\n\n"
+    sent = after
+    while True:
+        if log_obj is None:  # may not exist at connect; pick it up once a producer creates it
+            log_obj = _engagement_event_log(engagement_id)
+        if log_obj is not None:
+            for ev in log_obj.read_since(sent):
+                sent = ev["seq"]
+                yield f"id: {ev['seq']}\ndata: {json.dumps(ev)}\n\n"
+        if await is_disconnected():
+            break
+        await asyncio.sleep(poll)
+
+
+@app.get("/api/engagements/{engagement_id}/events")
+async def engagement_events(engagement_id: str, request: Request, last_event_id: int | None = None):
+    """The engagement-level event stream (§4), Server-Sent Events. One-way (commands go over REST);
+    EventSource gives reconnection + Last-Event-ID for free. The Last-Event-ID header wins (the
+    browser's own reconnect path); the query param is the explicit non-browser equivalent."""
+    _check_api_version(request)
+    header_id = request.headers.get("last-event-id")
+    after = int(header_id) if header_id and header_id.isdigit() else (last_event_id or 0)
+    return StreamingResponse(
+        _engagement_sse(engagement_id, after, request.is_disconnected),
+        media_type="text/event-stream",
+    )
+
+
 @app.get("/api/engagements/{engagement_id}/findings")
 def list_findings(engagement_id: str):
     # In-memory first (assistant-mode findings), then the on-disk store (autonomous/promoted
