@@ -155,6 +155,15 @@ async function startEverything() {
   // Hand the server's API key to the UI in the URL so the operator never pastes it: both the
   // classic UI and the newer client adopt ?key= on load and scrub it from the address. Set
   // "apiKey" in config.local.json.
+  // Bundled (offline) build: load the UI from file:// so the app opens with the server down. The
+  // connect screen stores the server + key and hands off to the bundled index.html, which shows
+  // cached data when the server is unreachable. Nothing is spawned locally.
+  if (cfg.bundledClient) {
+    console.log('[oxpecker] bundled offline client — loading the UI from file://');
+    mainWindow.loadFile(path.join(__dirname, 'connect.html'), { search: 'bundled=1' });
+    return;
+  }
+
   const keyQuery = cfg.apiKey
     ? (uiPath.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(cfg.apiKey)
     : '';
@@ -235,11 +244,17 @@ function fail(message) {
 }
 
 function createWindow() {
+  // Load config early so the window can be created with the right web security. In the bundled
+  // (offline) build the UI is loaded from file:// and calls the configured server cross-origin, so
+  // webSecurity is turned off for THIS window — the content is our own bundled UI, and the server's
+  // scope/broker/deny gates are enforced regardless. Server-served mode keeps webSecurity on.
+  try { cfg = loadConfig(); } catch (_) { cfg = {}; }
+  const bundled = !!cfg.bundledClient;
   mainWindow = new BrowserWindow({
     width: 1280, height: 860, backgroundColor: '#000000',
     title: 'Oxpecker', autoHideMenuBar: true,
     icon: path.join(PROJECT_ROOT, 'build', 'icon.png'),
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: { contextIsolation: true, nodeIntegration: false, webSecurity: !bundled },
   });
   // open external links in the system browser, not inside the app
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });

@@ -292,6 +292,12 @@ A browser at `http://<ubuntu-host>:7777/` is the same UI without installing anyt
 multi-surface client is available at `/app/` (set `"uiPath": "/app/"` in `electron/config.local.json`
 to make the desktop app open that instead).
 
+**Offline mode (experimental).** Set `"bundledClient": true` (in `electron/config.json` before
+building, or `config.local.json` in dev) and the desktop app loads the UI from inside itself rather
+than from the server. It then **opens even when the server is down** and shows the findings, graph
+and report it cached while last online; it reaches the server (entered once on the connect screen)
+only for live data, AI and runs. Default is `false` — the server-served flow.
+
 ## Reaching it from Windows
 
 **Preferred — a tunnel, no code change and no open port:**

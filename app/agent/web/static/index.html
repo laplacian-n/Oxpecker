@@ -53,7 +53,11 @@ body{font-variant-numeric:tabular-nums}
 const A = 'oklch(62% 0.21 25)';
 const A70 = 'oklch(70% 0.19 25)';
 const A75 = 'oklch(75% 0.17 25)';
-const LOGO = '/static/oxpecker-logo.png';
+// The server base for all API/asset URLs. Empty when the UI is served by the backend (same-origin,
+// the default). Set when the UI is bundled and loaded from file:// (the desktop offline build),
+// so /api and /static resolve to the configured server. Defined here, before LOGO uses it.
+const SERVER_BASE=(function(){try{return localStorage.getItem('serverBase')||''}catch(e){return ''}})();
+const LOGO = SERVER_BASE + '/static/oxpecker-logo.png';
 
 function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
@@ -243,7 +247,6 @@ function apiHeaders(){
 // open window can still show findings/graph/notebook/report after the server goes away; a failed
 // GET falls back to that cache and shows an offline banner. All best-effort and wrapped — a storage
 // or network oddity never breaks a request that would otherwise work.
-const SERVER_BASE=(function(){try{return localStorage.getItem('serverBase')||''}catch(e){return ''}})();
 const _CACHEABLE=/\/api\/(engagements(\?|$|\/[^/]+\/(findings|hypothesis-graph|notebook|report))|sessions(\?|$|\/[^/]+$))/;
 const _rawFetch=window.fetch.bind(window);
 function _offlineBanner(on){
@@ -308,7 +311,7 @@ function connectSSE(sessionId){
   /* EventSource cannot set headers, so the API key rides as ?key= — the one query-param
      channel the server accepts (see _key_supplied in dev_server.py). Without this the SSE
      stream is the only part of the UI that 401s once a key file exists. */
-  const url='/api/sessions/'+sessionId+'/events'+(S.apiKey?('?key='+encodeURIComponent(S.apiKey)):'');
+  const url=SERVER_BASE+'/api/sessions/'+sessionId+'/events'+(S.apiKey?('?key='+encodeURIComponent(S.apiKey)):'');
   const es=new EventSource(url);
   S.eventSource=es;
   es.onmessage=function(e){try{handleServerEvent(JSON.parse(e.data))}catch(err){console.error('SSE parse error',err)}};

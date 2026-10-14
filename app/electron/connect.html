@@ -49,9 +49,18 @@
   var btn = document.getElementById("go");
   var err = document.getElementById("err");
 
+  // Bundled (offline) desktop build: the UI is loaded from file:// (so it opens with the server
+  // down), and this screen hands the server + key to it. In server-served mode this is 0/empty.
+  var BUNDLED = false;
+  try { BUNDLED = new URLSearchParams(location.search).get("bundled") === "1"; } catch (e) {}
+  function gotoApp() { window.location.href = "../agent/web/static/index.html"; }
+
   try {
     serverEl.value = localStorage.getItem(S) || "";
     keyEl.value = localStorage.getItem(K) || "";
+    // Already set up before: skip straight to the bundled UI, which shows cached data even when the
+    // server is unreachable — the whole point of opening offline.
+    if (BUNDLED && localStorage.getItem("serverBase")) gotoApp();
   } catch (e) { /* storage blocked — the fields just start empty */ }
 
   function normalize(u) {
@@ -80,10 +89,16 @@
     try {
       localStorage.setItem(S, server);
       localStorage.setItem(K, key);
+      if (BUNDLED) {
+        // The bundled UI reads these keys directly (SERVER_BASE for /api + /static, webUiApiKey for
+        // the X-API-Key header).
+        localStorage.setItem("serverBase", server);
+        localStorage.setItem("webUiApiKey", key);
+      }
     } catch (e) { /* not fatal — the key still goes through the URL below */ }
+    if (BUNDLED) { gotoApp(); return; }
     var q = key ? ("?key=" + encodeURIComponent(key)) : "";
-    // Open the familiar UI at / (it adopts ?key= and remembers it). The newer surfaces live at
-    // /app/ for anyone who wants them, but they are not what the app opens.
+    // Server-served mode: open the familiar UI at / (it adopts ?key= and remembers it).
     window.location.href = server + "/" + q;
   }
 
