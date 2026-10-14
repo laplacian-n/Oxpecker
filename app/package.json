@@ -1,6 +1,6 @@
 {
   "name": "oxpecker",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Self-hosted AI penetration-testing agent — desktop shell",
   "main": "electron/main.js",
   "scripts": {
