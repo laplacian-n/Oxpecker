@@ -8,6 +8,7 @@ import { Conversation } from "./Conversation";
 import { ConversationSubscription } from "../conversationStream";
 import { useChatSession } from "../useChatSession";
 import { useSessionDetail } from "../useSessionDetail";
+import { useClientExecutor } from "../useClientExecutor";
 import { SessionPanel } from "./SessionPanel";
 
 // Chat — the primary, always-present surface (CLIENT_UI_DESIGN.md §6.1). It now holds BOTH things
@@ -53,6 +54,10 @@ export function Chat({
   const session = useChatSession(engagementId, apiOptions);
   const { sessionId, error: sessionError } = session;
   const { detail, refresh: refreshDetail } = useSessionDetail(sessionId, apiOptions);
+  // A this_computer session's tool I/O is handed to the desktop shell, which only runs it while
+  // something is pulling. Driven by the session's own mode, so switching conversations switches
+  // the executor with it.
+  useClientExecutor(detail?.isolation_mode);
   // One subscription per (window, session) — rebuilt only when the session changes, never on a
   // token, or every delta would tear down the stream that delivered it.
   const conversation = useMemo(

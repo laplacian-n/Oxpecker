@@ -3597,18 +3597,43 @@ def client_jobs_result(job_id: str, req: ClientJobResultRequest):
 
 
 # ── Static / index ──
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def index():
-    # no-store: the classic UI is a living dashboard served fresh from disk every request. Without
-    # it the Electron shell (and browsers) can keep showing a cached copy after the server's UI is
-    # updated — which reads as "nothing changed" even though the server is serving the new page.
+    """The operator client is the UI now; / goes there.
+
+    A redirect rather than serving the client's index.html here, because the built shell
+    references its assets as ./assets/... (vite base "./"), which only resolves under a path
+    ending in '/'. Served at /, the browser would ask for /assets/... and get nothing.
+
+    Unconditional, deliberately: making this depend on whether CLIENT_DIST happens to exist would
+    make / behave differently on a machine that has run the build and one that has not, including
+    between a developer's checkout and CI. /app/ answers an unbuilt client with instructions and
+    a link to /classic, so the classic UI stays reachable either way; main() also builds the
+    client on launch when npm is present.
+    """
+    return RedirectResponse("/app/")
+
+
+@app.get("/classic", response_class=HTMLResponse)
+def classic_index():
+    """The original single-file UI, kept and reachable at its own address.
+
+    Not deleted along with the default: it is 2008 lines of working UI with features the operator
+    client has only just grown, and the honest way to retire it is to stop pointing new arrivals
+    at it while leaving it there for anyone who needs it — including as the fallback /app/ names
+    when the client has not been built.
+
+    no-store: it is a living dashboard served fresh from disk every request. Without it the
+    Electron shell (and browsers) can keep showing a cached copy after the server's UI is updated,
+    which reads as "nothing changed" even though the server is serving the new page.
+    """
     return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"),
                         headers={"Cache-Control": "no-store"})
 
 
 # ── The new operator client (CLIENT_UI_DESIGN.md) ──
-# The React client in app/client is the product (§2); index.html above is kept as a reference
-# implementation until step 8 reduces it. It is served here, same-origin, so its relative API
+# The React client in app/client is the product (§2) and is what / now redirects to; the classic
+# single-file UI stays reachable at /classic. It is served here, same-origin, so its relative API
 # calls and ?key= auth reach this very server with no CORS. The bundle is built (not committed —
 # dist/ is gitignored), so a server that has not run the build serves a helpful 503 rather than a
 # blank page. Not under /api/, so the key middleware does not gate the shell — exactly like / — and
@@ -3635,7 +3660,8 @@ def serve_client(path: str = ""):
             "<p>The operator client has not been built on this server yet. Run, from the repo:</p>"
             "<pre style='background:#1c1c1c;padding:12px;border-radius:8px'>npm --prefix app/client install\n"
             "npm --prefix app/client run build</pre>"
-            "<p>then reload this page. The classic UI is still at <a style='color:#8ab4ff' href='/'>/</a>.</p>",
+            "<p>then reload this page. The classic UI is still at "
+            "<a style='color:#8ab4ff' href='/classic'>/classic</a>.</p>",
             status_code=503,
         )
     # Serve the requested file when it exists inside dist (the built assets); otherwise the SPA
