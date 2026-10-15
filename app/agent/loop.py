@@ -757,6 +757,15 @@ class AgentLoop:
 
         if scan_result.matched:
             print(f"\n[!] injection_guard flagged tool output: {', '.join(scan_result.reasons)}\n")
+
+        # An "unknown" verdict is a high-entropy/encoded blob with NO injection phrasing — extremely
+        # common on real sites (Cloudflare email-protection hex, minified JS, base64 assets) and far
+        # too weak a signal to taint a wave worker's engagement and hold every sibling to passive
+        # recon behind approval. The output is still wrapped as data above and still flagged in the
+        # audit/UI (scan_result.matched is unchanged); only the corroborated verdicts
+        # (suspicious/malicious) mark taint. Mirrors the dev_server fix (#94) that stops a benign
+        # encoded blob from spamming approval prompts.
+        if scan_result.verdict in ("suspicious", "malicious"):
             # M4.5: mark the session tainted so the broker escalates subsequent
             # beyond-passive-recon actions to human approval for a bounded window — stdlib-only
             # import, safe on plain system Python (see broker/taint.py's own docstring).
