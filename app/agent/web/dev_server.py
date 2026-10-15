@@ -12,14 +12,11 @@ Implements the FULL API surface that agent/web/static/index.html expects, with:
   - LLM inference via llama-server's OpenAI-compatible API (streaming)
   - RAG retrieval via TF-IDF (no embedding server needed)
   - In-memory session, engagement, approval, hypothesis graph, notebook, findings stores
-  - SSE streaming for real-time token delivery
-  - WebSocket support for bidirectional comms
+  - SSE streaming for real-time token delivery (one per-subscriber queue per open stream)
 
 Prerequisites:
   pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 'mcp<2' playwright
   # Linux, for a real sandbox:  apt install bubblewrap  &&  pip install pyseccomp
-  # `uvicorn[standard]` not bare `uvicorn`: the bare package has no WebSocket implementation,
-  # so /api/sessions/{id}/ws stops being a WebSocket route and answers as plain HTTP.
   # `cryptography` is not optional despite not appearing anywhere else in this file: it is
   # imported at module scope by agent/evidence/store.py, which agent/audit_log.py imports at
   # module scope, which this file imports at module scope — so dev_server cannot bind a port
@@ -73,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
 
 from .. import audit_log as _audit_log
 from .. import config as _config
@@ -594,7 +591,13 @@ class VectorRAG:
 class Session:
     session_id: str
     messages: list[dict] = field(default_factory=list)
-    events: queue.Queue = field(default_factory=queue.Queue)
+    # One queue per live SSE subscriber (see subscribe/unsubscribe). push() fans an event out to
+    # every subscriber, so two windows on one session each receive the FULL stream — a single
+    # shared queue handed each event to whichever consumer polled first, which SPLIT the stream
+    # across tabs — and a session nobody is watching drops live events instead of buffering them
+    # without bound (completed turns are reloaded over REST, so nothing durable is lost).
+    _subscribers: list = field(default_factory=list)
+    _sub_lock: threading.Lock = field(default_factory=threading.Lock)
     running: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
     created_at: float = field(default_factory=time.time)
@@ -629,7 +632,27 @@ class Session:
     pending_steers: list[str] = field(default_factory=list)  # operator notes to inject mid-run
 
     def push(self, event: dict):
-        self.events.put(event)
+        # Fan out to every current subscriber. A copy is taken under the lock so a subscriber that
+        # unsubscribes mid-push cannot mutate the list we are iterating.
+        with self._sub_lock:
+            subs = list(self._subscribers)
+        for q in subs:
+            q.put(event)
+
+    def subscribe(self) -> queue.Queue:
+        """Register an SSE subscriber and return its own queue. The caller MUST unsubscribe when the
+        connection ends (see stream_events' finally) or the queue is fed forever."""
+        q: queue.Queue = queue.Queue()
+        with self._sub_lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._sub_lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
 
     def append(self, role: str, content: str, extra: dict | None = None) -> dict:
         record = {
@@ -3367,8 +3390,8 @@ app = FastAPI(title="Oxpecker Dev Server", version=API_VERSION)
 # routes is `run_command`, `/api/sessions/{id}/autonomous/start`, the evidence store, and
 # `/api/approvals/{id}/resolve` — i.e. remote code execution plus the ability to approve one's
 # own escalation. So the bind address is no longer allowed to be the only thing standing there:
-# see `require_api_key` below, the WebSocket check in `websocket_events`, and the refusal in
-# `main()` that will not start a non-loopback bind with no key configured.
+# see `require_api_key` below (which covers every route, all HTTP), and the refusal in `main()`
+# that will not start a non-loopback bind with no key configured.
 #
 # CORS is opt-in rather than "*". Both shipped clients (the Electron shell, and a browser
 # pointed at this server) load index.html FROM this origin and fetch "/api/..." relatively, so
@@ -3419,8 +3442,7 @@ def _web_ui_key() -> tuple[str | None, bool]:
 
 
 def _key_supplied(scoped, key: str) -> bool:
-    """Whether `scoped` (a Request or a WebSocket — both carry .headers and .query_params)
-    presents `key`.
+    """Whether `scoped` (a Request, which carries .headers and .query_params) presents `key`.
 
     Three accepted channels, each because something real needs it:
       - `X-API-Key`: what static/index.html has always sent. The orphaned agent/web/server.py
@@ -3429,8 +3451,8 @@ def _key_supplied(scoped, key: str) -> bool:
         existing client work.
       - `Authorization: Bearer`: the convention, and what server.py uses. Kept so a curl or a
         reverse proxy does the obvious thing.
-      - `?key=`: for the two browser APIs that cannot set a header at all — EventSource (the
-        SSE stream) and WebSocket. A narrow, deliberate exception, not a general bypass.
+      - `?key=`: for EventSource (the SSE stream), the one browser API that cannot set a header at
+        all. A narrow, deliberate exception, not a general bypass.
 
     Every non-empty candidate is compared, so a client that sends both a header and a query
     param is not rejected because the wrong one came first. Each comparison is constant-time.
@@ -3450,12 +3472,8 @@ async def require_api_key(request: Request, call_next):
 
     Checked as ASGI middleware rather than a per-route Depends() so it covers all ~40 routes
     uniformly, including any added later — a route that forgets a decorator is the failure mode
-    this shape rules out.
-
-    NOT covered: the WebSocket at /api/sessions/{id}/ws. Starlette's http middleware only sees
-    `scope["type"] == "http"`, so a websocket handshake passes straight through it. That route
-    accepts `message` and `steer` frames — it can drive the agent — so it carries its own
-    check; see `websocket_events`.
+    this shape rules out. Every route is HTTP (the SSE streams included), so this one gate covers
+    them all; there is no WebSocket route that could slip past the http middleware.
 
     The static page and /static/* are never gated: the shell carries no data, every real action
     goes through /api/*, and gating it would need a login redirect this single-operator tool
@@ -3782,18 +3800,27 @@ def steer_session(session_id: str, req: SteerRequest):
 
 # ── SSE Events ──
 @app.get("/api/sessions/{session_id}/events")
-async def stream_events(session_id: str):
+async def stream_events(session_id: str, request: Request):
     s = _sessions.get(session_id)
     if not s:
         raise HTTPException(404, f"session {session_id!r} not found")
+    q = s.subscribe()
 
     async def event_stream():
-        while True:
-            try:
-                event = s.events.get_nowait()
-                yield f"data: {json.dumps(event)}\n\n"
-            except queue.Empty:
-                await asyncio.sleep(0.06)
+        try:
+            while True:
+                # Stop as soon as the client goes away, so a closed or reloaded tab does not leave
+                # this coroutine polling forever. The engagement SSE already did this; the session
+                # one never did, so every reload leaked a running stream against a shared queue.
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = q.get_nowait()
+                    yield f"data: {json.dumps(event)}\n\n"
+                except queue.Empty:
+                    await asyncio.sleep(0.06)
+        finally:
+            s.unsubscribe(q)
 
     return StreamingResponse(
         event_stream(), media_type="text/event-stream",
@@ -3803,76 +3830,6 @@ async def stream_events(session_id: str):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},
     )
-
-# ── WebSocket ──
-@app.websocket("/api/sessions/{session_id}/ws")
-async def websocket_events(websocket: WebSocket, session_id: str):
-    # Authenticated here, not by require_api_key: Starlette's http middleware never sees a
-    # websocket scope, so this route would otherwise be the one unauthenticated way in — and it
-    # is the worst one to leave open, because its `message` and `steer` frames drive the agent.
-    # The check runs BEFORE the session lookup so an unauthenticated caller cannot tell a live
-    # session id from a dead one by the close code. A browser WebSocket cannot set headers, so
-    # ?key= is the channel that matters here; _key_supplied still accepts a header for curl and
-    # for non-browser clients. 1008 is the policy-violation close code.
-    key, unreadable = _web_ui_key()
-    if unreadable or (key is not None and not _key_supplied(websocket, key)):
-        await websocket.close(code=1008, reason="missing or invalid API key")
-        return
-    s = _sessions.get(session_id)
-    if not s:
-        await websocket.close(code=4004, reason="session not found")
-        return
-    await websocket.accept()
-
-    async def send_events():
-        try:
-            while True:
-                try:
-                    event = s.events.get_nowait()
-                    await websocket.send_json(event)
-                except queue.Empty:
-                    await asyncio.sleep(0.06)
-        except Exception:
-            pass
-
-    task = asyncio.create_task(send_events())
-    try:
-        while True:
-            data = await websocket.receive_json()
-            t = data.get("type")
-            if t == "message":
-                content = data.get("content", "").strip()
-                if content:
-                    with s.lock:
-                        if s.running:
-                            await websocket.send_json({"type": "error", "error": "task already running"})
-                            continue
-                        s.running = True
-                    s.append("user", content)
-                    def run(c=content):
-                        try:
-                            _run_agent_turn(s, c)
-                        except Exception as e:
-                            s.push({"type": "task_error", "error": str(e)})
-                        finally:
-                            with s.lock:
-                                s.running = False
-                    threading.Thread(target=run, daemon=True).start()
-                    await websocket.send_json({"type": "ack", "action": "message"})
-            elif t == "steer":
-                msg = data.get("message", "").strip()
-                if msg:
-                    s.append("system", f"[OPERATOR STEER] {msg}")
-                    if s.running:
-                        with s.lock:
-                            s.pending_steers.append(msg)
-                    await websocket.send_json({"type": "ack", "action": "steer"})
-            elif t == "ping":
-                await websocket.send_json({"type": "pong", "timestamp": time.time()})
-    except WebSocketDisconnect:
-        pass
-    finally:
-        task.cancel()
 
 # ── Approvals ──
 @app.get("/api/approvals")

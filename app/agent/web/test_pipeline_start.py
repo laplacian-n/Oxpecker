@@ -70,6 +70,9 @@ class PipelineStartTest(unittest.TestCase):
             allowed_action_classes=["passive_recon"], authorized_by="op",
             valid_until=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)))
         dev_server._sessions["s1"] = dev_server.Session(session_id="s1", engagement_id="eng1")
+        # Subscribe at setUp so _drain sees every driver event: push() fans out only to live
+        # subscribers now, so the stream must be open before pipeline/start emits.
+        dev_server._sessions["s1"]._test_q = dev_server._sessions["s1"].subscribe()
 
     def tearDown(self):
         ev = dev_server._sessions.get("s1")
@@ -86,9 +89,9 @@ class PipelineStartTest(unittest.TestCase):
         seen = []
         while time.time() < deadline:
             try:
-                seen.append(s.events.get(timeout=0.2))
+                seen.append(s._test_q.get(timeout=0.2))
             except Exception:
-                if not s.running and s.events.empty():
+                if not s.running and s._test_q.empty():
                     break
         return seen
 

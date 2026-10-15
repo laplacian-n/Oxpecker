@@ -112,6 +112,9 @@ class _WebTaintApprovalBase(unittest.TestCase):
     def _session(self, prefix, *, register=False, **kw):
         kw.setdefault("engagement_id", "lab-default")
         sess = d.Session(session_id=f"{prefix}-{time.time_ns()}", **kw)
+        # Subscribe at creation so _drain sees every event: push() now fans out only to live
+        # subscribers (no shared buffer), so the stream has to be open before the action pushes.
+        sess._test_q = sess.subscribe()
         if register:
             d._sessions[sess.session_id] = sess
             self.addCleanup(d._sessions.pop, sess.session_id, None)
@@ -122,7 +125,7 @@ class _WebTaintApprovalBase(unittest.TestCase):
         out = []
         while True:
             try:
-                out.append(session.events.get_nowait())
+                out.append(session._test_q.get_nowait())
             except Exception:  # noqa: BLE001 - empty queue is the loop's exit
                 return out
 

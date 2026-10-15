@@ -1,4 +1,4 @@
-"""Tests that the dev server's /api surface is actually gated, including the WebSocket.
+"""Tests that the dev server's /api surface is actually gated.
 
 Why this file exists: until the change it tests, `dev_server.py` had no authentication of any
 kind — a grep for WEB_UI_API_KEY / require_api_key / Depends / api_key / Authorization across
@@ -7,17 +7,16 @@ only because the bind defaulted to 127.0.0.1 and Electron spawned the process lo
 OS was the boundary. The orphaned agent/web/server.py, the runtime nothing ships, is the one
 that had `require_api_key`. Moving the server to its own host is what made the gap matter.
 
-Three things here are easy to get wrong and are each pinned below:
+Two things here are easy to get wrong and are each pinned below:
 
   1. No key file must still mean no auth. Every other test in this package sends no credentials;
      if a missing key file started rejecting requests, the suite would go red for the wrong
      reason and the loopback install would break.
   2. An unusable key file (empty, unreadable, not UTF-8) must fail CLOSED. "No key found" and
      "key could not be read" look alike one line apart and only one of them is safe.
-  3. The WebSocket must be gated separately. Starlette's http middleware never sees a websocket
-     scope, so porting server.py's middleware alone would have left /api/sessions/{id}/ws —
-     which accepts `message` and `steer` frames and can therefore drive the agent — as the one
-     unauthenticated way in.
+
+(Every route is HTTP — the SSE streams included — so the one http middleware covers them all;
+there is no WebSocket route that could slip past it.)
 
 Needs fastapi/pydantic. Run directly: `python3 -m agent.web.test_dev_server_auth`.
 """
@@ -72,7 +71,7 @@ def main() -> int:
               client.get("/api/health", headers={"X-API-Key": KEY}).status_code == 200)
         check("Authorization: Bearer (the convention, and what server.py reads) -> 200",
               client.get("/api/health", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200)
-        check("?key= (EventSource and WebSocket cannot set headers) -> 200",
+        check("?key= (EventSource cannot set headers) -> 200",
               client.get(f"/api/health?key={KEY}").status_code == 200)
         check("a wrong header does not mask a correct ?key= (every candidate is compared)",
               client.get(f"/api/health?key={KEY}", headers={"X-API-Key": "nope"}).status_code == 200)
@@ -96,39 +95,15 @@ def main() -> int:
                   client.get("/api/health").status_code == 503,
                   str(client.get("/api/health").status_code))
 
-    print("\n== the WebSocket is gated, which the http middleware cannot do ==")
+    print("\n== the SSE stream is gated like any other /api route ==")
     with with_key(key_file):
-        # Proves the middleware gap is closed rather than merely ported.
-        try:
-            with client.websocket_connect("/api/sessions/whatever/ws"):
-                check("unauthenticated websocket is refused", False, "it connected")
-        except Exception as e:
-            code = getattr(e, "code", None)
-            check("unauthenticated websocket is refused", True)
-            check("refused with the policy-violation code 1008, not a session-not-found code",
-                  code in (1008, None), f"code={code!r} ({type(e).__name__})")
-
-        # Auth is checked before the session lookup, so the close code cannot be used to tell a
-        # live session id from a dead one.
-        try:
-            with client.websocket_connect("/api/sessions/definitely-not-a-session/ws"):
-                refused = False
-        except Exception as e:
-            refused = True
-            unauth_code = getattr(e, "code", None)
-        check("an unauthenticated probe for a nonexistent session is refused by auth, "
-              "not answered with 4004", refused and unauth_code != 4004,
-              f"refused={refused}")
-
-    print("\n== with a key, the websocket reaches the route (and then the session check) ==")
-    with with_key(key_file):
-        try:
-            with client.websocket_connect(f"/api/sessions/definitely-not-a-session/ws?key={KEY}"):
-                code = None
-        except Exception as e:
-            code = getattr(e, "code", None)
-        check("an authenticated probe gets past auth and hits 'session not found' (4004)",
-              code == 4004, f"code={code!r}")
+        # EventSource authenticates with ?key= (it cannot set a header); the http middleware gates
+        # it like every other /api route. A disconnect test needs a real client, so here we only
+        # pin the auth boundary: no key is refused, the right key is let through to the handler.
+        check("unauthenticated SSE connect -> 401",
+              client.get("/api/sessions/whatever/events").status_code == 401)
+        check("SSE with ?key= for a nonexistent session gets past auth to 404 (not 401)",
+              client.get(f"/api/sessions/definitely-not-a-session/events?key={KEY}").status_code == 404)
 
     print("\n== CORS is no longer a wildcard ==")
     # allow_origins=["*"] with allow_credentials=True is a combination browsers reject, so the
@@ -186,7 +161,7 @@ def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
     finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
     from ..script_suite import suite_for
 
-    return suite_for(__name__, min_checks=35)
+    return suite_for(__name__, min_checks=30)
 
 if __name__ == "__main__":
     raise SystemExit(main())
