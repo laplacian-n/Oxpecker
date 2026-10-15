@@ -191,6 +191,7 @@ const S = {
   streamingText: '',
   streamingReasoning: '',
   ragConsulted: null,
+  updateMsg: null,
   engagements: [],
   approvals: [],
   consults: [],
@@ -494,6 +495,16 @@ async function deleteSession(sid,ev){
   if(S.activeSession===sid)goHome();else render();toast('Session deleted');}catch(e){toast('Delete failed: '+e.message)}
 }
 function stopRun(){if(!S.activeSession)return;S.running=false;S.streamingText='';S.streamingReasoning='';clearInterval(S.elapsedTimer);(S.mode==='autonomous'?api.stopPipeline(S.activeSession):api.stopAutonomous(S.activeSession)).catch(()=>{});render();toast('Stopped');}
+// The desktop shell exposes window.oxpecker.checkForUpdates (an old shell / a browser tab does
+// not — the button is only rendered when it is present). Resolves a {status, message} verdict the
+// shell builds; show it as a toast so the operator gets an answer without leaving the chat.
+async function checkUpdate(){
+  if(!(window.oxpecker&&window.oxpecker.checkForUpdates))return;
+  S.updateMsg='Checking…';render();
+  try{const v=await window.oxpecker.checkForUpdates();toast(v&&v.message?v.message:'Update check done');}
+  catch(e){toast('Update check failed: '+((e&&e.message)||e));}
+  finally{S.updateMsg=null;render();}
+}
 async function sendSteer(){
   const t=S.steerText.trim();if(!t||!S.activeSession)return;
   try{await api.steer(S.activeSession,t);S.steerText='';S.steerOpen=false;
@@ -905,6 +916,8 @@ function renderChat(){
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:2px;flex:none">
+        <div class="hv hv-color" data-action="openWorkspace" title="Open the multi-surface workspace (flow, worker rail, agent browser, tear-off windows)" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⧉ Workspace</div>
+        ${(window.oxpecker&&window.oxpecker.checkForUpdates)?`<div class="hv hv-color" data-action="checkUpdate" title="Check for a newer version of the desktop app" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⟳ ${S.updateMsg||'Updates'}</div>`:''}
         <div class="hv hv-color" data-action="openGraph" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.graph}Hypothesis Tree</div>
         <div class="hv hv-color" data-action="toggleSteer" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:${S.steerOpen?A70:'#9a9a9a'}">${icons.steer}Steer</div>
         <div class="hv hv-color" data-action="copySessionId" style="display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:7px;cursor:pointer;font:500 12px 'Instrument Sans';color:#9a9a9a">${icons.copy}${S.idCopied?'Copied':''}</div>
@@ -1749,6 +1762,15 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'deleteSession': deleteSession(el.dataset.id,e); break;
     case 'send': sendMessage(); break;
     case 'stopRun': stopRun(); break;
+    case 'openWorkspace': {
+      // Carry the key, and deep-link straight to the current engagement's flow surface (the
+      // HashRouter route is /:engagementId/flow) so Workspace lands on the n8n view with content,
+      // not an empty engagement picker. No engagement yet → the picker.
+      const q=S.apiKey?('?key='+encodeURIComponent(S.apiKey)):'';
+      const hash=S.engagementId?('#/'+encodeURIComponent(S.engagementId)+'/flow'):'';
+      window.location.href='/app/'+q+hash; break;
+    }
+    case 'checkUpdate': checkUpdate(); break;
     case 'openGraph': openGraph(); break;
     case 'closeGraph': stopGraphPoll(); S.view='chat'; S.selectedNode=null; S.nodeDetail=null; render(); break;
     case 'toggleSteer': S.steerOpen=!S.steerOpen; render(); break;

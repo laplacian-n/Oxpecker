@@ -71,5 +71,30 @@ class RealtimeStreamingRenderTest(unittest.TestCase):
         self.assertIn("updateStreamingReasoning()", branch)
 
 
+class ClassicUiReachesTheWorkspaceAndUpdatesTest(unittest.TestCase):
+    """The desktop app opens the classic UI (/) by default, so the multi-surface workspace (/app/)
+    and the update check must be reachable FROM the classic header, or the operator never sees
+    them — which is exactly what happened."""
+
+    def setUp(self):
+        self.html = INDEX_HTML.read_text(encoding="utf-8")
+
+    def test_a_workspace_link_deep_links_into_app_with_the_key(self):
+        self.assertIn("data-action=\"openWorkspace\"", self.html)
+        self.assertIn("case 'openWorkspace'", self.html)
+        self.assertIn("/app/", self.html)
+        # carries the key and deep-links to the engagement's surface, not a bare picker
+        self.assertRegex(self.html, r"key='\+encodeURIComponent\(S\.apiKey\)")
+        self.assertIn("/flow", self.html)
+
+    def test_the_update_button_is_method_detected_like_the_react_one(self):
+        # Rendered only when the shell actually exposes checkForUpdates (a browser tab / old shell
+        # has no such method), mirroring UpdateButton.tsx — never a button that throws on click.
+        self.assertIn("window.oxpecker&&window.oxpecker.checkForUpdates", self.html)
+        self.assertIn("data-action=\"checkUpdate\"", self.html)
+        self.assertIn("case 'checkUpdate'", self.html)
+        self.assertIn("async function checkUpdate(", self.html)
+
+
 if __name__ == "__main__":
     unittest.main()
