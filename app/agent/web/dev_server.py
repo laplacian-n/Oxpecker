@@ -206,12 +206,13 @@ TWO THINGS YOU DO, GOVERNED DIFFERENTLY — do not confuse them:
   twin), web, network, Active Directory, cloud, mobile, binary exploitation, social-engineering
   tradecraft, post-exploitation and reporting are all fair game to explain in full. "There is no
   target in scope" is NOT a reason to refuse a question — scope governs running tools, not talking.
-  GROUND IT IN THE KNOWLEDGE BASE: for any non-trivial how-to / technique / tool / payload /
-  command / reference question, FIRST call knowledge_search (the bundled 547k-chunk corpus —
-  GTFOBins, LOLBAS, PayloadsAllTheThings, HackTricks and technique references) and fold what it
-  returns into your answer, instead of answering from memory alone. It is a local corpus read, not
-  a target action — no scope needed and it never refuses. Skip it only for a trivial greeting or a
-  pure definition you are certain of; when in doubt, search first, then answer.
+  USE THE KNOWLEDGE BASE: each turn you are AUTOMATICALLY handed a "Relevant knowledge-base
+  excerpts" message pulled from the bundled 547k-chunk corpus (GTFOBins, LOLBAS,
+  PayloadsAllTheThings, HackTricks and technique references). READ those excerpts and fold the
+  relevant ones into your answer with a short source citation, instead of answering from memory
+  alone. If they are off-topic, say so briefly and answer from expertise; if you need deeper or
+  different references, call knowledge_search yourself — it is a local corpus read, needs no scope
+  and never refuses.
 - RUNNING TOOLS AGAINST A LIVE TARGET (scope applies): when you actually invoke a tool against a
   host, the Rules of Engagement apply. The tools only reach a host the engagement authorized; an
   out-of-scope call is refused by the server, not by you. So aim live tool calls at the operator's
@@ -2816,13 +2817,19 @@ def _run_agent_turn(session: Session, user_content: str, *, emit_done: bool = Tr
         role = m["role"] if m["role"] in ("user", "assistant", "system") else "user"
         messages.append({"role": role, "content": _capped(m["content"])})
 
-    # RAG augmentation goes LAST so the stable prefix above stays cacheable.
-    rag_results = _rag.search(user_content, top_k=2)
+    # RAG augmentation goes LAST so the stable prefix above stays cacheable. The retrieval runs on
+    # EVERY turn (the agent does not have to remember to ask), and it is surfaced to the UI so the
+    # operator can SEE the answer is grounded in the knowledge base — the silent version read as
+    # "it never consults RAG".
+    rag_results = _rag.search(user_content, top_k=4)
     if rag_results:
         rag_context = "Relevant knowledge-base excerpts (cite only if actually relevant):\n"
         for r in rag_results:
             rag_context += f"\n[{r['source']}] {r['title']} (relevance {r['score']})\n{r['text'][:400]}\n"
         messages.append({"role": "user", "content": rag_context})
+        session.push({"type": "rag_consulted", "count": len(rag_results),
+                      "sources": [{"source": r.get("source", ""), "title": r.get("title", ""),
+                                   "score": r.get("score")} for r in rag_results]})
 
     # No hard tool-round cap — the turn runs until the model stops calling tools (its natural
     # finish) or hits a safety guard. Guards (not a task limit): an absolute runaway ceiling,
