@@ -128,3 +128,24 @@ class WallClockTest(WaveTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerContextTest(WaveTestBase):
+    """The wave tags each worker's thread with its worker_id (agent/engagement/emit.current_worker),
+    so a tool call emitted deep in that worker's AgentLoop is attributed to the right worker. Set for
+    the duration of the run, cleared after."""
+
+    def test_worker_context_is_set_during_the_run_and_cleared_after(self):
+        from ..engagement import emit as event_emit
+
+        h1 = _hypothesis(self.store, "H1")
+        seen = {}
+
+        def runner(hid, method, stop, deadline):
+            seen["worker"] = event_emit.current_worker()
+            return WorkerResult(outcome="completed")
+
+        event_emit.set_current_worker(None)  # clean baseline
+        self._orch(runner).run_wave(1, [(h1, "error-based")])
+        self.assertEqual(seen["worker"], "w0")                 # tagged with the wave's worker id
+        self.assertIsNone(event_emit.current_worker())         # cleared on the way out

@@ -10,9 +10,11 @@ tool actually running.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from . import audit_log as audit_mod
@@ -723,11 +725,26 @@ class AgentLoop:
 
         confirmed_by = None
         exec_start = time.monotonic()
-        if parse_error:
-            raw_result = {"ok": False, "error": f"malformed tool_call arguments: {parse_error}"}
-            scope_decision = "rejected_malformed"
-        else:
-            raw_result, scope_decision, confirmed_by = self._dispatch(tool_name, args, message_id=message_id)
+        # §4.2 tool_call_started/finished — what the flow view draws as "running now" and the rail
+        # shows as a worker's "calling now". Attributed to the worker this thread runs as (set by the
+        # wave), falling back to the session on the assistant path. argument_digest is a short,
+        # non-reversible fingerprint so the stream names the call without carrying its arguments.
+        _call_id = uuid.uuid4().hex[:12]
+        _worker = event_emit.current_worker() or self.session_id
+        _arg_digest = hashlib.sha1(call_key[1].encode()).hexdigest()[:12]
+        event_emit.emit(self.engagement_id, "tool_call_started", {
+            "call_id": _call_id, "worker": _worker, "tool": tool_name,
+            "argument_digest": _arg_digest,
+        })
+        try:
+            if parse_error:
+                raw_result = {"ok": False, "error": f"malformed tool_call arguments: {parse_error}"}
+                scope_decision = "rejected_malformed"
+            else:
+                raw_result, scope_decision, confirmed_by = self._dispatch(tool_name, args, message_id=message_id)
+        finally:
+            # Finished even on a raised dispatch, so a call never stays "in flight" forever.
+            event_emit.emit(self.engagement_id, "tool_call_finished", {"call_id": _call_id})
         exec_ms = (time.monotonic() - exec_start) * 1000
 
         raw_text = json.dumps(raw_result)

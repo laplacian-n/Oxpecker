@@ -19,12 +19,28 @@ Two rules this enforces so instrumentation never changes behaviour:
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 from .. import config
 from .event_log import EngagementEventLog
 
 log = logging.getLogger("agent.engagement.emit")
+
+# Which worker a thread is currently running as, so a producer deep in the stack (the AgentLoop's
+# tool execution) can tag its events with the worker_id the wave assigned — without threading that
+# id through every call. A wave sets it on the worker's own thread before the loop runs (wave.py);
+# the assistant/chat path never sets it, so current_worker() is None there and tool events fall
+# back to the session id. Thread-local because each wave worker runs on its own thread.
+_worker_ctx = threading.local()
+
+
+def set_current_worker(worker_id: str | None) -> None:
+    _worker_ctx.worker_id = worker_id
+
+
+def current_worker() -> str | None:
+    return getattr(_worker_ctx, "worker_id", None)
 
 
 def emit(engagement_id: str, kind: str, payload: dict | None = None) -> int | None:
