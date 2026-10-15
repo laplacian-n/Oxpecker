@@ -143,3 +143,84 @@ jobs:
               sys.exit(f"the suite left {len(files)} files in the real state dir, ceiling is "
                        f"{MAX_STATE_FILES}; a test is missing agent/isolated_state.isolated_state")
           PY
+
+  # The operator client's own suite. It had none of this: nothing in CI ran a single client test,
+  # so every vitest file in app/client — the projection fold, the five surfaces, the tear-off
+  # parity check, the conversation fold added in #8 — was verified only on whichever machine its
+  # author remembered to run it on. That is the same hole this workflow already closes twice over
+  # on the Python side: 28 agent test files once collected zero tests and reported success, and
+  # the browser egress tests had never executed anywhere until a step was added that says so.
+  #
+  # A separate job rather than more steps on `unittest`: it needs node and not python, it has no
+  # dependency on the agent suite, and a client break should be legible as a client break instead
+  # of as a late step in a Python job.
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: app/client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: app/client/package-lock.json
+
+      - run: npm ci
+
+      - name: Run the client suite
+        run: |
+          # pipefail, or bash reports tee's status and a failed suite passes this step — the
+          # exact mistake the agent suite above documents having made on its first run.
+          set -o pipefail
+          npx vitest run 2>&1 | tee ../../client-output.txt
+
+      - name: Check that the client suite was not hollowed out
+        # `vitest run` already fails on a failing test and on finding no test files at all, so
+        # this gate is for the case neither covers: a suite that quietly got SMALLER. A changed
+        # `include` glob, a renamed directory or a file that stops importing drops tests silently
+        # and still exits 0 with everything it did find passing.
+        #
+        # The floors are this machine's observed figures, used directly rather than with slack,
+        # because nothing here is environment-gated: no network, no browser, no model, no API key,
+        # and not one `.skip` in the suite. The count a runner collects is therefore the count any
+        # machine collects, which is what makes an exact floor a ratchet instead of a guess. (The
+        # state-leak ceiling above is the opposite case and says so: it moves with the
+        # environment, which is why pinning it to a locally measured number made it reject its own
+        # first build.) Any skip at all fails: there is no legitimate reason for one here, so the
+        # first one is a signal and not a baseline to absorb.
+        run: |
+          node -e '
+            const fs = require("fs");
+            const out = fs.readFileSync("../../client-output.txt", "utf8");
+            const pick = (label) => {
+              const line = new RegExp(`${label}\\s+([^\\n]+)`).exec(out);
+              if (!line) throw new Error(`could not find the "${label}" summary line in the vitest output`);
+              const passed = /(\d+) passed/.exec(line[1]);
+              const skipped = /(\d+) skipped/.exec(line[1]);
+              return { passed: passed ? +passed[1] : 0, skipped: skipped ? +skipped[1] : 0 };
+            };
+            const files = pick("Test Files");
+            const tests = pick("Tests");
+            console.log(`files=${files.passed} tests=${tests.passed} skipped=${tests.skipped}`);
+            const MIN_FILES = 17, MIN_TESTS = 93;
+            if (tests.skipped || files.skipped) {
+              throw new Error(`${tests.skipped} test(s) and ${files.skipped} file(s) skipped; the client suite has no environment gates, so a skip means something stopped loading`);
+            }
+            if (files.passed < MIN_FILES) {
+              throw new Error(`only ${files.passed} client test files ran, floor is ${MIN_FILES} — a test file has stopped being collected`);
+            }
+            if (tests.passed < MIN_TESTS) {
+              throw new Error(`only ${tests.passed} client tests ran, floor is ${MIN_TESTS}`);
+            }
+          '
+
+      - name: Typecheck and build the bundle
+        # `npm run build` is `tsc --noEmit && vite build`. Both belong in CI: the built bundle is
+        # what dev_server serves at /app/, so a build that breaks ships a blank surface to every
+        # operator on the next deploy, and a type error that only `tsc` catches never shows up in
+        # a vitest run at all.
+        run: npm run build
