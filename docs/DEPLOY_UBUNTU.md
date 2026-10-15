@@ -78,10 +78,10 @@ sudo -u oxpecker npm --prefix /opt/oxpecker/app/client install
 sudo -u oxpecker npm --prefix /opt/oxpecker/app/client run build
 ```
 
-Until it is built, `/app/` serves a short "client not built" page with this command; the classic
-UI at `/` keeps working regardless. A browser or the Electron client then opens
-`http://<ubuntu-host>:7777/app/` (the Electron shell defaults to `/app/`; set `"uiPath": "/"` in
-`electron/config.local.json` to use the classic UI instead).
+Until it is built, `/app/` serves a short "client not built" page with this command and a link to
+the classic UI, which is still served at `/classic`. A browser or the Electron client then opens
+`http://<ubuntu-host>:7777/app/` — `/` redirects there, and the Electron shell defaults to it; set
+`"uiPath": "/classic"` in `electron/config.local.json` to open the classic UI instead.
 
 `tree` is not a Python dependency, but `config.COMMAND_ALLOWLIST` lets the model call it via
 `run_command`, and it is not installed by any other package on a stock Ubuntu image. Found by
@@ -288,9 +288,9 @@ it talks to this server over the LAN and lets the operator type the server addre
   It remembers both for next time and opens the familiar Oxpecker UI, already authenticated.
   Nothing runs locally — the agent and all data stay on the server.
 
-A browser at `http://<ubuntu-host>:7777/` is the same UI without installing anything. The newer
-multi-surface client is available at `/app/` (set `"uiPath": "/app/"` in `electron/config.local.json`
-to make the desktop app open that instead).
+A browser at `http://<ubuntu-host>:7777/` is the same UI without installing anything: `/`
+redirects to the operator client at `/app/`, which is what the desktop app opens too. The original
+single-file UI is retired but still served, at `/classic`.
 
 **Offline mode (experimental).** Set `"bundledClient": true` (in `electron/config.json` before
 building, or `config.local.json` in dev) and the desktop app loads the UI from inside itself rather

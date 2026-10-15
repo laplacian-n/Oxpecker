@@ -97,7 +97,8 @@ class NoStoreOnTheUiShellsTest(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         with TestClient(dev_server.app) as client:
-            self.assertEqual(client.get("/").headers.get("cache-control"), "no-store")
+            # / is a redirect to /app/ now; the classic shell it used to serve lives at /classic.
+            self.assertEqual(client.get("/classic").headers.get("cache-control"), "no-store")
             # /app/ serves the SPA shell (or a 503 when unbuilt) — either way, not cached.
             appresp = client.get("/app/")
             if appresp.status_code == 200:

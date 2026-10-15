@@ -1,7 +1,8 @@
 {
-  "_comment": "TEMPLATE — edit the paths below to point at YOUR llama-server, model and RAG index. For a private override that is never committed or shipped, copy this file to electron/config.local.json (gitignored) and the app will prefer it.",
-  "_remote_comment": "To connect to a server on another host (e.g. an Ubuntu box running dev_server --host 0.0.0.0) instead of spawning everything locally, set remoteUrl to that server's URL and nothing below is used — the app just loads it and you paste the API key into the UI. Leave remoteUrl empty for a local install.",
-  "_bundled_comment": "bundledClient: true loads the UI from inside the app (offline-capable) instead of from the server, so the app opens and shows cached findings/graph/report even when the server is down; it calls the server (entered on the connect screen) only for live data, AI and actions. Experimental — leave false for the server-served flow.",
+  "_comment": "TEMPLATE \u2014 edit the paths below to point at YOUR llama-server, model and RAG index. For a private override that is never committed or shipped, copy this file to electron/config.local.json (gitignored) and the app will prefer it.",
+  "_remote_comment": "To connect to a server on another host (e.g. an Ubuntu box running dev_server --host 0.0.0.0) instead of spawning everything locally, set remoteUrl to that server's URL and nothing below is used \u2014 the app just loads it and you paste the API key into the UI. Leave remoteUrl empty for a local install.",
+  "_bundled_comment": "bundledClient: true loads the UI from inside the app (offline-capable) instead of from the server, so the app opens and shows cached findings/graph/report even when the server is down; it calls the server (entered on the connect screen) only for live data, AI and actions. Experimental \u2014 leave false for the server-served flow.",
+  "_ui_comment": "uiPath: which UI the shell opens. Default \"/app/\" (the operator client). Set \"/classic\" for the original single-file UI. The server redirects / to /app/, so an old \"/\" keeps working.",
   "remoteUrl": "",
   "bundledClient": false,
   "pythonCmd": "py",
@@ -17,12 +18,31 @@
     "exe": "C:/path/to/llama/llama-server.exe",
     "model": "C:/path/to/models/your-chat-model.gguf",
     "port": 8080,
-    "args": ["-ngl", "999", "-c", "32768", "-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "-np", "1", "-lm", "none"]
+    "args": [
+      "-ngl",
+      "999",
+      "-c",
+      "32768",
+      "-fa",
+      "on",
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "-np",
+      "1",
+      "-lm",
+      "none"
+    ]
   },
   "embedLlama": {
     "exe": "C:/path/to/llama/llama-server.exe",
     "model": "C:/path/to/models/nomic-embed-text-v1.5.f16.gguf",
     "port": 8091,
-    "args": ["--embedding", "-ngl", "0"]
+    "args": [
+      "--embedding",
+      "-ngl",
+      "0"
+    ]
   }
 }
