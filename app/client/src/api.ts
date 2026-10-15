@@ -58,6 +58,13 @@ async function detailOf(resp: Response): Promise<string> {
   return "";
 }
 
+async function del(path: string, opts: ApiOptions): Promise<any> {
+  const f = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const resp = await f(`${opts.baseUrl ?? ""}${path}?${query(opts.apiKey)}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error(`${path} failed (${resp.status})${await detailOf(resp)}`);
+  return resp.json();
+}
+
 export const api = {
   // The engagements the operator may open — the landing's list. A 401 here is the signal the key
   // is missing or wrong (the landing surfaces that), rather than a surface failing later.
@@ -104,6 +111,13 @@ export const api = {
     opts: ApiOptions = {},
   ) => postJson(`/api/engagements`, body, opts),
 
+  // Where tool I/O can run and which sandbox tiers this host can really provide, each with the
+  // probe's own reason. Fetched, not hardcoded: create_session validates the tier against
+  // sandbox/availability.TIERS and answers 400 on an unknown one, so a stale copy here is a
+  // picker offering a tier the server will refuse.
+  isolation: (opts: ApiOptions = {}): Promise<any> =>
+    getJson(`/api/isolation`, opts),
+
   // ── Chat sessions ────────────────────────────────────────────────────────────────────────────
   // A chat session is where a conversation lives; it belongs to an engagement (Session.engagement_id)
   // and carries the message history. Distinct from the engagement's own event log: see
@@ -128,6 +142,23 @@ export const api = {
     if (!resp.ok) throw new Error(`send failed (${resp.status})`);
     return resp.json();
   },
+
+  // The session's own record: its settings and its isolation facts, which the event stream does
+  // not carry. Separate from the conversation's seed (conversationStream.ts folds the same
+  // response for the transcript) because settings change without a turn happening.
+  session: (sessionId: string, opts: ApiOptions = {}) =>
+    getJson(`/api/sessions/${sessionId}`, opts),
+  deleteSession: (sessionId: string, opts: ApiOptions = {}) =>
+    del(`/api/sessions/${sessionId}`, opts),
+  // Whether the model's reasoning is streamed to the UI for this session. A session setting, not
+  // a client one: two windows on one session agree about it because the server holds it.
+  setThinking: (sessionId: string, thinking: boolean, opts: ApiOptions = {}) =>
+    postJson(`/api/sessions/${sessionId}/thinking`, { thinking }, opts),
+  // A note injected into a turn. If one is in flight the server queues it for mid-run injection;
+  // if the session is idle it starts a turn so the steer is acted on rather than waiting for the
+  // operator's next message — which is why this is not just "send a message".
+  steer: (sessionId: string, message: string, opts: ApiOptions = {}) =>
+    postJson(`/api/sessions/${sessionId}/steer`, { message }, opts),
 
   // The persistent per-engagement live browser (§6.4). start/stop/navigate are commands; the screen
   // itself is pulled a frame at a time by browserFrame — a long-poll-lite over REST, not the event

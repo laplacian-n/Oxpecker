@@ -1,67 +1,151 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, ApiOptions } from "./api";
 
-// Which conversation this engagement's chat surface is showing.
+// Which conversation the chat surface is showing, and the rest of this engagement's conversations.
 //
-// A message cannot be sent to an engagement — it goes to a SESSION, and a session belongs to an
-// engagement (Session.engagement_id). The React client had no concept of one, so this is the
-// smallest thing that makes the chat usable: reuse the engagement's most recent conversation, or
-// open the first one. A session list, with new/delete and a picker, is the next slice; what this
-// must not do is silently drop the operator into a different engagement's history.
+// A message goes to a SESSION, not to an engagement, and a session belongs to an engagement
+// (Session.engagement_id). The first slice of this surface auto-picked the engagement's most
+// recent one and stopped there; this adds the list, explicit selection, opening a new one and
+// removing one — the sidebar the classic UI had and /app/ did not.
 //
-// Every failure resolves to an error string rather than a throw. This hook runs inside the chat
-// surface, which also carries the autonomous run controls — those must keep working against a
-// server whose session API is unreachable, so a failure here degrades the conversation only.
+// Auto-pick runs only while nothing is selected. A list refresh after a delete, or after the
+// operator opens a new session, must not drag the surface back to "most recently spoken in"
+// underneath them.
+//
+// Every failure resolves to an error string rather than a throw: this hook runs inside the
+// surface that also carries the autonomous run controls, and those must keep working against a
+// server whose session API is unreachable.
+
+export interface SessionRow {
+  session_id: string;
+  engagement_id?: string;
+  title?: string;
+  message_count?: number;
+  last_modified?: number;
+}
+
+export interface NewSessionOptions {
+  isolation?: string;
+  isolation_tier?: string;
+  thinking?: boolean;
+}
 
 export interface ChatSessionState {
   sessionId: string | null;
+  sessions: SessionRow[];
   error: string;
   loading: boolean;
+  select: (sessionId: string) => void;
+  create: (opts?: NewSessionOptions) => Promise<void>;
+  remove: (sessionId: string) => Promise<void>;
+  refresh: () => Promise<void>;
 }
+
+type SessionApi = Pick<typeof api, "sessions" | "createSession" | "deleteSession">;
 
 export function useChatSession(
   engagementId: string,
   apiOptions: ApiOptions = {},
-  apiImpl: Pick<typeof api, "sessions" | "createSession"> = api,
+  apiImpl: SessionApi = api,
 ): ChatSessionState {
-  const [state, setState] = useState<ChatSessionState>({ sessionId: null, error: "", loading: true });
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
+  const mine = useCallback(async (): Promise<SessionRow[]> => {
+    const all = await apiImpl.sessions(apiOptions);
+    const rows = (Array.isArray(all) ? all : []).filter(
+      (s: SessionRow) => s.engagement_id === engagementId,
+    );
+    // Most recently spoken in first. The server sorts by creation time, which is a different
+    // order the moment two sessions exist and the older one is the live one.
+    rows.sort((a, b) => (b.last_modified ?? 0) - (a.last_modified ?? 0));
+    return rows;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engagementId, apiImpl]);
+
+  const refresh = useCallback(async () => {
+    try {
+      setSessions(await mine());
+      setError("");
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }, [mine]);
+
+  // Open the engagement's most recent conversation, or its first one. Runs once per engagement:
+  // `live` guards the engagement switching mid-flight, where the slower response would otherwise
+  // win and leave the surface on another engagement's conversation.
   useEffect(() => {
     if (!engagementId) {
-      setState({ sessionId: null, error: "", loading: false });
+      setSessionId(null);
+      setSessions([]);
+      setLoading(false);
       return;
     }
-    // Guards the engagement switching while a request is in flight: without it the slower
-    // response wins and the surface ends up showing another engagement's conversation.
     let live = true;
     (async () => {
-      setState({ sessionId: null, error: "", loading: true });
+      setSessionId(null);
+      setSessions([]);
+      setError("");
+      setLoading(true);
       try {
-        const all = await apiImpl.sessions(apiOptions);
+        const rows = await mine();
         if (!live) return;
-        const mine = (Array.isArray(all) ? all : []).filter((s) => s.engagement_id === engagementId);
-        // Most recently touched first. The server already sorts by creation time, but the
-        // conversation the operator wants is the one most recently SPOKEN in, which is a
-        // different order the moment two sessions exist.
-        mine.sort((a, b) => (b.last_modified ?? 0) - (a.last_modified ?? 0));
-        if (mine.length) {
-          setState({ sessionId: mine[0].session_id, error: "", loading: false });
+        setSessions(rows);
+        if (rows.length) {
+          setSessionId(rows[0].session_id);
           return;
         }
         const created = await apiImpl.createSession({ engagement_id: engagementId }, apiOptions);
         if (!live) return;
-        setState({ sessionId: created.session_id, error: "", loading: false });
+        setSessionId(created.session_id);
+        setSessions(await mine());
       } catch (e: any) {
         if (!live) return;
-        setState({ sessionId: null, error: String(e?.message ?? e), loading: false });
+        setError(String(e?.message ?? e));
+      } finally {
+        if (live) setLoading(false);
       }
     })();
     return () => { live = false; };
-    // apiOptions is a fresh object literal on most renders; depending on it would re-run this on
-    // every parent render and open a session per render. The key and base URL come from
-    // per-viewer storage and do not change while the surface is mounted.
+    // apiOptions is a fresh literal on most renders; depending on it would reopen a session per
+    // render. The key and base URL come from per-viewer storage and do not change while mounted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engagementId, apiImpl]);
+  }, [engagementId, mine, apiImpl]);
 
-  return state;
+  const create = useCallback(async (opts: NewSessionOptions = {}) => {
+    setError("");
+    try {
+      const created = await apiImpl.createSession(
+        { engagement_id: engagementId, ...opts }, apiOptions,
+      );
+      // Selected before the list is refetched: the operator asked for this conversation, and
+      // waiting on a second round trip to show it reads as the button having done nothing.
+      setSessionId(created.session_id);
+      setSessions(await mine());
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engagementId, mine, apiImpl]);
+
+  const remove = useCallback(async (id: string) => {
+    setError("");
+    try {
+      await apiImpl.deleteSession(id, apiOptions);
+      const rows = await mine();
+      setSessions(rows);
+      // Only move if the deleted one was open. Falling back to the newest remaining conversation
+      // beats leaving the surface pointed at a session the server no longer has, which would
+      // fail its next snapshot fetch with a 404 and show an empty transcript.
+      setSessionId((current) => (current === id ? (rows[0]?.session_id ?? null) : current));
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mine, apiImpl]);
+
+  return { sessionId, sessions, error, loading, select: setSessionId, create, remove, refresh };
 }

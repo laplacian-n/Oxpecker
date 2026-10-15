@@ -4035,6 +4035,46 @@ def _materialize_engine_engagement(eng: Engagement) -> bool:
                  "until the engagement is completed", eng.engagement_id, type(e).__name__, e)
         return False
 
+@app.get("/api/isolation")
+def describe_isolation():
+    """Where a session's tool I/O can run, and which sandbox tiers this host can actually provide.
+
+    Same reason /api/action-classes exists: a client that hardcodes the tier names drifts from
+    sandbox/availability.TIERS, and the drift is invisible until a session is created asking for a
+    tier the server rejects (create_session validates against TIERS and answers 400) or, worse,
+    asking for one this host cannot enforce. The availability probe's own `reason` text is passed
+    through unchanged so the UI can say why a tier is unavailable instead of hiding it.
+
+    `modes` is the pair create_session accepts for `isolation` — WHERE the I/O runs, which is a
+    different question from WHICH sandbox confines it, and the two were easy to conflate while
+    nothing named them side by side.
+    """
+    host = _isolation.describe_host()
+    return {
+        "platform": host.get("platform", ""),
+        "seccomp_available": host.get("seccomp_available", False),
+        "tiers": [
+            {
+                "tier": name,
+                "available": bool(info.get("available")),
+                "reason": info.get("reason", ""),
+                "provides": info.get("provides", ""),
+            }
+            # Ordered by the probe, not sorted: availability.TIERS runs weakest to strongest and
+            # a picker should read in that order.
+            for name, info in (host.get("tiers") or {}).items()
+        ],
+        "modes": [
+            {"mode": "cloud",
+             "note": "tool I/O runs on this server, inside the sandbox tier below"},
+            {"mode": "this_computer",
+             "note": "tool I/O is handed to the desktop app and runs from your machine's network "
+                     "position. Scope is still enforced here first."},
+        ],
+        "default_tier": _isolation.TIER_BUBBLEWRAP,
+    }
+
+
 @app.get("/api/action-classes")
 def list_action_classes():
     """The action classes an engagement can grant, which class gates which tools, and which are
