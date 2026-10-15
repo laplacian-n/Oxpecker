@@ -89,15 +89,16 @@ jobs:
 
       - name: Check that the browser scope tests actually ran
         working-directory: app
-        # These four are the only check anywhere that the context.route gate in
-        # agent/browser/service.py really refuses an out-of-scope navigation and an out-of-scope
-        # subresource — the browser channel's whole containment claim. Their setUpClass skips the
-        # entire class when no Chromium can be launched, which reports success over zero
-        # assertions, so "they are in the suite" is not the same as "they ran". A floor on the
-        # count plus a hard zero on skips says the second thing.
+        # These are the only checks anywhere that the context.route gate in agent/browser/ really
+        # refuses an out-of-scope navigation and an out-of-scope subresource — the browser
+        # channel's whole containment claim — and, for the persistent path, that one engagement's
+        # logged-in profile is not reachable from another. Both files skip their entire class when
+        # no Chromium can be launched, which reports success over zero assertions, so "they are in
+        # the suite" is not the same as "they ran". A floor on the count plus a hard zero on skips
+        # says the second thing.
         run: |
           set -o pipefail
-          python -m unittest agent.browser.test_service -v 2>&1 | tee ../browser-output.txt
+          python -m unittest agent.browser.test_service agent.browser.test_live -v 2>&1 | tee ../browser-output.txt
           python - <<'PY'
           import re, sys
           out = open('../browser-output.txt').read()
@@ -109,8 +110,8 @@ jobs:
           if skipped:
               sys.exit(f'{skipped} browser test(s) skipped; the egress gate went unverified. '
                        'Chromium is missing or unlaunchable on this runner.')
-          if ran < 4:
-              sys.exit(f'only {ran} browser tests ran, floor is 4')
+          if ran < 17:
+              sys.exit(f'only {ran} browser tests ran, floor is 17')
           PY
 
       - name: Check that the suite did not write into the real state directory

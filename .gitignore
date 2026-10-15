@@ -17,3 +17,7 @@ checkpoints/
 # Runtime engagement state (ENGAGEMENTS_ROOT) — created by runs and tests, never committed.
 /app/engagements/
 /engagements/
+
+# CI writes these next to the suite run; they are logs, never sources.
+/test-output.txt
+/browser-output.txt

@@ -58,6 +58,27 @@ def _make_route_handler(policy: Policy, denied: list[dict]):
     return _route_handler
 
 
+def _launch_kwargs(headless: bool) -> dict:
+    """How this project launches Chromium, in one place.
+
+    OXPECKER_BROWSER_EXECUTABLE points at a Chromium binary to use instead of the one Playwright
+    downloaded for itself. Two reasons it is worth having: a server install may prefer the
+    distribution's chromium to a second copy under ~/.cache, and a Playwright Python version only
+    launches the exact browser build it was pinned against — a host carrying a different build has
+    a perfectly good browser that Playwright refuses to use ("Executable doesn't exist at
+    .../chromium_headless_shell-<build>/..."). Unset, this changes nothing: Playwright resolves
+    the browser exactly as before.
+
+    Shared with live.py so the one-shot and persistent paths cannot drift into launching the
+    browser two different ways — the same reason they share the egress route handler.
+    """
+    kwargs: dict = {"headless": headless, "args": ["--no-sandbox"]}
+    executable = os.environ.get("OXPECKER_BROWSER_EXECUTABLE", "").strip()
+    if executable:
+        kwargs["executable_path"] = executable
+    return kwargs
+
+
 @contextmanager
 def browser_session(policy: Policy, headless: bool = True):
     """Yields (page, denied_requests) — `page` is a Playwright Page inside a fresh, ephemeral,
@@ -73,11 +94,7 @@ def browser_session(policy: Policy, headless: bool = True):
         # carrying a different build has a perfectly good browser that Playwright refuses to use
         # ("Executable doesn't exist at .../chromium_headless_shell-<build>/..."). Unset, this
         # changes nothing: Playwright resolves the browser exactly as before.
-        launch_kwargs: dict = {"headless": headless, "args": ["--no-sandbox"]}
-        executable = os.environ.get("OXPECKER_BROWSER_EXECUTABLE", "").strip()
-        if executable:
-            launch_kwargs["executable_path"] = executable
-        browser = p.chromium.launch(**launch_kwargs)
+        browser = p.chromium.launch(**_launch_kwargs(headless))
         try:
             context = browser.new_context()
             try:
