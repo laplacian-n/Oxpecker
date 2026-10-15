@@ -3525,7 +3525,11 @@ def client_jobs_result(job_id: str, req: ClientJobResultRequest):
 # ── Static / index ──
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # no-store: the classic UI is a living dashboard served fresh from disk every request. Without
+    # it the Electron shell (and browsers) can keep showing a cached copy after the server's UI is
+    # updated — which reads as "nothing changed" even though the server is serving the new page.
+    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+                        headers={"Cache-Control": "no-store"})
 
 
 # ── The new operator client (CLIENT_UI_DESIGN.md) ──
@@ -3565,8 +3569,10 @@ def serve_client(path: str = ""):
     if path:
         target = (CLIENT_DIST / path).resolve()
         if target.is_file() and str(target).startswith(str(CLIENT_DIST.resolve())):
-            return FileResponse(target)
-    return FileResponse(CLIENT_DIST / "index.html")
+            return FileResponse(target)  # hashed asset bundles — safe to cache
+    # The SPA shell, like the classic UI: served no-store so a client never shows a stale shell
+    # after a redeploy. The hashed JS/CSS it pulls are content-addressed, so those stay cacheable.
+    return FileResponse(CLIENT_DIST / "index.html", headers={"Cache-Control": "no-store"})
 
 # ── Sessions ──
 @app.post("/api/sessions")

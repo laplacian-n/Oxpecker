@@ -71,6 +71,22 @@ class RealtimeStreamingRenderTest(unittest.TestCase):
         self.assertIn("updateStreamingReasoning()", branch)
 
 
+class NoStoreOnTheUiShellsTest(unittest.TestCase):
+    """The UI shells are served no-store so a client never shows a stale page after the server's UI
+    is updated — the "I reinstalled and nothing changed" symptom was a cached shell, since these
+    changes are server-side (the .exe is a thin client that loads the UI from the server)."""
+
+    def test_both_ui_shells_are_served_no_store(self):
+        from fastapi.testclient import TestClient
+
+        with TestClient(dev_server.app) as client:
+            self.assertEqual(client.get("/").headers.get("cache-control"), "no-store")
+            # /app/ serves the SPA shell (or a 503 when unbuilt) — either way, not cached.
+            appresp = client.get("/app/")
+            if appresp.status_code == 200:
+                self.assertEqual(appresp.headers.get("cache-control"), "no-store")
+
+
 class ClassicUiReachesTheWorkspaceAndUpdatesTest(unittest.TestCase):
     """The desktop app opens the classic UI (/) by default, so the multi-surface workspace (/app/)
     and the update check must be reachable FROM the classic header, or the operator never sees
