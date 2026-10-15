@@ -263,11 +263,50 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
-  // open external links in the system browser, not inside the app
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  // Window opening is handled globally in installWindowOpenHandler (via web-contents-created), so a
+  // tear-off window can itself tear off — not just the main window.
   mainWindow.loadURL(loadingHtml());
   mainWindow.webContents.once('did-finish-load', () => { startEverything().catch((e) => fail(String(e))); });
 }
+
+// Tear-off windows (CLIENT_UI_DESIGN §3/§6.5): each surface's `window.open(sameAppUrl, …)` opens a
+// real in-app BrowserWindow, not a system-browser tab — so a surface can be pulled into its own
+// window and still be an equal subscriber to the engagement stream. A link that leaves the app (a
+// result URL the operator clicks) still goes to the system browser. Installed on every webContents
+// so a window that was torn off can tear off again.
+function _isAppUrl(target, contents) {
+  try {
+    const cur = new URL(contents.getURL());
+    const t = new URL(target);
+    // file:// pages (the bundled offline build) have an opaque "null" origin, so compare protocols
+    // there; otherwise require an exact same-origin match (never treat "null"==="null" as same).
+    if (t.protocol === 'file:' && cur.protocol === 'file:') return true;
+    return t.origin === cur.origin && t.origin !== 'null';
+  } catch (_) { return false; }
+}
+
+function installWindowOpenHandler(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (_isAppUrl(url, contents)) {
+      const bundled = !!(cfg && cfg.bundledClient);
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 980, height: 820, backgroundColor: '#000000', autoHideMenuBar: true,
+          title: 'Oxpecker', icon: path.join(PROJECT_ROOT, 'build', 'icon.png'),
+          webPreferences: {
+            contextIsolation: true, nodeIntegration: false, webSecurity: !bundled,
+            preload: path.join(__dirname, 'preload.js'),
+          },
+        },
+      };
+    }
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+}
+
+app.on('web-contents-created', (_e, contents) => { installWindowOpenHandler(contents); });
 
 // "This computer" isolation: the UI (any mode — server-served, remote or bundled) tells us the
 // server + key when the operator is on a this_computer session, and we pull and run that session's
