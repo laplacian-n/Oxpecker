@@ -435,5 +435,58 @@ class RunNeverVanishesTest(unittest.TestCase):
         self.assertIn("boom in a phase", err.get("error", ""))
 
 
+class TestAlreadyClosedOut(unittest.TestCase):
+    """A run started on an engagement already at CLOSEOUT warns and guides rather than silently
+    re-emitting the terminal REPORT/CLOSEOUT phases and reporting 'finished'. That resume is the
+    confusing case the operator hit: type a target into a finished engagement and the run ends at
+    once, as if it had scanned and found a report that was in fact already there from an earlier run.
+    No lab container is needed — the guard fires before any phase produces work."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="closed-out-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._p = patch("agent.pipeline.autonomous_driver.config.ENGAGEMENTS_ROOT", self.tmp)
+        self._p.start()
+        self.addCleanup(self._p.stop)
+
+    def _driver(self):
+        events: list = []
+        d = AutonomousDriver(engagement_id="done-eng", profile_name="web_api", mode="autonomous",
+                             session_id="s", on_event=events.append, tier="medium")
+        d.engagement_dir.mkdir(parents=True, exist_ok=True)
+        (d.engagement_dir / "roe.json").write_text(
+            '{"engagement_id":"x","valid_from":"2020-01-01T00:00:00Z",'
+            '"valid_until":"2099-01-01T00:00:00Z","allowed_action_classes":["passive_recon"]}')
+        (d.engagement_dir / "scope.txt").write_text("127.0.0.1\n")
+        (d.engagement_dir / "deny.txt").write_text("")
+        return d, events
+
+    @staticmethod
+    def _drive_to_closeout(store):
+        for nxt in ("RECON", "ANALYSIS", "VALIDATION", "REPORT", "CLOSEOUT"):
+            ph = store.get_phase()
+            store.transition_phase(nxt, "test setup", ph["version"])
+
+    def test_closed_out_engagement_warns_and_does_not_rerun(self):
+        d, events = self._driver()
+        self._drive_to_closeout(d.store)
+        self.assertEqual(d.store.get_phase()["current_phase"], "CLOSEOUT")
+
+        result = d.run()  # must not raise, must not re-run
+
+        self.assertEqual(result.status, "already_closed_out")
+        self.assertIn("closed out", result.reason)
+        types = [e["type"] for e in events]
+        self.assertIn("already_closed_out", types)
+        # It stopped at the door: no terminal phase was re-entered or re-advanced.
+        self.assertNotIn("run_complete", types)
+        self.assertNotIn("phase_advanced", types)
+        self.assertNotIn("phase_entered", types)
+        # The guidance names the report and the start-a-new-engagement path.
+        detail = next(e for e in events if e["type"] == "already_closed_out").get("detail", "").lower()
+        self.assertIn("report", detail)
+        self.assertIn("new engagement", detail)
+
+
 if __name__ == "__main__":
     unittest.main()
