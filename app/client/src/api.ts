@@ -60,6 +60,31 @@ export const api = {
   stopRun: (engagementId: string, opts: ApiOptions = {}) =>
     postJson(`/api/engagements/${engagementId}/pipeline/stop`, {}, opts),
 
+  // ── Chat sessions ────────────────────────────────────────────────────────────────────────────
+  // A chat session is where a conversation lives; it belongs to an engagement (Session.engagement_id)
+  // and carries the message history. Distinct from the engagement's own event log: see
+  // conversationStream.ts on why the two streams are not interchangeable.
+  sessions: (opts: ApiOptions = {}): Promise<any[]> =>
+    getJson(`/api/sessions`, opts),
+  createSession: (
+    body: { engagement_id: string; thinking?: boolean; use_security_tools?: boolean },
+    opts: ApiOptions = {},
+  ) => postJson(`/api/sessions`, body, opts),
+  // Commands go over REST; the turn comes back on the session event stream. 409 means a turn is
+  // already in flight — reported as such rather than as a generic failure, because it is the one
+  // error the operator can act on (wait, or stop the run).
+  sendMessage: async (sessionId: string, content: string, opts: ApiOptions = {}) => {
+    const f = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    const resp = await f(`${opts.baseUrl ?? ""}/api/sessions/${sessionId}/messages?${query(opts.apiKey)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    if (resp.status === 409) throw new Error("a turn is already running in this session");
+    if (!resp.ok) throw new Error(`send failed (${resp.status})`);
+    return resp.json();
+  },
+
   // The persistent per-engagement live browser (§6.4). start/stop/navigate are commands; the screen
   // itself is pulled a frame at a time by browserFrame — a long-poll-lite over REST, not the event
   // stream (a JPEG is not a projection slice). start/stop control only the screencast; the browser

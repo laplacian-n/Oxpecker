@@ -1,13 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { EngagementSubscription } from "../subscription";
 import { useEngagement } from "../useEngagement";
 import { ApprovalsPanel } from "./ApprovalsPanel";
 import { api, ApiOptions } from "../api";
 import { EngagementEvent } from "../projection";
+import { Conversation } from "./Conversation";
+import { ConversationSubscription } from "../conversationStream";
+import { useChatSession } from "../useChatSession";
 
-// Chat — the primary, always-present surface (CLIENT_UI_DESIGN.md §6.1), and the control surface:
-// from here the operator starts the autonomous run and stops it, and watches the engagement's live
-// event feed. The feed and the goal input never share a value (§2.1 rule 3: the goal box is
+// Chat — the primary, always-present surface (CLIENT_UI_DESIGN.md §6.1). It now holds BOTH things
+// the operator does here: the conversation (<Conversation/>, streamed off the session event
+// stream) and the autonomous run controls plus the engagement's live event feed.
+//
+// The two halves draw from two different streams and neither can substitute for the other — see
+// conversationStream.ts. They are kept in one surface because §6.1 says this is where the
+// operator drives the engagement, and splitting "talk to it" from "set it running" into separate
+// surfaces is what made the classic UI the only place you could do both. The feed and the goal input never share a value (§2.1 rule 3: the goal box is
 // uncontrolled), so the engagement event flood — which re-renders this component as the feed grows
 // — can never drop a character or move the caret while the operator types a goal.
 
@@ -40,6 +48,22 @@ export function Chat({
 }) {
   const projection = useEngagement(subscription);
   const goalRef = useRef<HTMLTextAreaElement>(null);
+  const { sessionId, error: sessionError } = useChatSession(engagementId, apiOptions);
+  // One subscription per (window, session) — rebuilt only when the session changes, never on a
+  // token, or every delta would tear down the stream that delivered it.
+  const conversation = useMemo(
+    () => (sessionId ? new ConversationSubscription({ sessionId, ...apiOptions }) : null),
+    // apiOptions is a fresh literal each render; see the same note in useChatSession.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessionId],
+  );
+  useEffect(() => {
+    if (!conversation) return;
+    // A refused snapshot is reported by <Conversation/> staying empty rather than by an
+    // exception: the autonomous controls below must survive a server whose session API is down.
+    void conversation.start().catch(() => {});
+    return () => conversation.close();
+  }, [conversation]);
   // Optimistic "busy" so the button reacts the instant it is clicked; the event stream then takes
   // over as the source of truth (a run that actually started keeps it true; an end event clears it).
   const [busy, setBusy] = useState(false);
@@ -82,6 +106,16 @@ export function Chat({
           </span>
         )}
       </header>
+
+      {conversation && sessionId ? (
+        <Conversation subscription={conversation} sessionId={sessionId} apiOptions={apiOptions} />
+      ) : (
+        <p data-testid="no-conversation" className="landing-error">
+          {sessionError
+            ? `No conversation: ${sessionError}`
+            : "Opening a conversation for this engagement…"}
+        </p>
+      )}
 
       {/* The control: start an autonomous run with a goal, or stop one in flight. §6.1 — chat is
           where the operator drives the engagement. */}

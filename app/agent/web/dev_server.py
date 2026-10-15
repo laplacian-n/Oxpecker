@@ -3639,6 +3639,12 @@ def list_sessions():
                 break
         out.append({
             "session_id": sid, "known_live": True,
+            # Which engagement this conversation belongs to. The field was always on the Session
+            # and never on this row, so a client could list sessions but not tell which ones
+            # belong to the engagement it has open -- it had to GET each session to find out, or
+            # show every session in the install. The React client's chat surface needs exactly
+            # this to scope its session picker.
+            "engagement_id": s.engagement_id,
             "last_modified": s.messages[-1]["timestamp"] if s.messages else s.created_at,
             "title": title, "message_count": len(s.messages),
         })

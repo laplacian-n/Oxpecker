@@ -93,6 +93,36 @@ main { flex: 1; overflow: auto; padding: 16px; }
 .engagement-list li a:hover { border-color: #3a3a3a; text-decoration: none; }
 .eng-desc { color: var(--muted); }
 
+/* ── Conversation (chat surface) ── */
+.conversation { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.conversation-status { display: flex; gap: 8px; flex-wrap: wrap; }
+.transcript { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.transcript li {
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.transcript li[data-role="user"] { background: var(--panel-2); border-color: #2f2f2f; }
+.transcript li[data-role="system"] { background: none; border: none; padding: 2px 2px; color: var(--muted); font-size: 12px; }
+/* The answer and the live tail both hold model prose: honour its newlines without letting a long
+   token string push the column wider than the surface. */
+.msg-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.reasoning { color: var(--muted); font-size: 12px; }
+.reasoning pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; font: inherit; }
+.reasoning summary { cursor: pointer; }
+.tool-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.live-tail {
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--panel); border: 1px dashed var(--border);
+}
+.conversation-notices { list-style: none; padding: 0; margin: 0; color: var(--accent); font-size: 12px; }
+.composer { display: flex; gap: 8px; align-items: flex-start; }
+.composer textarea {
+  flex: 1; min-height: 44px; resize: vertical;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit;
+}
+.composer button { white-space: nowrap; }
+
 /* ── Work surface tabs ── */
 [role="tablist"] { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 [role="tab"] { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); }
