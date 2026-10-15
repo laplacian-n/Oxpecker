@@ -14,7 +14,7 @@
  * editing code. Nothing heavy is bundled — Python, llama-server and the model are the
  * user's own (see doc/handoff.md). This is the MVP "Option C + B" shell.
  */
-const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain, Menu } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
 const path = require('path');
@@ -39,6 +39,91 @@ function initAutoUpdate() {
   });
   autoUpdater.on('error', (e) => console.error('[update]', e && e.message));
   autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+}
+
+// An on-demand update check that resolves a verdict {status, version?, message} for the UI (the
+// Help menu and the client's "Check for updates" button both call it). It NEVER throws or rejects:
+// a stuck or failed check must land as a readable verdict, not a hung caller.
+//
+//   * unpackaged (dev, or `npm start`): electron-updater reads app-update.yml, which only the
+//     installer carries, so there is nothing to check — report "unsupported" rather than erroring.
+//   * electron-updater 6.3.9 emits exactly one of update-available / update-not-available on
+//     success, and on failure emits 'error' AND rejects the promise — so settle() can be reached
+//     twice and MUST be idempotent, and it removes all three listeners (not just the one that
+//     fired, or a leftover listener fires on the next check).
+//   * getUpdateInfoAndProvider() is an HTTP fetch with no timeout of its own: a server that
+//     accepts the connection but never answers leaves the promise pending and the button stuck on
+//     "Checking…" until the app is closed. A 30s cap turns that into a reported timeout.
+function checkForUpdatesNow() {
+  if (!autoUpdater || !app.isPackaged) {
+    return Promise.resolve({
+      status: 'unsupported',
+      message: 'Update checks are only available in the installed app.',
+    });
+  }
+  const auto = autoUpdater;
+  return new Promise((resolve) => {
+    let settled = false;
+    const onAvailable = (info) => settle({
+      status: 'available', version: info && info.version,
+      message: `Update available: ${info && info.version}. It will download and then offer a restart.`,
+    });
+    const onNone = (info) => settle({
+      status: 'current',
+      message: `You're on the latest version (${(info && info.version) || app.getVersion()}).`,
+    });
+    const onError = (err) => settle({
+      status: 'error',
+      message: `Update check failed: ${(err && err.message) || String(err)}`,
+    });
+    const cleanup = () => {
+      auto.removeListener('update-available', onAvailable);
+      auto.removeListener('update-not-available', onNone);
+      auto.removeListener('error', onError);
+    };
+    const settle = (verdict) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve(verdict);
+    };
+    const timer = setTimeout(
+      () => settle({ status: 'error', message: 'Update check timed out after 30s.' }), 30000);
+    auto.on('update-available', onAvailable);
+    auto.on('update-not-available', onNone);
+    auto.on('error', onError);
+    Promise.resolve()
+      .then(() => auto.checkForUpdates())
+      .catch(onError); // the rejection half of the emit-and-reject error path
+  });
+}
+
+// Help → Check for Updates, with a CmdOrCtrl+U accelerator. The accelerator matters more than the
+// visible item: the window is created with autoHideMenuBar:true, so the bar is hidden until Alt —
+// the shortcut is how this is actually reached. The menu lives in the shell, so it is present on
+// every build (unlike the client button, which an old bundled client would not carry).
+function installAppMenu() {
+  const checkItem = {
+    label: 'Check for Updates…',
+    accelerator: 'CmdOrCtrl+U',
+    click: async () => {
+      const v = await checkForUpdatesNow();
+      dialog.showMessageBox({
+        type: v.status === 'error' ? 'warning' : 'info',
+        title: 'Oxpecker updates', message: v.message, buttons: ['OK'],
+      }).catch(() => {});
+    },
+  };
+  const template = [
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    { role: 'help', submenu: [checkItem] },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -315,7 +400,12 @@ ipcMain.handle('oxpecker:start-executor', (_e, { serverBase, apiKey }) =>
   clientExecutor.start(serverBase, apiKey));
 ipcMain.handle('oxpecker:stop-executor', () => clientExecutor.stop());
 
-app.whenReady().then(() => { createWindow(); initAutoUpdate(); });
+// On-demand update check + app version, surfaced to the client's "Check for updates" button
+// (preload.js bridges these). The menu item calls checkForUpdatesNow directly in-process.
+ipcMain.handle('oxpecker:check-for-updates', () => checkForUpdatesNow());
+ipcMain.handle('oxpecker:app-version', () => app.getVersion());
+
+app.whenReady().then(() => { createWindow(); installAppMenu(); initAutoUpdate(); });
 app.on('window-all-closed', () => { killAll(); if (process.platform !== 'darwin') app.quit(); });
 app.on('before-quit', killAll);
 process.on('exit', killAll);
