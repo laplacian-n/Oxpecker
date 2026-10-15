@@ -179,8 +179,13 @@ def main() -> int:
         store.path.write_text(json.dumps({"tainted_until": time.time() + 300}))
         b3 = broker_mod.Broker(policy_loader=pol, confirm_fn=lambda p: False,
                                idempotency_cache_path=tmp / "idem3.json")
-        with patch.object(broker_mod, "TaintStore", lambda s: TS(
-                s, taint_dir=tmp / "state" / "broker" / "taint")):
+        # Forwards whatever the broker passes and pins only taint_dir. The previous stub took a
+        # single positional arg, which was right until sec 14.1 C made the broker call
+        # TaintStore(session_id, engagement_id=...) — then every dispatch through here raised
+        # TypeError instead of denying. Nobody saw it, because this file collected zero tests.
+        # Forwarding means the next parameter added cannot repeat that.
+        with patch.object(broker_mod, "TaintStore", lambda *a, **kw: TS(
+                *a, **{**kw, "taint_dir": tmp / "state" / "broker" / "taint"})):
             try:
                 r = b3.dispatch(
                     ActionRequest(tool="port_discovery",
@@ -200,6 +205,14 @@ def main() -> int:
         return 1
     return 0
 
+
+
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
+    """Let `unittest discover` run this file's checks. Without it, discovery imports this module,
+    finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
+    from ..script_suite import suite_for
+
+    return suite_for(__name__, min_checks=39)
 
 if __name__ == "__main__":
     import sys

@@ -6,15 +6,23 @@ were in exactly that state: written as a `main()` with a hand-rolled `check()` a
 `if __name__ == "__main__"` guard, so they ran only when someone remembered to run them by hand.
 Nobody did. One of them — `agent/web/test_approval_taint.py` — had been dying on a TypeError at
 its first assertion ever since §14.1 C changed a constructor, and the suite stayed green the
-whole time, because a file that collects zero tests cannot fail.
+whole time, because a file that collects zero tests cannot fail. Two more were stale in the same
+way and only revealed it once they first ran: `test_integrity.py`'s TaintStore stub, and
+`test_broker_mediation.py`'s exact-set assertion.
 
-The executed-count gate in `.github/workflows/tests.yml` cannot see this: it floors the *total*,
-and these files contribute 0 while the other thousand-odd tests clear the floor on their own.
+The executed-count gate in `.github/workflows/tests.yml` cannot see any of this: it floors the
+*total*, and these files contribute 0 while the other thousand-odd tests clear the floor on
+their own.
+
+There is a second way to be invisible, which this guard also covers: a directory the runner
+cannot enter. `agent/prompts/` had no `__init__.py`, so discovery raised "Start directory is not
+importable" and skipped every file under it, however the file was written.
 
 So this is the guard at the right level. It is a ratchet, asserted in BOTH directions:
 
-  * a file not on the list that contributes nothing fails — a new script-style test, or a file
-    whose only TestCase gets deleted, cannot join the silent set;
+  * a file not on the list that the runner collects nothing from fails — a new script-style
+    test, a file whose only TestCase gets deleted, or a directory that stops being importable,
+    cannot join the silent set;
   * a file ON the list that now contributes something ALSO fails — converting a file means
     deleting its line here. Without this direction the list would itself rot into a stale
     to-do list, which is the same bug one level up.
@@ -26,7 +34,6 @@ baseline to settle at.
 """
 from __future__ import annotations
 
-import importlib
 import unittest
 from pathlib import Path
 
@@ -36,32 +43,17 @@ AGENT_ROOT = Path(__file__).resolve().parent
 COLLECTS_NOTHING = {
     "agent.broker.test_browser_channel",
     "agent.broker.test_injection_quarantine",
-    "agent.broker.test_integrity",
     "agent.broker.test_knowledge_channels",
-    "agent.broker.test_policy_bypass",
-    "agent.broker.test_wildcard_scope",
-    "agent.engagement.test_program",
-    "agent.evidence.test_hmac_migration",
-    "agent.evidence.test_key_integrity",
-    "agent.evidence.test_lifecycle",
-    "agent.llm.test_provider_seam",
-    "agent.prompts.test_compiler",
     "agent.sandbox.test_availability",
     "agent.sandbox.test_isolation",
     "agent.sandbox.test_seccomp_profile",
     "agent.sandbox.test_wsl2",
     "agent.security_tools.test_http_recon_https",
-    "agent.test_detection_and_limits",
-    "agent.tools.test_command_screening",
     "agent.web.test_audit",
-    "agent.web.test_broker_mediation",
     "agent.web.test_debug_trace",
-    "agent.web.test_dev_server_auth",
-    "agent.web.test_scope",
     "agent.web.test_tool_parity",
     "agent.web.test_tools_wiring",
     "agent.web.test_trace_cli",
-    "agent.web.test_workspace_confinement",
 }
 
 # If the walk below finds far fewer files than the repo has, it is broken, and a ratchet over an
@@ -70,10 +62,34 @@ COLLECTS_NOTHING = {
 MIN_TEST_FILES = 120
 
 
-def _count(suite) -> int:
-    if isinstance(suite, unittest.TestSuite):
-        return sum(_count(x) for x in suite)
-    return 1
+def _modules_discovery_reaches() -> tuple[set[str], list[str]]:
+    """The module of every test `unittest discover` collects, measured the way CI measures it.
+
+    Deliberately NOT importlib.import_module per file. That was this guard's first shape, and it
+    missed a whole directory: agent/prompts/ had no __init__.py, so discovery raised "Start
+    directory is not importable" and skipped every file under it -- while import_module imported
+    them fine as a namespace package and reported all well. A guard that measures something
+    subtly different from the runner is the very bug it exists to catch, one level up. So this
+    runs the real loader, from the same top-level directory and with the same pattern as
+    .github/workflows/tests.yml.
+    """
+    loader = unittest.TestLoader()
+    suite = loader.discover(start_dir=str(AGENT_ROOT), pattern="test_*.py",
+                            top_level_dir=str(AGENT_ROOT.parent))
+    modules: set[str] = set()
+    broken: list[str] = []
+
+    def walk(s):
+        for item in s:
+            if isinstance(item, unittest.TestSuite):
+                walk(item)
+            elif type(item).__name__ == "_FailedTest":
+                broken.append(item.id())
+            else:
+                modules.add(type(item).__module__)
+
+    walk(suite)
+    return modules, broken
 
 
 def _module_names() -> list[str]:
@@ -87,6 +103,8 @@ def _module_names() -> list[str]:
 
 
 class EveryTestFileRunsTest(unittest.TestCase):
+    maxDiff = None
+
     def test_no_test_file_silently_collects_nothing(self):
         names = _module_names()
         self.assertGreaterEqual(
@@ -95,31 +113,25 @@ class EveryTestFileRunsTest(unittest.TestCase):
             f"ratchet over an empty set asserts nothing",
         )
 
-        loader = unittest.TestLoader()
-        empty = set()
-        for name in names:
-            if name == __name__:  # this file; counting itself proves only that it exists
-                continue
-            try:
-                module = importlib.import_module(name)
-            except Exception as e:  # noqa: BLE001 - an unimportable test file is also broken
-                self.fail(f"{name} could not be imported, so CI cannot run it: {e!r}")
-            if _count(loader.loadTestsFromModule(module)) == 0:
-                empty.add(name)
+        reached, broken = _modules_discovery_reaches()
+        self.assertEqual(broken, [], f"the runner could not load these: {broken}")
+
+        empty = {n for n in names if n != __name__ and n not in reached}
 
         newly_silent = sorted(empty - COLLECTS_NOTHING)
         self.assertEqual(
             newly_silent, [],
-            "these test files contribute no tests to the runner, so their assertions never run. "
-            "Give each a unittest.TestCase (see agent/web/test_approval_taint.py for a converted "
-            f"example) rather than adding it to COLLECTS_NOTHING: {newly_silent}",
+            "the test runner collects nothing from these files, so their assertions never run. "
+            "Either give the file a unittest.TestCase, or -- for a script-style main() -- the "
+            "three-line load_tests footer described in agent/script_suite.py. Adding it to "
+            f"COLLECTS_NOTHING is not the fix: {newly_silent}",
         )
 
         now_running = sorted(COLLECTS_NOTHING - empty)
         self.assertEqual(
             now_running, [],
-            "these files now contribute tests, so remove them from COLLECTS_NOTHING — the list is "
-            f"a ratchet and a stale entry hides the next regression: {now_running}",
+            "these files now contribute tests, so remove them from COLLECTS_NOTHING -- the list "
+            f"is a ratchet and a stale entry hides the next regression: {now_running}",
         )
 
 

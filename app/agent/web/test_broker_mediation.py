@@ -76,7 +76,7 @@ def main() -> int:
         # asserts the general rule (anything the broker classifies must be mediated).
         check("the outward-facing tools are mediated",
               d._BROKER_MEDIATED == {"http_request", "port_discovery", "knowledge_search",
-                                     "http_recon"},
+                                     "http_recon", "browser_fetch", "knowledge_fetch"},
               str(d._BROKER_MEDIATED))
         check("run_command is not mediated", "run_command" not in d._BROKER_MEDIATED)
         check("and the broker does not claim an action class for it",
@@ -245,6 +245,14 @@ def main() -> int:
         return 1
     return 0
 
+
+
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
+    """Let `unittest discover` run this file's checks. Without it, discovery imports this module,
+    finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
+    from ..script_suite import suite_for
+
+    return suite_for(__name__, min_checks=31)
 
 if __name__ == "__main__":
     import sys

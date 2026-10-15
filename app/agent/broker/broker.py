@@ -134,14 +134,24 @@ def _action_class_for(request: ActionRequest) -> str | None:
 class Broker:
     def __init__(
         self,
-        engagement_dir: Path = config.ENGAGEMENT_DIR,
+        engagement_dir: Path | None = None,
         confirm_fn: Callable[[str], bool] | None = None,
-        idempotency_cache_path: Path = config.IDEMPOTENCY_CACHE_PATH,
+        idempotency_cache_path: Path | None = None,
         approval_queue: ApprovalQueue | None = None,
         use_approval_queue: bool = False,
         policy_loader: Callable[[], policy_mod.Policy] | None = None,
         auto_approve: bool = False,
     ):
+        # Resolved at call time, not as default-argument values frozen at import. As frozen
+        # defaults these captured whatever config held when this module was first imported, so a
+        # caller that repoints the config afterwards — an operator, a test, the web runtime — kept
+        # getting the old paths with no sign anything was ignored. Third instance of the hazard
+        # findings/model.py and evidence/store.py each carry a fix and a comment for; this one is
+        # in the broker, so the path the idempotency cache and the policy files are read from was
+        # the part going quietly stale.
+        engagement_dir = engagement_dir if engagement_dir is not None else config.ENGAGEMENT_DIR
+        idempotency_cache_path = (idempotency_cache_path if idempotency_cache_path is not None
+                                  else config.IDEMPOTENCY_CACHE_PATH)
         self.engagement_dir = engagement_dir
         # Autonomous mode has no human to answer an approval prompt. When set, an approval-required
         # dispatch is granted automatically INSTEAD of blocking on confirm_fn (which would hang
