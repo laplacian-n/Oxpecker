@@ -42,3 +42,68 @@ test("starts with an empty state, no frame", () => {
   expect(getByTestId("browser-empty")).toBeInTheDocument();
   expect(queryByTestId("browser-frame")).toBeNull();
 });
+
+// ── Agent (live) side ─────────────────────────────────────────────────────────
+import { waitFor } from "@testing-library/react";
+import { beforeAll } from "vitest";
+
+beforeAll(() => {
+  // jsdom has no object-URL support; the live view makes one per frame.
+  (URL as any).createObjectURL = (URL as any).createObjectURL || (() => "blob:mock");
+  (URL as any).revokeObjectURL = (URL as any).revokeObjectURL || (() => {});
+});
+
+// A fetch stub for the browser REST calls: start/stop/navigate return ok JSON; the FIRST frame poll
+// returns a JPEG with X-Frame-Seq:1, and everything after is 204 (nothing newer) so the loop idles.
+function browserFetch(record?: { calls: string[] }) {
+  let frames = 0;
+  return (async (url: string, init?: any) => {
+    const u = String(url);
+    record?.calls.push(`${init?.method ?? "GET"} ${u.split("?")[0]}`);
+    if (u.includes("/browser/frame")) {
+      frames += 1;
+      if (frames === 1) {
+        return {
+          ok: true, status: 200,
+          headers: { get: (h: string) => (h === "X-Frame-Seq" ? "1" : null) },
+          blob: async () => new Blob(["jpegbytes"], { type: "image/jpeg" }),
+        };
+      }
+      return { ok: true, status: 204, headers: { get: () => null } };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  }) as any;
+}
+
+test("switching to the agent tab shows Start and an empty screen, no frame", () => {
+  const { getByTestId, queryByTestId } = render(<Browser subscription={sub()} engagementId="eng-x" />);
+  fireEvent.click(getByTestId("browser-mode-agent"));
+  expect(getByTestId("agent-browser-start")).toBeInTheDocument();
+  expect(getByTestId("agent-browser-empty")).toBeInTheDocument();
+  expect(queryByTestId("agent-browser-frame")).toBeNull();
+});
+
+test("Start streams the agent browser screen as a frame", async () => {
+  const rec = { calls: [] as string[] };
+  const { getByTestId } = render(
+    <Browser subscription={sub()} engagementId="eng-x" apiOptions={{ fetchImpl: browserFetch(rec) }} />,
+  );
+  fireEvent.click(getByTestId("browser-mode-agent"));
+  fireEvent.click(getByTestId("agent-browser-start"));
+  await waitFor(() => expect(getByTestId("agent-browser-frame")).toBeInTheDocument());
+  expect((getByTestId("agent-browser-frame") as HTMLImageElement).getAttribute("src")).toMatch(/^blob:/);
+  expect(rec.calls).toContain("POST /api/engagements/eng-x/browser/start");
+});
+
+test("Navigate posts the url to the agent browser", async () => {
+  const rec = { calls: [] as string[] };
+  const { getByTestId } = render(
+    <Browser subscription={sub()} engagementId="eng-x" apiOptions={{ fetchImpl: browserFetch(rec) }} />,
+  );
+  fireEvent.click(getByTestId("browser-mode-agent"));
+  fireEvent.click(getByTestId("agent-browser-start"));
+  await waitFor(() => expect(getByTestId("agent-browser-frame")).toBeInTheDocument());
+  fireEvent.change(getByTestId("agent-browser-address"), { target: { value: "shop.example/login" } });
+  fireEvent.submit(getByTestId("agent-browser-address").closest("form")!);
+  await waitFor(() => expect(rec.calls).toContain("POST /api/engagements/eng-x/browser/navigate"));
+});

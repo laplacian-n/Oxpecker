@@ -59,4 +59,30 @@ export const api = {
     postJson(`/api/engagements/${engagementId}/pipeline/start`, body, opts),
   stopRun: (engagementId: string, opts: ApiOptions = {}) =>
     postJson(`/api/engagements/${engagementId}/pipeline/stop`, {}, opts),
+
+  // The persistent per-engagement live browser (§6.4). start/stop/navigate are commands; the screen
+  // itself is pulled a frame at a time by browserFrame — a long-poll-lite over REST, not the event
+  // stream (a JPEG is not a projection slice). start/stop control only the screencast; the browser
+  // and its on-disk profile outlive a stop (see agent/browser/live.py).
+  browserStart: (engagementId: string, opts: ApiOptions = {}) =>
+    postJson(`/api/engagements/${engagementId}/browser/start`, {}, opts),
+  browserStop: (engagementId: string, opts: ApiOptions = {}) =>
+    postJson(`/api/engagements/${engagementId}/browser/stop`, {}, opts),
+  browserNavigate: (engagementId: string, url: string, opts: ApiOptions = {}) =>
+    postJson(`/api/engagements/${engagementId}/browser/navigate`, { url }, opts),
+  // The newest frame, or null when the server has nothing newer than `since` (HTTP 204). Returns
+  // the JPEG blob and the sequence number from X-Frame-Seq, which the caller passes back as `since`
+  // next time — so a frame is fetched once and the poll idles (204) while the screen is still.
+  browserFrame: async (
+    engagementId: string, since: number, opts: ApiOptions = {},
+  ): Promise<{ blob: Blob; seq: number } | null> => {
+    const f = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    const q = new URLSearchParams({ api_version: API_VERSION, since: String(since) });
+    if (opts.apiKey) q.set("key", opts.apiKey);
+    const resp = await f(`${opts.baseUrl ?? ""}/api/engagements/${engagementId}/browser/frame?${q.toString()}`);
+    if (resp.status === 204) return null;
+    if (!resp.ok) throw new Error(`browser frame failed (${resp.status})`);
+    const seq = Number(resp.headers.get("X-Frame-Seq") ?? 0);
+    return { blob: await resp.blob(), seq };
+  },
 };

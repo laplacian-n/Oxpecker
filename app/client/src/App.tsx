@@ -145,7 +145,8 @@ function ChatRouteInner({ subscription }: { subscription: EngagementSubscription
 
 function BrowserRouteInner({ subscription }: { subscription: EngagementSubscription }) {
   const { engagementId = "" } = useParams();
-  return <Browser subscription={subscription} engagementId={engagementId} />;
+  // The agent-browser side issues start/stop/navigate/frame over REST, so it needs the key too.
+  return <Browser subscription={subscription} engagementId={engagementId} apiOptions={sessionOptions()} />;
 }
 
 export function App() {
