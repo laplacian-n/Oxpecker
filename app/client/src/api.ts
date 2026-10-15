@@ -124,10 +124,16 @@ export const api = {
   // conversationStream.ts on why the two streams are not interchangeable.
   sessions: (opts: ApiOptions = {}): Promise<any[]> =>
     getJson(`/api/sessions`, opts),
+  // An empty or omitted system_prompt means the server's built-in one, read per turn, so a session
+  // that never set its own follows later changes to the default.
   createSession: (
-    body: { engagement_id: string; thinking?: boolean; use_security_tools?: boolean },
+    body: { engagement_id: string; thinking?: boolean; use_security_tools?: boolean; system_prompt?: string },
     opts: ApiOptions = {},
   ) => postJson(`/api/sessions`, body, opts),
+  // The built-in system prompt as `{ prompt }`, with the @@TOOL_LIST@@ placeholder still in it:
+  // the server fills that per session, so this is the real template an editor should start from.
+  defaultSystemPrompt: (opts: ApiOptions = {}): Promise<{ prompt: string }> =>
+    getJson(`/api/default-system-prompt`, opts),
   // Commands go over REST; the turn comes back on the session event stream. 409 means a turn is
   // already in flight — reported as such rather than as a generic failure, because it is the one
   // error the operator can act on (wait, or stop the run).
@@ -154,6 +160,11 @@ export const api = {
   // a client one: two windows on one session agree about it because the server holds it.
   setThinking: (sessionId: string, thinking: boolean, opts: ApiOptions = {}) =>
     postJson(`/api/sessions/${sessionId}/thinking`, { thinking }, opts),
+  // The pentest stage the session is in (RECON, ANALYSIS, VALIDATION, REPORT). Setting it is an
+  // operator decision: the server does not advance stages on its own, and a stage set here also
+  // marks the session guided. The server answers 400 on a stage it does not know.
+  setStage: (sessionId: string, stage: string, opts: ApiOptions = {}) =>
+    postJson(`/api/sessions/${sessionId}/stage`, { stage }, opts),
   // A note injected into a turn. If one is in flight the server queues it for mid-run injection;
   // if the session is idle it starts a turn so the steer is acted on rather than waiting for the
   // operator's next message — which is why this is not just "send a message".

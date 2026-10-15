@@ -28,8 +28,13 @@ interface Tier { tier: string; available: boolean; reason: string; provides: str
 interface Mode { mode: string; note: string }
 interface IsolationInfo { tiers: Tier[]; modes: Mode[]; default_tier: string; platform: string }
 
+// The server's STAGES (dev_server.py). Hardcoded here on purpose: the stage is a fixed protocol
+// order the server also enforces, and the selector needs the list before a session is open.
+const STAGES = ["RECON", "ANALYSIS", "VALIDATION", "REPORT"];
+
 export interface SessionDetail {
   thinking?: boolean;
+  stage?: string;
   isolation_mode?: string;
   isolation_tier?: string;
   effective_isolation_tier?: string | null;
@@ -48,7 +53,7 @@ export function SessionPanel({
   detail?: SessionDetail;
   onDetailChanged?: () => void;
   apiOptions?: ApiOptions;
-  apiImpl?: Pick<typeof api, "isolation" | "setThinking" | "steer">;
+  apiImpl?: Pick<typeof api, "isolation" | "setThinking" | "steer" | "defaultSystemPrompt" | "setStage">;
 }) {
   const [opening, setOpening] = useState(false);
   const [iso, setIso] = useState<IsolationInfo | null>(null);
@@ -56,6 +61,10 @@ export function SessionPanel({
   const [mode, setMode] = useState("cloud");
   const [tier, setTier] = useState("");
   const [thinkNew, setThinkNew] = useState(false);
+  // null until the server's default has been fetched; "" if it could not be, which leaves the box
+  // blank and the session on the server default.
+  const [defaultPrompt, setDefaultPrompt] = useState<string | null>(null);
+  const [systemPrompt, setSystemPrompt] = useState("");
   const [busy, setBusy] = useState("");
   const steerRef = useRef<HTMLInputElement>(null);
   const [steerError, setSteerError] = useState("");
@@ -82,9 +91,37 @@ export function SessionPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opening, iso, apiImpl]);
 
+  // The built-in prompt, to start the editor from. Fetched once, when the form first opens.
+  useEffect(() => {
+    if (!opening || defaultPrompt !== null) return;
+    let live = true;
+    (async () => {
+      try {
+        const d = await apiImpl.defaultSystemPrompt(apiOptions);
+        if (!live) return;
+        setDefaultPrompt(d.prompt);
+        setSystemPrompt(d.prompt);
+      } catch {
+        // Not an error the operator can act on here: a blank box sends nothing, so the session
+        // runs on the server default exactly as it would have before this field existed.
+        if (live) setDefaultPrompt("");
+      }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opening, defaultPrompt, apiImpl]);
+
   const open = async () => {
+    // Sent only when it differs from the default. An untouched default is the same text the
+    // server would use anyway, and sending it would freeze a copy into this session that then
+    // ignores any later change to the default.
+    const typed = systemPrompt.trim();
+    const custom = typed && typed !== (defaultPrompt ?? "").trim() ? typed : "";
     setBusy("new");
-    await state.create({ isolation: mode, isolation_tier: tier, thinking: thinkNew });
+    await state.create({
+      isolation: mode, isolation_tier: tier, thinking: thinkNew,
+      ...(custom ? { system_prompt: custom } : {}),
+    });
     setBusy("");
     setOpening(false);
   };
@@ -94,6 +131,17 @@ export function SessionPanel({
     setBusy("thinking");
     try {
       await apiImpl.setThinking(state.sessionId, !detail?.thinking, apiOptions);
+      onDetailChanged?.();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const changeStage = async (stage: string) => {
+    if (!state.sessionId) return;
+    setBusy("stage");
+    try {
+      await apiImpl.setStage(state.sessionId, stage, apiOptions);
       onDetailChanged?.();
     } finally {
       setBusy("");
@@ -154,6 +202,15 @@ export function SessionPanel({
                    onChange={(e) => setThinkNew(e.target.checked)} />
             <span>stream the model's reasoning</span>
           </label>
+          <label>
+            System prompt
+            <textarea value={systemPrompt} rows={6} data-testid="new-system-prompt"
+                      onChange={(e) => setSystemPrompt(e.target.value)} />
+          </label>
+          <p className="hint" data-testid="system-prompt-hint">
+            Starts from the built-in prompt. Leave it unchanged to follow the default; blank sends the
+            default too.
+          </p>
           <button onClick={() => void open()} disabled={busy === "new" || !!isoError}
                   data-testid="open-session">
             {busy === "new" ? "Opening…" : "Open conversation"}
@@ -188,6 +245,16 @@ export function SessionPanel({
                    disabled={busy === "thinking"} onChange={() => void toggleThinking()} />
             <span>show reasoning</span>
           </label>
+
+          {detail?.stage && (
+            <label className="inline">
+              <span>stage</span>
+              <select value={detail.stage} data-testid="stage-select"
+                      disabled={busy === "stage"} onChange={(e) => void changeStage(e.target.value)}>
+                {STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </label>
+          )}
 
           {/* Three facts, never collapsed into one. `isolation_tier` is what this session asked
               for; `effective_isolation_tier` is what the last run_command actually executed under

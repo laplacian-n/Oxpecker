@@ -28,6 +28,7 @@ export interface NewSessionOptions {
   isolation?: string;
   isolation_tier?: string;
   thinking?: boolean;
+  system_prompt?: string;
 }
 
 export interface ChatSessionState {
