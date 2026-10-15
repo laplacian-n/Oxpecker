@@ -190,6 +190,7 @@ const S = {
   threads: {},
   streamingText: '',
   streamingReasoning: '',
+  ragConsulted: null,
   engagements: [],
   approvals: [],
   consults: [],
@@ -337,8 +338,15 @@ function handleServerEvent(evt){
         S.streamingText='';S.streamingReasoning='';
       }
       render();softScroll();break;
-    case 'assistant_delta':S.streamingText+=evt.text;updateStreamingText();break;
-    case 'reasoning_delta':S.streamingReasoning+=evt.text;updateStreamingReasoning();break;
+    // First delta of each kind: the live-tail element does not exist yet (render() at task start
+    // ran with the streams empty), so updateStreaming*() would patch nothing and the text would not
+    // appear until the next full render. Draw once to create the element, then stream into it token
+    // by token on every later delta — so thinking and the answer actually appear in real time.
+    case 'assistant_delta':if(!S.streamingText){S.streamingText=evt.text;render();softScroll();}else{S.streamingText+=evt.text;updateStreamingText();}break;
+    case 'reasoning_delta':if(!S.streamingReasoning){S.streamingReasoning=evt.text;render();softScroll();}else{S.streamingReasoning+=evt.text;updateStreamingReasoning();}break;
+    // The server grounds every answer in the knowledge base automatically; surface it so the
+    // operator can see the answer is backed by the 547k-chunk corpus, not just the model's memory.
+    case 'rag_consulted':S.ragConsulted=evt;render(true);break;
     case 'context':S.ctxUsage={prompt_tokens:evt.prompt_tokens,completion_tokens:evt.completion_tokens};if(evt.max)CTX_MAX=evt.max;render(true);break;
     case 'stage':if(evt.stage)S.stage=evt.stage;render(true);break;
     case 'steer_applied':
@@ -459,7 +467,7 @@ async function sendMessage(){
       syncClientExecutor();
     }catch(e){toast('Failed to create session: '+e.message);return;}
   }
-  S.input='';S.running=true;S.elapsed=0;S.streamingText='';S.streamingReasoning='';
+  S.input='';S.running=true;S.elapsed=0;S.streamingText='';S.streamingReasoning='';S.ragConsulted=null;
   clearInterval(S.elapsedTimer);S.elapsedTimer=setInterval(()=>{S.elapsed++;updateElapsed()},1000);
   if(!S.threads[sid])S.threads[sid]=[];
   S.threads[sid].push({role:'user',content:text});render();scrollToBottom();
@@ -1192,6 +1200,10 @@ function renderAgentGroup(thread,start,end,isLast){
   const open=running?true:(S.chainOpen[key]===true);
   let liveTail='';
   if(running){
+    if(S.ragConsulted&&S.ragConsulted.count){
+      const srcs=(S.ragConsulted.sources||[]).slice(0,4).map(s=>esc(s.title||s.source||'ref')).join(' · ');
+      liveTail+=`<div title="${esc(srcs)}" style="display:inline-flex;align-items:center;gap:7px;align-self:flex-start;padding:4px 10px;border:1px solid #1f1f1f;border-radius:999px;font:500 12px 'Instrument Sans';color:#8a8a8a">📚 <span>Knowledge base · ${S.ragConsulted.count} refs</span><span style="color:#5a5a5a;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${srcs}</span></div>`;
+    }
     if(S.streamingReasoning&&!S.streamingText){
       liveTail+=`<div style="display:flex;flex-direction:column">
         <div style="display:flex;align-items:center;gap:10px;min-height:34px;padding:0 8px"><span style="flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center">${icons.think}</span><span class="lai-shimmer" style="font:500 15px 'Instrument Sans'">Thinking…</span></div>
