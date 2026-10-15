@@ -337,8 +337,12 @@ function handleServerEvent(evt){
         S.streamingText='';S.streamingReasoning='';
       }
       render();softScroll();break;
-    case 'assistant_delta':S.streamingText+=evt.text;updateStreamingText();break;
-    case 'reasoning_delta':S.streamingReasoning+=evt.text;updateStreamingReasoning();break;
+    // First delta of each kind: the live-tail element does not exist yet (render() at task start
+    // ran with the streams empty), so updateStreaming*() would patch nothing and the text would not
+    // appear until the next full render. Draw once to create the element, then stream into it token
+    // by token on every later delta — so thinking and the answer actually appear in real time.
+    case 'assistant_delta':if(!S.streamingText){S.streamingText=evt.text;render();softScroll();}else{S.streamingText+=evt.text;updateStreamingText();}break;
+    case 'reasoning_delta':if(!S.streamingReasoning){S.streamingReasoning=evt.text;render();softScroll();}else{S.streamingReasoning+=evt.text;updateStreamingReasoning();}break;
     case 'context':S.ctxUsage={prompt_tokens:evt.prompt_tokens,completion_tokens:evt.completion_tokens};if(evt.max)CTX_MAX=evt.max;render(true);break;
     case 'stage':if(evt.stage)S.stage=evt.stage;render(true);break;
     case 'steer_applied':
