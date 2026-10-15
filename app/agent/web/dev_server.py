@@ -117,6 +117,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
@@ -4083,6 +4084,119 @@ def _engagement_event_log(engagement_id: str):
     config.ENGAGEMENTS_ROOT at call time (never cached), so a run that repoints the root — a test,
     or main() aligning it to DATA_DIR — is honoured instead of a first-call value being frozen in."""
     return _EngagementEventLog.open_if_exists(_config.ENGAGEMENTS_ROOT / engagement_id)
+
+
+# -- the live browser (CLIENT_UI_DESIGN §6.4) ------------------------------------------------
+#
+# The line these four routes exist to keep sharp, because both parties act in one window:
+#
+#   * the OPERATOR navigates and signs in here. Not broker-mediated: a person acting in their own
+#     hands is how you hand the agent an account, and routing it through the approval machinery
+#     would mean asking the operator to approve the operator.
+#   * the AGENT's own navigation is broker-mediated, as every agent action is, and does not come
+#     through these routes at all.
+#
+# What is NOT a difference: scope. Both go through the same context.route gate inside the browser,
+# so an operator cannot steer the shared profile somewhere the RoE does not allow any more than
+# the agent can. The gate does not care who asked.
+#
+# These are /api routes, so the web UI's API key gate already applies — the operator door is
+# authenticated, which is what lets the audit trail attribute what came through it to a person.
+
+
+def _live_browser_for(engagement_id: str):
+    """The engagement's live browser, or an HTTPException naming what is missing."""
+    eng = _engagements.get(engagement_id)
+    if eng is None:
+        raise HTTPException(status_code=404, detail=f"no engagement {engagement_id!r}")
+    from ..browser import live as _live
+
+    try:
+        return _live.get(engagement_id, _config.ENGAGEMENTS_ROOT / engagement_id,
+                         _scope.policy_from_engagement(eng))
+    except Exception as e:  # noqa: BLE001 - no Chromium, or an unopenable profile
+        raise HTTPException(
+            status_code=503,
+            detail=f"the live browser is unavailable: {type(e).__name__}: {e}",
+        ) from e
+
+
+@app.post("/api/engagements/{engagement_id}/browser/start")
+def browser_start(engagement_id: str) -> dict:
+    """Open the engagement's browser and begin streaming it. Idempotent: calling it twice gives
+    the same browser and leaves the stream running."""
+    b = _live_browser_for(engagement_id)
+    b.start_screencast()
+    return {"ok": True, "engagement_id": engagement_id, "streaming": b.screencasting}
+
+
+@app.post("/api/engagements/{engagement_id}/browser/stop")
+def browser_stop(engagement_id: str) -> dict:
+    """Stop streaming, but leave the browser open.
+
+    Deliberately not a teardown: a site that issues a bare session cookie loses the operator's
+    login the moment the browser closes, because that cookie lives in process memory and is never
+    written to the profile (agent/browser/test_live.py pins this). Pausing the view must not cost
+    the sign-in it exists to show.
+    """
+    from ..browser import live as _live
+
+    b = _live._browsers.get(engagement_id)
+    if b is None or not b.alive:
+        return {"ok": True, "streaming": False}
+    b.stop_screencast()
+    return {"ok": True, "streaming": b.screencasting}
+
+
+@app.post("/api/engagements/{engagement_id}/browser/navigate")
+def browser_navigate(engagement_id: str, body: dict) -> dict:
+    """The operator's own navigation. Not brokered — see the note above — and still scope-gated
+    by the browser's egress handler, which refuses an out-of-scope URL whoever asked for it."""
+    url = (body or {}).get("url", "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="navigate needs a url")
+    b = _live_browser_for(engagement_id)
+
+    def go(page):
+        page.goto(url, timeout=20000)
+        return {"url": page.url, "title": page.title()}
+
+    try:
+        result = b.call(go)
+    except Exception as e:  # noqa: BLE001 - an out-of-scope URL arrives here as a navigation error
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}",
+                "denied_requests": list(b.denied_requests)[-5:]}
+    return {"ok": True, **result}
+
+
+@app.get("/api/engagements/{engagement_id}/browser/frame")
+def browser_frame(engagement_id: str, since: int = 0):
+    """The newest frame as a JPEG, or 204 when there is nothing newer than `since`.
+
+    204-on-unchanged is what keeps polling cheap enough to feel live: Chromium emits a frame on
+    repaint, so a still page answers every poll with an empty 204 instead of resending a picture
+    the viewer already has. The sequence rides in a header so the client can pass it straight
+    back as `since`.
+    """
+    from ..browser import live as _live
+
+    b = _live._browsers.get(engagement_id)
+    if b is None or not b.alive:
+        raise HTTPException(status_code=404, detail="no live browser for this engagement")
+    frame = b.latest_frame()
+    if frame is None or frame[1] <= since:
+        return Response(status_code=204)
+    jpeg, seq, meta = frame
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={
+            "X-Frame-Seq": str(seq),
+            "X-Frame-Width": str(meta.get("deviceWidth", "")),
+            "X-Frame-Height": str(meta.get("deviceHeight", "")),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/engagements/{engagement_id}/snapshot")

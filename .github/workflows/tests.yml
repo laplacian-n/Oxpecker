@@ -98,7 +98,7 @@ jobs:
         # says the second thing.
         run: |
           set -o pipefail
-          python -m unittest agent.browser.test_service agent.browser.test_live -v 2>&1 | tee ../browser-output.txt
+          python -m unittest agent.browser.test_service agent.browser.test_live agent.web.test_browser_endpoints -v 2>&1 | tee ../browser-output.txt
           python - <<'PY'
           import re, sys
           out = open('../browser-output.txt').read()
@@ -110,8 +110,8 @@ jobs:
           if skipped:
               sys.exit(f'{skipped} browser test(s) skipped; the egress gate went unverified. '
                        'Chromium is missing or unlaunchable on this runner.')
-          if ran < 17:
-              sys.exit(f'only {ran} browser tests ran, floor is 17')
+          if ran < 28:
+              sys.exit(f'only {ran} browser tests ran, floor is 28')
           PY
 
       - name: Check that the suite did not write into the real state directory
