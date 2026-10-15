@@ -21,7 +21,7 @@ Prerequisites:
   # imported at module scope by agent/evidence/store.py, which agent/audit_log.py imports at
   # module scope, which this file imports at module scope — so dev_server cannot bind a port
   # without it, with or without the sandbox or a real LLM provider.
-  # `pydantic` is named for the same reason one step earlier: this file imports it directly
+  # `pydantic` is named for the same reason one step earlier: models.py imports it directly
   # (BaseModel, for the request bodies), and it is present today only because fastapi happens to
   # depend on it. A dependency we rely on by accident is one upstream release away from being
   # the next `cryptography`.
@@ -120,7 +120,6 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Configuration
@@ -171,6 +170,25 @@ LLMClient = _LlamaCppProvider
 # The retrieval classes live in rag.py now (unchanged); re-exported so
 # `dev_server.TFIDFStore` / `dev_server.VectorRAG` keep resolving.
 from .rag import TFIDFStore, VectorRAG  # noqa: E402  (deliberately below the imports)
+
+# The request bodies live in models.py now (unchanged); re-exported so every route signature below
+# and `dev_server.<Name>` keep resolving to the same classes.
+from .models import (  # noqa: E402  (deliberately below the imports)
+    ApprovalResolveRequest,
+    AutonomousStartRequest,
+    ClientJobResultRequest,
+    ConsultResolveRequest,
+    CreateEngagementRequest,
+    CreateSessionRequest,
+    EngagementRunRequest,
+    MessageRequest,
+    NotebookResolveRequest,
+    OperatorGraphActionRequest,
+    ReviewFindingRequest,
+    SteerRequest,
+    StageRequest,
+    ThinkingRequest,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # In-memory stores
@@ -2952,77 +2970,6 @@ def _run_guided(session: Session, engagement_id: str, user_message: str = ""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Pydantic request models
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class CreateSessionRequest(BaseModel):
-    profile: str = "safe"
-    use_security_tools: bool = False
-    engagement_id: str = "lab-default"
-    dangerous_local: bool = False
-    # "cloud" (run on the server, sandboxed) or "this_computer" (run on the operator's desktop
-    # app, from their machine's network). Scope is enforced on the server either way.
-    isolation: str = "cloud"
-    isolation_tier: str = "bubblewrap"
-    thinking: bool = False
-    # Optional custom system prompt for the assistant (chat) path — for testing how the prompt
-    # affects the model's willingness on authorised tasks. Blank uses DEFAULT_SYSTEM_PROMPT. It
-    # never relaxes the server-side gates (scope, broker, deny list, injection guard), which run
-    # regardless of what the prompt says.
-    system_prompt: str = ""
-
-class MessageRequest(BaseModel):
-    content: str
-    guided: bool | None = None   # follow the staged pentest protocol for this turn
-    stage: str | None = None     # operator-set stage for this turn (overrides detection)
-
-class StageRequest(BaseModel):
-    stage: str
-
-class SteerRequest(BaseModel):
-    message: str
-
-class ApprovalResolveRequest(BaseModel):
-    approved: bool
-    resolved_by: str = "web-ui"
-
-class ConsultResolveRequest(BaseModel):
-    answer: str
-    resolved_by: str = "web-ui"
-
-class CreateEngagementRequest(BaseModel):
-    engagement_id: str
-    description: str = ""
-    allow_targets: list[str] = []
-    deny_targets: list[str] = []
-    program: dict | None = None
-    allowed_action_classes: list[str] = []
-    authorized_by: str = ""
-    valid_hours: float = 24.0
-
-class OperatorGraphActionRequest(BaseModel):
-    action: str
-    reason: str = ""
-    text: str = ""
-
-class AutonomousStartRequest(BaseModel):
-    engagement_id: str
-    profile: str = "web_api"
-    mode: str
-    user_message: str = ""
-    # Orchestration tier for this run (low|medium|high): low = one agent, no strategist/graph, just
-    # context + tool calls; high = the full parallel wave design. None uses the engagement default.
-    tier: str | None = None
-
-class ReviewFindingRequest(BaseModel):
-    reviewed_by: str
-
-class NotebookResolveRequest(BaseModel):
-    action: str = "resolve"
-    reason: str = ""
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # FastAPI app + all routes
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3168,9 +3115,6 @@ def default_system_prompt():
 # to the operator's machine, runs it, and posts the result to /result. Both are gated by the same
 # API key as every other /api/* route (require_api_key middleware). Sync defs so the blocking
 # long-poll runs in Starlette's threadpool instead of stalling the event loop.
-class ClientJobResultRequest(BaseModel):
-    result: dict
-
 @app.get("/api/client-jobs/next")
 def client_jobs_next(wait: float = 25.0):
     # Cap the hold so a dropped connection frees the threadpool slot within half a minute.
@@ -3373,9 +3317,6 @@ def get_session(session_id: str):
                       "tool_calls": m.get("tool_calls"), "tool_name": m.get("tool_name")}
                      for m in s.messages],
     }
-
-class ThinkingRequest(BaseModel):
-    thinking: bool
 
 @app.post("/api/sessions/{session_id}/thinking")
 def set_thinking(session_id: str, req: ThinkingRequest):
@@ -4299,13 +4240,6 @@ def stop_pipeline(session_id: str):
     with s.lock:
         s.stop_requested = True
     return {"status": "stop_requested"}
-
-
-class EngagementRunRequest(BaseModel):
-    mode: str = "autonomous"
-    profile: str = "web_api"
-    user_message: str = ""
-    tier: str | None = None
 
 
 @app.post("/api/engagements/{engagement_id}/pipeline/start")
