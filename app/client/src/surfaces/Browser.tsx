@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { EngagementSubscription } from "../subscription";
+import { API_VERSION, EngagementSubscription } from "../subscription";
 import { useEngagement } from "../useEngagement";
 import { ApiOptions, api } from "../api";
 
@@ -25,6 +25,27 @@ function normalizeUrl(u: string): string {
   u = u.trim();
   if (!u) return "";
   return /^https?:\/\//i.test(u) ? u : `https://${u}`;
+}
+
+// Input the operator sends to the agent browser's screen. Coordinates are in FRAME pixels (the
+// screencast is at most 1280px wide), never the <img>'s rendered CSS pixels.
+type AgentInput =
+  | { action: "click"; x: number; y: number; button: "left" | "middle" | "right" }
+  | { action: "key"; key: string }
+  | { action: "type"; text: string }
+  | { action: "scroll"; deltaY: number };
+
+// Mirrors api.ts's postJson (kept local so this surface stays a single-file change).
+async function postInput(engagementId: string, body: AgentInput, opts: ApiOptions): Promise<void> {
+  const f = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const q = new URLSearchParams({ api_version: API_VERSION });
+  if (opts.apiKey) q.set("key", opts.apiKey);
+  const resp = await f(`${opts.baseUrl ?? ""}/api/engagements/${engagementId}/browser/input?${q.toString()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`browser/input failed (${resp.status})`);
 }
 
 // The live screen, isolated in its own component so a new frame re-renders ONLY the <img> — never
@@ -91,6 +112,10 @@ function LiveAgentBrowser({ engagementId, apiOptions }: { engagementId: string; 
     }
   }
 
+  // Fire-and-forget: the screen never waits on an input round-trip. A dropped input is not something the
+  // operator can act on; the next frame shows whether it landed.
+  const send = (body: AgentInput) => { void postInput(engagementId, body, apiOptions).catch(() => {}); };
+
   // Stop the loop and free the last frame's object URL when the surface unmounts or is torn off.
   useEffect(() => () => { runningRef.current = false; revoke(); }, []);
 
@@ -115,8 +140,33 @@ function LiveAgentBrowser({ engagementId, apiOptions }: { engagementId: string; 
       {err && <p className="agent-browser-err" data-testid="agent-browser-err" style={{ color: "var(--accent)", fontSize: 12 }}>{err}</p>}
       <div className="agent-browser-screen">
         {src ? (
-          <img src={src} alt="agent browser screen" data-testid="agent-browser-frame"
-               style={{ display: "block", maxWidth: "100%", background: "#000" }} />
+          <>
+            <p className="agent-input-hint" data-testid="agent-input-hint"
+               style={{ color: "var(--muted)", fontSize: 12, margin: "4px 0" }}>
+              Click and type on the screen to drive the browser as yourself (not brokered).
+            </p>
+            <img src={src} alt="agent browser screen" data-testid="agent-browser-frame" tabIndex={0}
+                 style={{ display: "block", maxWidth: "100%", background: "#000" }}
+                 onClick={(e) => {
+                   // Map the click from CSS pixels to frame pixels via the rendered box.
+                   const img = e.currentTarget;
+                   const r = img.getBoundingClientRect();
+                   if (r.width === 0 || r.height === 0 || img.naturalWidth === 0) return;
+                   const x = Math.round((e.clientX - r.left) * (img.naturalWidth / r.width));
+                   const y = Math.round((e.clientY - r.top) * (img.naturalHeight / r.height));
+                   send({ action: "click", x, y, button: "left" });
+                 }}
+                 onKeyDown={(e) => {
+                   // Only while focused (onKeyDown on the img). A single character types; anything else
+                   // is a Playwright key name (Enter, Backspace, ArrowDown, ...).
+                   e.preventDefault();
+                   send(e.key.length === 1 ? { action: "type", text: e.key } : { action: "key", key: e.key });
+                 }}
+                 onWheel={(e) => {
+                   e.preventDefault();
+                   if (e.deltaY) send({ action: "scroll", deltaY: Math.round(e.deltaY) });
+                 }} />
+          </>
         ) : (
           <div className="browser-empty" data-testid="agent-browser-empty">
             {status === "stopped"

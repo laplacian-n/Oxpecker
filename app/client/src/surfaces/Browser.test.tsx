@@ -107,3 +107,42 @@ test("Navigate posts the url to the agent browser", async () => {
   fireEvent.submit(getByTestId("agent-browser-address").closest("form")!);
   await waitFor(() => expect(rec.calls).toContain("POST /api/engagements/eng-x/browser/navigate"));
 });
+
+// Starts the agent browser and waits for the first frame, logging every input POST body.
+async function startLiveScreen() {
+  const rec = { calls: [] as string[] };
+  const bodies: any[] = [];
+  const base = browserFetch(rec);
+  const fetchImpl = (async (url: string, init?: any) => {
+    if (String(url).includes("/browser/input")) bodies.push(JSON.parse(init.body));
+    return base(url, init);
+  }) as any;
+  const view = render(<Browser subscription={sub()} engagementId="eng-x" apiOptions={{ fetchImpl }} />);
+  fireEvent.click(view.getByTestId("browser-mode-agent"));
+  fireEvent.click(view.getByTestId("agent-browser-start"));
+  await waitFor(() => expect(view.getByTestId("agent-browser-frame")).toBeInTheDocument());
+  return { rec, bodies, img: view.getByTestId("agent-browser-frame") as HTMLImageElement, view };
+}
+
+test("clicking the live frame posts a click in frame pixels, not CSS pixels", async () => {
+  const { rec, bodies, img, view } = await startLiveScreen();
+  expect(view.getByTestId("agent-input-hint").textContent).toMatch(/not brokered/i);
+  // The screencast is 1280x720 but renders at 640x360 CSS px, so a click at (320,180) is (640,360) in frame space.
+  Object.defineProperty(img, "naturalWidth", { value: 1280, configurable: true });
+  Object.defineProperty(img, "naturalHeight", { value: 720, configurable: true });
+  img.getBoundingClientRect = () =>
+    ({ left: 0, top: 0, width: 640, height: 360, right: 640, bottom: 360, x: 0, y: 0, toJSON() {} }) as DOMRect;
+  fireEvent.click(img, { clientX: 320, clientY: 180 });
+  await waitFor(() => expect(rec.calls).toContain("POST /api/engagements/eng-x/browser/input"));
+  expect(bodies).toContainEqual({ action: "click", x: 640, y: 360, button: "left" });
+});
+
+test("a key pressed on the focused live frame posts the key, and a character posts as typed text", async () => {
+  const { rec, bodies, img } = await startLiveScreen();
+  expect(img.tabIndex).toBe(0);
+  fireEvent.keyDown(img, { key: "Enter" });
+  fireEvent.keyDown(img, { key: "a" });
+  await waitFor(() => expect(rec.calls).toContain("POST /api/engagements/eng-x/browser/input"));
+  expect(bodies).toContainEqual({ action: "key", key: "Enter" });
+  expect(bodies).toContainEqual({ action: "type", text: "a" });
+});

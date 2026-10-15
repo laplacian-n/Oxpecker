@@ -4169,6 +4169,60 @@ def browser_navigate(engagement_id: str, body: dict) -> dict:
     return {"ok": True, **result}
 
 
+# The action verbs the operator-input endpoint accepts. Named here so the parity test can assert
+# the model's tool registry has no path to them (condition 2 below).
+_BROWSER_INPUT_ACTIONS = ("click", "move", "key", "type", "scroll")
+
+
+def _browser_input_button(raw) -> str:
+    return raw if raw in ("left", "middle", "right") else "left"
+
+
+@app.post("/api/engagements/{engagement_id}/browser/input")
+def browser_input(engagement_id: str, body: dict) -> dict:
+    """The OPERATOR clicking / typing / scrolling on the live screen — the human acting in their own
+    hands on the browser they can see, the same category as the operator typing a URL in
+    browser_navigate. This DELIBERATELY bypasses the broker (CLIENT_UI_DESIGN §6.4). Three
+    conditions keep that bypass honest:
+
+      1. ORIGIN IS THE DOOR. The authorisation is *reaching this authed HTTP route* (the operator's
+         web-UI key, enforced by require_api_key), never a field in the body. No "operator"/"actor"
+         claim is read or trusted — a caller cannot promote itself by declaring one; being on this
+         route IS the operator. Only `action` and the geometry/keys below are consulted.
+      2. NO TOOL REACHES IT. The model's tool registry has no path to this handler — asserted as an
+         exact set the way _BROKER_MEDIATED is (test_browser_operator_input.py). The agent drives
+         the browser only through the brokered browser_* tools, never through page.mouse/keyboard
+         here.
+      3. NOT emit.current_worker(). That thread-local is telemetry anything on the thread can set;
+         it is not an audit boundary. This handler never consults it — the actor is the HTTP
+         operator, full stop.
+    """
+    action = (body or {}).get("action")
+    if action not in _BROWSER_INPUT_ACTIONS:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown input action {action!r}; one of {_BROWSER_INPUT_ACTIONS}")
+    b = _live_browser_for(engagement_id)
+
+    def apply(page):
+        if action == "click":
+            page.mouse.click(float(body.get("x") or 0), float(body.get("y") or 0),
+                             button=_browser_input_button(body.get("button")))
+        elif action == "move":
+            page.mouse.move(float(body.get("x") or 0), float(body.get("y") or 0))
+        elif action == "key":
+            page.keyboard.press(str(body.get("key") or "")[:40])
+        elif action == "type":
+            page.keyboard.type(str(body.get("text") or "")[:4096])
+        elif action == "scroll":
+            page.mouse.wheel(0, float(body.get("deltaY") or 0))
+        return {"ok": True}
+
+    try:
+        return b.call(apply)
+    except Exception as e:  # noqa: BLE001 - a closed page / driver hiccup is a failed input, not a 500
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"}
+
+
 @app.get("/api/engagements/{engagement_id}/browser/frame")
 def browser_frame(engagement_id: str, since: int = 0):
     """The newest frame as a JPEG, or 204 when there is nothing newer than `since`.
