@@ -131,6 +131,37 @@ class BrokerEmitsEventsTest(unittest.TestCase):
         self.assertNotIn("tool_call_started", kinds)
         self.assertNotIn("artifact_stored", kinds)
 
+    def test_a_wave_worker_is_named_as_the_actor_not_its_session(self):
+        """Worker attribution (§6.3.1). A wave names its workers w0, w1, ... and tags the thread
+        with emit.set_current_worker; the session id is a different namespace entirely. Emitting
+        the session id makes every flow edge and every rail row for a wave worker fall back to
+        the anonymous pool, because no such worker is in the roster — the surfaces go blank for
+        exactly the runs they exist to show."""
+        from agent.engagement import emit as event_emit
+
+        event_emit.set_current_worker("w3")
+        self.addCleanup(event_emit.set_current_worker, None)
+        broker = self._broker(allowed={"knowledge_search"})
+        broker.dispatch(self._request(), executor=lambda p, a: {"results": ["hit"]})
+
+        by_kind = {e["kind"]: e["payload"] for e in self._events()}
+        self.assertEqual(by_kind["tool_call_started"]["worker"], "w3")
+        self.assertEqual(by_kind["tool_call_finished"]["worker"], "w3")
+        self.assertEqual(by_kind["artifact_stored"]["worker"], "w3")
+
+    def test_outside_a_wave_the_session_is_still_the_actor(self):
+        """The other direction: the chat/assistant path sets no worker, so the session id must
+        still be named. A fix that only ever read the worker context would leave single-session
+        runs with no actor at all."""
+        from agent.engagement import emit as event_emit
+
+        event_emit.set_current_worker(None)
+        broker = self._broker(allowed={"knowledge_search"})
+        broker.dispatch(self._request(), executor=lambda p, a: {"results": ["hit"]})
+        by_kind = {e["kind"]: e["payload"] for e in self._events()}
+        self.assertEqual(by_kind["tool_call_started"]["worker"], "s1")
+        self.assertEqual(by_kind["artifact_stored"]["worker"], "s1")
+
 
 if __name__ == "__main__":
     unittest.main()

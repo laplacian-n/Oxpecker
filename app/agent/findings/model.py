@@ -211,6 +211,14 @@ class FindingsStore:
         # keep this leaf model module free of an engagement-package import at module load.
         from ..engagement import emit as event_emit
         event_emit.emit(self.engagement_id, "finding_recorded", {"finding_id": finding.finding_id})
+        # §4.2 artifact_stored / §6.3.1 — where this worker's output went, which is the edge the
+        # flow view draws into the findings node. finding_recorded only moves the tab's count; it
+        # names no store, so it cannot be that edge. The artifact label is the finding's title
+        # because that is what a reader recognises on the edge; the ref is the id, for the lookup.
+        event_emit.emit(self.engagement_id, "artifact_stored",
+                        {"worker": event_emit.current_worker() or finding.session_id,
+                         "artifact": finding.title, "store": "findings",
+                         "ref": finding.finding_id})
         return finding
 
     def list_all(self) -> list[Finding]:

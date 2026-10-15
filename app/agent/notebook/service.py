@@ -55,6 +55,16 @@ class NotebookService:
         # §4.2 note_added — the notebook tab's count and auto-refetch react to this.
         event_emit.emit(self.engagement_id, "note_added",
                         {"note_id": r.get("note_id"), "category": kwargs.get("category")})
+        # §4.2 artifact_stored / §6.3.1 — the same write seen as "a worker's output landed here",
+        # which is what the flow view draws the note -> notebook edge from. note_added cannot do
+        # it: it carries no store, so the edge would have no target. Attributed to the worker this
+        # thread runs as; None on the assistant path, where the flow view falls back to the pool
+        # node rather than inventing an actor. Only *this* method, not add_operator_note — an
+        # operator's own note is not agent output, and drawing it as one would show work no worker
+        # did (the inverse of the §6.3.1 signal).
+        event_emit.emit(self.engagement_id, "artifact_stored",
+                        {"worker": event_emit.current_worker(), "artifact": f"N-{r.get('ordinal')}",
+                         "store": "notebook", "ref": r.get("note_id")})
         # a 'technique' note is reusable by definition — overflow it into the global KB so a
         # later engagement can recall it (docs/working-notebook-spec.md §7).
         if kwargs.get("category") == Category.TECHNIQUE.value:

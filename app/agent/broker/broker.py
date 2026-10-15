@@ -95,6 +95,20 @@ def _verification_disabled(arguments: dict) -> bool:
     return not value
 
 
+def _actor(request) -> str:
+    """Who the §4.2 stream names as the actor for this dispatch.
+
+    A wave names its workers `w0`, `w1`, ... and tags the worker's thread with
+    `emit.set_current_worker` (pipeline/wave.py); the session id is a different namespace and is
+    never in the worker roster. Naming the session for a wave worker's call therefore sends every
+    flow edge and every rail row to the anonymous pool fallback — the surfaces go blank for
+    exactly the runs they exist to show. The worker context wins where there is one; the
+    assistant/chat path sets none, so there the session id is still the actor. Same rule as
+    loop.py's tool-call emission, so the two levels agree on who acted.
+    """
+    return event_emit.current_worker() or request.session_id
+
+
 def _argument_digest(arguments: dict) -> str:
     """A short, stable digest of a tool call's arguments for the event stream (§4.2's
     "argument digest"). A hash, not the arguments themselves — so the flow view can show that two
@@ -273,14 +287,14 @@ class Broker:
             event_emit.emit(
                 request.engagement_id,
                 "tool_call_finished",
-                {"call_id": request.action_id, "worker": request.session_id, "tool": request.tool,
+                {"call_id": request.action_id, "worker": _actor(request), "tool": request.tool,
                  "latency": response.duration_ms, "status": response.status},
             )
         if response.status == "succeeded" and response.output:
             event_emit.emit(
                 request.engagement_id,
                 "artifact_stored",
-                {"worker": request.session_id, "artifact": request.tool, "store": "evidence",
+                {"worker": _actor(request), "artifact": request.tool, "store": "evidence",
                  "ref": evidence_digest},
             )
         return response
@@ -515,7 +529,7 @@ class Broker:
             "tool_call_started",
             {
                 "call_id": request.action_id,
-                "worker": request.session_id,
+                "worker": _actor(request),
                 "tool": request.tool,
                 "argument_digest": _argument_digest(request.arguments),
             },
