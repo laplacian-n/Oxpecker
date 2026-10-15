@@ -160,17 +160,21 @@ def main() -> int:
         class Broken:
             def record(self, **kw):
                 raise OSError("disk full")
+        # Subscribe BEFORE the action: push() fans out to current subscribers, so the stream this
+        # drains has to be open when the audit_error is pushed (a session nobody is watching drops
+        # live events rather than buffering them).
+        q = s4.subscribe()
         with patch.object(d, "_audit_for", lambda sid: Broken()):
             result, _ = d._audited_run_tool("record_note",
                                             {"text": "n", "category": "observation"}, s4,
                                             turn_index=0, action_rationale="")
         check("the turn still completes", result.get("ok") is not None, str(result)[:90])
-        # Session.events is a Queue, so drain it rather than iterating. Asserting this properly
-        # matters: a missing entry is indistinguishable from an action that never happened, so
-        # "the write failed" has to reach the operator and not only the server log.
+        # Drain this subscriber's queue. Asserting this properly matters: a missing entry is
+        # indistinguishable from an action that never happened, so "the write failed" has to reach
+        # the operator and not only the server log.
         drained = []
-        while not s4.events.empty():
-            drained.append(s4.events.get_nowait())
+        while not q.empty():
+            drained.append(q.get_nowait())
         check("the operator is told the entry was lost",
               any(ev.get("type") == "audit_error" for ev in drained),
               str([ev.get("type") for ev in drained]))
