@@ -19,6 +19,7 @@ from unittest.mock import patch
 from .. import config
 from ..broker.broker import Broker
 from ..engagement.store import EngagementStore
+from ..isolated_state import isolated_state
 from .executor import (
     ExecutionOutcome,
     TASK_EXECUTORS,
@@ -62,6 +63,15 @@ class TestExecutorBase(unittest.TestCase):
             self.skipTest("Juice Shop lab container not reachable at 127.0.0.1:3000")
         self.tmp = Path(tempfile.mkdtemp(prefix="pipeline-executor-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # Dispatching through the broker writes the autonomous session's audit, idempotency and
+        # taint under config.STATE_DIR, keyed by session_id. Left unisolated the run leaked
+        # executor-test-* and session-autonomous-test-* files into the operator's real agent/state.
+        # Only STATE_DIR is redirected: ENGAGEMENT_DIR holds the lab engagement the broker reads for
+        # scope and stays real (read-only here). The broker is constructed below, inside the
+        # isolation, so its AuditLog binds the temp AUDIT_DIR at construction.
+        self._iso = isolated_state(self.tmp / "state")
+        self._iso.__enter__()
+        self.addCleanup(self._iso.__exit__, None, None, None)
         self.store = EngagementStore(self.tmp / "eng-1")
         self.broker = Broker(engagement_dir=config.ENGAGEMENT_DIR, confirm_fn=lambda p: True)
         self.session_id = f"executor-test-{time.time_ns()}"
