@@ -50,14 +50,55 @@ const STORE_NODE: Record<string, string> = {
   findings: "findings",
 };
 
+// The model column (§6.3.1 model economics): one node per model in use, stacked on the left of the
+// strategist, which the models drive.
+const MODEL_X = -220;
+const MODEL_STEP = 90;
+
+// The price per million tokens a model is actually costing this engagement. The roster carries
+// spend and token counts but no list price, so this is the realized blended rate — cost divided by
+// prompt + completion tokens — NOT a quoted list price: it moves with the prompt/completion mix and
+// with any caching or discount the provider applied. Null when there are no tokens yet, because a
+// rate over zero tokens is undefined.
+export function effectivePricePerMtok(entry: {
+  cost: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}): number | null {
+  const tokens = entry.prompt_tokens + entry.completion_tokens;
+  if (!(tokens > 0)) return null;
+  return Math.round((entry.cost / (tokens / 1_000_000)) * 1e4) / 1e4;
+}
+
 export function buildGraph(projection: Projection): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const nodes: FlowNode[] = [...FIXED];
   const edges: FlowEdge[] = [...STATIC_EDGES];
 
+  // A worker counts as live until it finishes (a snapshot may carry no status at all, which is live).
+  const liveWorkers = Object.values(projection.workers).filter((w) => w.status !== "finished");
+
+  // One node per model in the roster, labeled with what it is for, what it costs per million
+  // tokens (realized, see effectivePricePerMtok) and what it has spent so far. Its wire to the
+  // strategist animates while any worker is live — the models are working for those workers.
+  Object.values(projection.modelRoster).forEach((m, i) => {
+    const mid = `model-${m.model_id}`;
+    const price = effectivePricePerMtok(m);
+    const priceText = price === null ? "—/Mtok" : `$${price.toFixed(4)}/Mtok`;
+    nodes.push({
+      id: mid,
+      position: { x: MODEL_X, y: i * MODEL_STEP },
+      data: {
+        label: String(m.model_id),
+        kind: "model",
+        detail: [m.role ?? null, priceText, `spent $${m.cost.toFixed(4)}`].filter(Boolean).join("  "),
+      },
+    });
+    edges.push({ id: `e-${mid}-strat`, source: mid, target: "strategist", animated: liveWorkers.length > 0 });
+  });
+
   // A live instance per worker, laid out in a row beneath the pool. Each shows the tool it is
   // calling right now (from the in-flight set) and the hypothesis it is working on.
-  const workers = Object.values(projection.workers).filter((w) => w.status !== "finished");
-  workers.forEach((w, i) => {
+  liveWorkers.forEach((w, i) => {
     const wid = `worker-${w.worker_id}`;
     const currentTool = Object.values(projection.toolCalls).find((c) => String(c.worker) === String(w.worker_id));
     nodes.push({

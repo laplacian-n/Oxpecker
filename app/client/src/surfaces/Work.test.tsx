@@ -5,11 +5,29 @@
 
 import { act } from "react";
 import { render, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { Work } from "./Work";
 import { EngagementSubscription } from "../subscription";
+import { emptyProjection, Projection } from "../projection";
 
-afterEach(cleanup);
+// A test can hand Work a hand-built projection instead of the streamed one. Unset, the real
+// subscription projection is used, so every other test is unaffected.
+const override = vi.hoisted(() => ({ projection: null as Projection | null }));
+vi.mock("../useEngagement", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../useEngagement")>();
+  return {
+    ...actual,
+    useEngagement: (sub: EngagementSubscription) => {
+      const streamed = actual.useEngagement(sub);
+      return override.projection ?? streamed;
+    },
+  };
+});
+
+afterEach(() => {
+  cleanup();
+  override.projection = null;
+});
 beforeEach(() => {
   try {
     localStorage.clear();
@@ -98,6 +116,40 @@ test("a node a running worker is on glows, live from the stream", async () => {
     source.push("worker_spawned", { worker_id: "w1", hypothesis: "3" });
   });
   expect(screen.getByText(/SQLi/).closest("li")!.getAttribute("data-glowing")).toBe("true");
+});
+
+test("a running worker's node glows on the tree; a finished worker's node and an idle node do not, and the glow survives a tab switch", async () => {
+  const projection = emptyProjection();
+  projection.workers = {
+    w1: { worker_id: "w1", status: "running", hypothesis: "3" },
+    w2: { worker_id: "w2", status: "finished", hypothesis: "5" },
+  };
+  projection.graphNodes = { "3": { node: "3", status: "testing" }, "5": { node: "5", status: "open" } };
+  override.projection = projection;
+
+  const sub = await startedSub();
+  const state = {
+    graphCalls: 0,
+    nodes: () => [
+      { ordinal: 3, title: "SQLi on /login", status: "testing" },
+      { ordinal: 5, title: "XSS on /search", status: "open" },
+      { ordinal: 7, title: "IDOR on /api", status: "open" },
+    ],
+  };
+  const screen = render(<Work subscription={sub} engagementId="eng1" apiOptions={{ fetchImpl: makeApiFetch(state) }} />);
+  await waitFor(() => screen.getByText(/SQLi on/));
+
+  const glowOf = (text: RegExp) => screen.getByText(text).closest("li")!.getAttribute("data-glowing");
+  expect(glowOf(/SQLi on/)).toBe("true");
+  expect(glowOf(/XSS on/)).toBe("false");
+  expect(glowOf(/IDOR on/)).toBe("false");
+
+  // Switching away and back remounts the tree; the glow is derived from the projection, so it returns.
+  fireEvent.click(screen.getByTestId("tab-notebook"));
+  await waitFor(() => screen.getByTestId("notebook"));
+  fireEvent.click(screen.getByTestId("tab-tree"));
+  await waitFor(() => screen.getByText(/SQLi on/));
+  expect(glowOf(/SQLi on/)).toBe("true");
 });
 
 test("the tree layout is frozen while dragging: a change queues and lands on release", async () => {

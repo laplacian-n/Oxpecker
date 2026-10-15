@@ -123,7 +123,7 @@ function WorkerSurface() {
       <TierNav subscription={subscription} engagementId={engagementId} />
       <main>
         <Gated subscription={subscription} gate="worker">
-          <WorkerRail subscription={subscription} initialWorkerId={workerId === "-" ? undefined : workerId} />
+          <WorkerRail subscription={subscription} engagementId={engagementId} initialWorkerId={workerId === "-" ? undefined : workerId} />
         </Gated>
       </main>
     </div>

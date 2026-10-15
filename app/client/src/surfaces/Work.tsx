@@ -17,6 +17,20 @@ import { api, ApiOptions } from "../api";
 type Tab = "tree" | "notebook" | "findings";
 const TAB_KEY = "oxpecker.work.tab";
 
+// The glow is CSS, not JS: the browser runs the pulse on its own, so the tree re-renders only when
+// the marking changes, never per frame. The color is the accent token from index.css, so a reskin
+// changes it in one place. Reduced motion gets a still outline instead of the pulse.
+const GLOW_CSS = `
+@keyframes work-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+li[data-glowing="true"] { animation: work-glow 1.6s ease-in-out infinite; border-radius: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  li[data-glowing="true"] { animation: none; outline: 1px solid var(--accent); }
+}
+`;
+
 function rememberedTab(): Tab {
   try {
     const t = localStorage.getItem(TAB_KEY);
@@ -85,7 +99,8 @@ export function Work({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projection.counts.finding_recorded]);
 
-  const glow = glowingHypotheses(projection);
+  // The glow set: node ids a running worker is on right now (finished workers drop out).
+  const glowing = glowingHypotheses(projection);
 
   function selectTab(t: Tab) {
     setTab(t);
@@ -122,13 +137,15 @@ export function Work({
             }
           }}
         >
+          <style>{GLOW_CSS}</style>
           {pending > 0 && <div data-testid="pending-marker">{pending} new waiting</div>}
           {/* Keyed by node identity, never position (§2.1 rule 4). */}
           <ul>
             {(graph.nodes ?? []).map((n: any) => {
               const id = String(n.ordinal ?? n.node ?? n.hypothesis_id);
+              const isGlowing = glowing.has(id);
               return (
-                <li key={id} data-node={id} data-glowing={glow.has(id)} className={glow.has(id) ? "glow" : ""}>
+                <li key={id} data-node={id} data-glowing={isGlowing ? "true" : "false"} className={isGlowing ? "glow" : ""}>
                   {n.title ?? n.label ?? `H-${id}`} — {n.status ?? ""}
                 </li>
               );

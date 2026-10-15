@@ -4,7 +4,7 @@
 // visible — is asserted directly.
 
 import { expect, test } from "vitest";
-import { buildGraph } from "./graph";
+import { buildGraph, effectivePricePerMtok } from "./graph";
 import { emptyProjection, applyEvent, Projection } from "../projection";
 
 function withEvents(...events: { kind: string; payload: Record<string, unknown> }[]): Projection {
@@ -57,4 +57,54 @@ test("every stored artifact draws an edge to the store it landed in (§6.3.1)", 
   // Sourced from the producing worker, so a node whose output goes nowhere is the one with no
   // outgoing artifact edge — the §6.3.1 signal.
   expect(artifactEdges.every((e) => e.source === "worker-w1")).toBe(true);
+});
+
+// The model economics block (§6.3.1): models come from projection.modelRoster and nothing else.
+function withRoster(roster: Projection["modelRoster"], workers: { worker_id: string; status?: string }[] = []): Projection {
+  return { ...emptyProjection(), modelRoster: roster, workers: Object.fromEntries(workers.map((w) => [w.worker_id, w])) };
+}
+
+test("a model in the roster produces a model node carrying role and spend", () => {
+  const p = withRoster({
+    "gpt-x": { model_id: "gpt-x", role: "strategist", calls: 3, prompt_tokens: 800_000, completion_tokens: 200_000, cost: 0.5 },
+  });
+  const { nodes, edges } = buildGraph(p);
+  const node = nodes.find((n) => n.id === "model-gpt-x");
+  expect(node).toBeDefined();
+  expect(node!.data.kind).toBe("model");
+  expect(node!.data.label).toBe("gpt-x");
+  expect(node!.data.detail).toContain("strategist");
+  expect(node!.data.detail).toContain("spent $0.5000");
+  // Placed in the left column, and wired into the strategist.
+  expect(node!.position.x).toBe(-220);
+  expect(edges.find((e) => e.id === "e-model-gpt-x-strat")).toMatchObject({ source: "model-gpt-x", target: "strategist" });
+});
+
+test("effective price is cost over million tokens, and shows a dash at zero tokens", () => {
+  // 0.5 spent over 1,000,000 tokens (800k prompt + 200k completion): $0.5 per Mtok.
+  expect(
+    effectivePricePerMtok({ cost: 0.5, prompt_tokens: 800_000, completion_tokens: 200_000 }),
+  ).toBe(0.5);
+  // Rounded to 4 decimals: 0.001 over 3 tokens = 333.3333... per Mtok.
+  expect(effectivePricePerMtok({ cost: 0.001, prompt_tokens: 2, completion_tokens: 1 })).toBe(333.3333);
+  expect(effectivePricePerMtok({ cost: 0, prompt_tokens: 0, completion_tokens: 0 })).toBeNull();
+
+  const withTokens = buildGraph(
+    withRoster({ m: { model_id: "m", calls: 1, prompt_tokens: 800_000, completion_tokens: 200_000, cost: 0.5 } }),
+  ).nodes.find((n) => n.id === "model-m")!;
+  expect(withTokens.data.detail).toContain("$0.5000/Mtok");
+
+  const noTokens = buildGraph(
+    withRoster({ m: { model_id: "m", calls: 0, prompt_tokens: 0, completion_tokens: 0, cost: 0 } }),
+  ).nodes.find((n) => n.id === "model-m")!;
+  expect(noTokens.data.detail).toContain("—/Mtok");
+  expect(noTokens.data.detail).not.toContain("$NaN");
+});
+
+test("model wires animate only while a worker is live", () => {
+  const roster = { m: { model_id: "m", calls: 1, prompt_tokens: 1, completion_tokens: 1, cost: 0 } };
+  const idle = buildGraph(withRoster(roster, [{ worker_id: "w1", status: "finished" }]));
+  expect(idle.edges.find((e) => e.id === "e-model-m-strat")!.animated).toBe(false);
+  const live = buildGraph(withRoster(roster, [{ worker_id: "w1", status: "running" }]));
+  expect(live.edges.find((e) => e.id === "e-model-m-strat")!.animated).toBe(true);
 });

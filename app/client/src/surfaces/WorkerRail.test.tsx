@@ -6,7 +6,7 @@
 
 import { act } from "react";
 import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { WorkerRail } from "./WorkerRail";
 import { EngagementSubscription } from "../subscription";
 
@@ -77,4 +77,59 @@ test("scrubbing back shows a distinct past frame with the worker pre-output, and
   fireEvent.pointerUp(scrubber);
   await waitFor(() => expect(screen.getByTestId("activity-frame").getAttribute("data-past")).toBe("false"));
   expect(screen.getByTestId("worker-artifacts").textContent).toContain("resp.har");
+});
+
+async function bareRail(props: { initialWorkerId?: string; engagementId?: string } = {}) {
+  const sub = new EngagementSubscription({
+    engagementId: "eng1",
+    fetchImpl: (async () => ({ ok: true, status: 200, json: async () => emptySnap })) as unknown as typeof fetch,
+    eventSourceFactory: (url: string) => new FakeEventSource(url),
+  });
+  await act(async () => {
+    await sub.start();
+  });
+  const src = FakeEventSource.last!;
+  const screen = render(<WorkerRail subscription={sub} {...props} />);
+  return { screen, src };
+}
+
+test("the rail lists every worker, running first, with the in-flight tool shown; selecting one shows its activity", async () => {
+  const { screen, src } = await bareRail({ engagementId: "eng1" });
+  // The finished worker was spawned first, so only the running-first ordering can put w_run on top.
+  await act(async () => {
+    src.push("worker_spawned", { worker_id: "w_done", method: "xss", hypothesis: "H-1" });
+    src.push("worker_finished", { worker_id: "w_done" });
+    src.push("worker_spawned", { worker_id: "w_run", method: "sqli", hypothesis: "H-2" });
+    src.push("tool_call_started", { call_id: "c9", worker: "w_run", tool: "http_request", argument_digest: "GET /login" });
+  });
+
+  const rows = screen.getAllByTestId("worker-row");
+  expect(rows.map((r) => r.getAttribute("data-worker"))).toEqual(["w_run", "w_done"]);
+  expect(rows[0].getAttribute("data-status")).toBe("running");
+  expect(rows[1].getAttribute("data-status")).toBe("finished");
+  expect(screen.getAllByTestId("worker-row-tool")[0].textContent).toContain("http_request");
+
+  // Selecting the running worker renders its detail; the first row is selected by default.
+  fireEvent.click(rows[1]);
+  const activity = screen.getByTestId("worker-activity");
+  expect(activity.getAttribute("data-worker")).toBe("w_done");
+  fireEvent.click(rows[0]);
+  expect(screen.getByTestId("worker-activity").getAttribute("data-worker")).toBe("w_run");
+  expect(screen.getByTestId("worker-state").getAttribute("data-state")).toBe("running");
+  expect(screen.getByTestId("worker-current-tool").textContent).toContain("http_request");
+  expect(screen.getByTestId("tool-digest").textContent).toContain("GET /login");
+});
+
+test("pop out opens the same worker route in its own window", async () => {
+  const open = vi.spyOn(window, "open").mockImplementation(() => null);
+  try {
+    const { screen, src } = await bareRail({ engagementId: "eng1" });
+    await act(async () => {
+      src.push("worker_spawned", { worker_id: "w7", method: "idor" });
+    });
+    fireEvent.click(screen.getByTestId("worker-pop-out"));
+    expect(open).toHaveBeenCalledWith(`${window.location.pathname}#/eng1/worker/w7`, "_blank", "width=720,height=800");
+  } finally {
+    open.mockRestore();
+  }
 });
