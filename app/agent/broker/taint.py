@@ -32,7 +32,10 @@ SAFE_WHILE_TAINTED = {"passive_recon"}  # action classes still allowed without e
 # is untainted, through the same jar. `write_file`/`run_command` join this set once the workspace
 # is engagement-shared too; today each session gets a fresh temp workspace, so their taint is
 # genuinely session-local and must not over-escalate.
-ENGAGEMENT_SHARED_TAINT_SOURCES = {"browser_fetch"}
+# browser_navigate/browser_click drive the SAME persistent per-engagement browser (and its one
+# profile) as browser_fetch, so content they pull in taints the whole engagement, not one session —
+# a sibling worker sharing that profile has handled it too.
+ENGAGEMENT_SHARED_TAINT_SOURCES = {"browser_fetch", "browser_navigate", "browser_click"}
 
 
 class TaintStore:

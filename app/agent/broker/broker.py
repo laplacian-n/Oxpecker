@@ -59,6 +59,12 @@ TOOL_ACTION_CLASS = {
     # connect scan, so an RoE must opt in explicitly rather than inheriting this from a broader
     # class it wasn't written with in mind.
     "browser_fetch": "browser_recon",
+    # The agent driving the persistent per-engagement browser — navigate to a URL, click on the
+    # page. Same capability family as browser_fetch (full JS against the target), so the same class
+    # and the same explicit RoE opt-in; it is not folded into passive_recon. The operator's own
+    # clicking/typing is a different, un-brokered path (the /browser/input endpoint).
+    "browser_navigate": "browser_recon",
+    "browser_click": "browser_recon",
 }
 
 # tool_name -> action_class requiring human sign-off before execution, beyond just being an

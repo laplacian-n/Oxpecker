@@ -80,7 +80,8 @@ def main() -> int:
         # asserts the general rule (anything the broker classifies must be mediated).
         check("the outward-facing tools are mediated",
               d._BROKER_MEDIATED == {"http_request", "port_discovery", "knowledge_search",
-                                     "http_recon", "browser_fetch", "knowledge_fetch"},
+                                     "http_recon", "browser_fetch", "knowledge_fetch",
+                                     "browser_navigate", "browser_click"},
               str(d._BROKER_MEDIATED))
         check("run_command is not mediated", "run_command" not in d._BROKER_MEDIATED)
         check("and the broker does not claim an action class for it",

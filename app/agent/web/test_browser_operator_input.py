@@ -101,12 +101,15 @@ class BrowserOperatorInputTest(unittest.TestCase):
             if fn and fn.get("name"):
                 names.add(fn["name"])
         names |= set(dev_server._TOOL_NAME_ALIASES)
-        # The operator-input verbs and this handler's name must not be callable as a model tool.
-        forbidden = {"browser_input", *(f"browser_{a}" for a in dev_server._BROWSER_INPUT_ACTIONS),
-                     "mouse_click", "key_press", "type_text", "page_mouse", "page_keyboard"}
+        # The OPERATOR-INPUT endpoint handler (browser_input) and raw page-input verbs must not be
+        # callable as a model tool. The brokered agent tools browser_navigate/browser_click are a
+        # DIFFERENT, gated path (they go through the broker) and are intentionally present — they are
+        # not forbidden here.
+        forbidden = {"browser_input", "mouse_click", "key_press", "type_text",
+                     "page_mouse", "page_keyboard"}
         self.assertEqual(names & forbidden, set(),
                          f"a model tool reaches operator input: {names & forbidden}")
-        # And no exposed tool name hints at raw input control.
+        # And no exposed tool name hints at raw (un-brokered) input control.
         self.assertFalse([n for n in names if "mouse" in n or "keyboard" in n])
 
     # ── condition 3: the handler never consults emit.current_worker() ──

@@ -1423,6 +1423,25 @@ def _delegate_to_client(session: Session, kind: str, payload: dict) -> dict:
     return result
 
 
+def _agent_live_browser(engagement_id: str):
+    """The engagement's live browser for an AGENT tool call, as (browser, None) or (None, error).
+
+    Unlike the HTTP endpoints' `_live_browser_for` (which raises HTTPException), a tool must report
+    trouble as a result dict — a missing Chromium or an unopenable profile is a failed tool call,
+    not a 503. Scope is carried on the policy and enforced by the browser's own egress handler.
+    """
+    eng = _engagements.get(engagement_id)
+    if eng is None:
+        return None, {"ok": False, "error": "no engagement is active for this session"}
+    try:
+        from ..browser import live as _live
+        b = _live.get(engagement_id, _config.ENGAGEMENTS_ROOT / engagement_id,
+                      _scope.policy_from_engagement(eng))
+        return b, None
+    except Exception as e:  # noqa: BLE001 — no Chromium, or an unopenable profile
+        return None, {"ok": False, "error": f"the live browser is unavailable: {type(e).__name__}: {e}"}
+
+
 def _run_tool(name: str, args: dict, session: Session) -> dict:
     """Execute a tool call. Returns the tool result dict."""
     name = _TOOL_NAME_ALIASES.get(name, name)
@@ -1711,6 +1730,57 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         except Exception as e:  # noqa: BLE001 — a missing browser or an out-of-scope url surfaces here
             return {"ok": False, "error": f"browser_fetch unavailable: {type(e).__name__}: {e}"}
 
+    elif name == "browser_navigate":
+        # The AGENT driving the persistent per-engagement browser (NOT the operator — that is the
+        # un-brokered /browser/input endpoint). Broker-mediated and classified browser_recon, and
+        # scope-checked here the same way http_recon is; the live browser's own egress handler then
+        # refuses an out-of-scope URL mid-navigation, whoever asked. The page text comes back so the
+        # agent can read what it landed on (and so the injection scanner sees it — browser_navigate
+        # is an engagement-shared taint source).
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "browser_navigate needs a url"}
+        eng = _engagements.get(session.engagement_id)
+        pre = _scope.check_url(url, eng)
+        if not pre.allowed:
+            return pre.as_tool_error()
+        b, err = _agent_live_browser(session.engagement_id)
+        if err:
+            return err
+
+        def _go(page):
+            page.goto(url, timeout=20000)
+            return {"url": page.url, "title": page.title(), "text": page.inner_text("body")[:4000]}
+        try:
+            return {"ok": True, **b.call(_go)}
+        except Exception as e:  # noqa: BLE001 — an out-of-scope nav arrives here as a navigation error
+            msg = str(e).splitlines()[0][:300]
+            out = {"ok": False, "error": f"{type(e).__name__}: {msg}"}
+            if "scope" in msg.lower() or "ERR_BLOCKED" in msg or "net::ERR" in msg:
+                out["scope_rule"] = "not_in_scope"  # let the broker record a denial
+            return out
+
+    elif name == "browser_click":
+        # The agent clicking on the page it navigated to — staying on the same already-in-scope page;
+        # a click that triggers a cross-origin navigation is refused by the browser's egress handler.
+        try:
+            x = int(args.get("x"))
+            y = int(args.get("y"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "browser_click needs integer x and y (pixels on the page)"}
+        b, err = _agent_live_browser(session.engagement_id)
+        if err:
+            return err
+
+        def _click(page):
+            page.mouse.click(x, y)
+            page.wait_for_timeout(300)  # let any resulting navigation/paint settle
+            return {"url": page.url, "title": page.title(), "text": page.inner_text("body")[:4000]}
+        try:
+            return {"ok": True, **b.call(_click)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"}
+
     elif name == "record_hypothesis":
         eng_id = session.engagement_id  # one graph per engagement (§3.1), not per chat session
         _graph_ensure(eng_id)
@@ -1892,7 +1962,7 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
 # run_command is deliberately absent from broker.TOOL_ACTION_CLASS. read/write_file and the
 # record_* tools stay local and in-memory.
 _BROKER_MEDIATED = {"http_request", "port_discovery", "knowledge_search", "http_recon",
-                    "knowledge_fetch", "browser_fetch"}
+                    "knowledge_fetch", "browser_fetch", "browser_navigate", "browser_click"}
 
 # Output that matches an injection pattern taints the session — except from the local knowledge
 # index, which mirrors loop.py's INJECTION_SCAN_EXEMPT_TOOLS ("security_reference_search" is the
@@ -2201,10 +2271,14 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
         # Without it, injection screening in this runtime was advisory: it raised a flag in the
         # UI and changed nothing about what the agent was then allowed to do.
         try:
-            _taint.TaintStore(session.session_id).mark(
+            # shared=True for the engagement-shared sources (the live browser's one profile, §14.1
+            # C): content flagged from browser_fetch/navigate/click taints the whole engagement, so
+            # a sibling worker sharing that profile is scrutinised too — not just this session.
+            _taint.TaintStore(session.session_id, engagement_id=session.engagement_id).mark(
                 reason=", ".join(scan.reasons) or f"flagged output from {canonical}",
                 verdict=scan.verdict,
                 source=canonical,
+                shared=canonical in _taint.ENGAGEMENT_SHARED_TAINT_SOURCES,
             )
             tainted_by_this_result = True
         except Exception as e:
@@ -2384,7 +2458,34 @@ _BROWSER_FETCH_SCHEMA = {
 # knowledge_fetch + browser_fetch reach the network/target, so they are gated like the other
 # security tools. security_reference_search (a local corpus read) and osint_record (a local filing
 # write) touch no asset, so they live in the always-available base set alongside knowledge_search.
-SECURITY_TOOL_SCHEMAS += [_KNOWLEDGE_FETCH_SCHEMA, _BROWSER_FETCH_SCHEMA]
+_BROWSER_NAVIGATE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "browser_navigate",
+        "description": ("Drive the PERSISTENT per-engagement browser to an in-scope URL and read the "
+                        "page (url, title, visible text). Unlike browser_fetch (a fresh headless "
+                        "render), this keeps cookies/sign-ins across calls, so you can log in once "
+                        "and keep going. In scope, broker-mediated; the operator watches it live."),
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string", "description": "the in-scope URL to navigate to"},
+        }, "required": ["url"]},
+    },
+}
+_BROWSER_CLICK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "browser_click",
+        "description": ("Click at a pixel position on the current page of the persistent browser, "
+                        "then read the resulting page (url, title, text). Use the coordinates from "
+                        "what you saw in the last browser_navigate/click result."),
+        "parameters": {"type": "object", "properties": {
+            "x": {"type": "integer", "description": "x pixel on the page"},
+            "y": {"type": "integer", "description": "y pixel on the page"},
+        }, "required": ["x", "y"]},
+    },
+}
+SECURITY_TOOL_SCHEMAS += [_KNOWLEDGE_FETCH_SCHEMA, _BROWSER_FETCH_SCHEMA,
+                          _BROWSER_NAVIGATE_SCHEMA, _BROWSER_CLICK_SCHEMA]
 TOOL_SCHEMAS += [_OSINT_RECORD_SCHEMA, *_KNOWLEDGE_RAG_SCHEMAS]  # security_reference_search
 
 
