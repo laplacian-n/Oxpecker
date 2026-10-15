@@ -62,7 +62,7 @@ rules they must follow — is recorded in [docs/TOOLING_ROADMAP.md](docs/TOOLING
 The [`app/`](app/) directory contains the **runnable, self-hosted desktop version** of Oxpecker — a packaged Electron application that drives a **local model** (Qwen 4B via llama.cpp, CUDA) end-to-end on a single machine, with a built-in web UI, a live hypothesis graph, a notebook, a findings tracker, and a memory-mapped 547K-chunk RAG. It is the practical, installable counterpart to the research pipeline below: the training work produces the model; `app/` is where the agent is actually operated against authorized lab targets.
 
 - **Backend** — FastAPI agent server (`app/agent/web/dev_server.py`): broker-mediated network tools, sandboxed command execution, a hash-chained audit entry per tool call, a destructive-command denylist, structured HTTP tooling, auto-compaction, and **per-session** hypothesis graph / notebook / findings. The remaining gaps are listed below.
-- **Desktop shell** — Electron + electron-builder with GitHub auto-update (`app/electron/`); one-click installer, no manual dependency setup.
+- **Desktop shell** — Electron + electron-builder with GitHub auto-update (`app/electron/`); one-click installer, no manual dependency setup. Updates download automatically; an on-demand **Check for updates** button (and Help → Check for Updates, `Ctrl+U`) reports whether a newer version is available.
 - **MCP servers** — a dev/debug MCP and a control MCP for driving the live agent (`app/.mcp.json`).
 - **Install** — download the latest `Oxpecker-Setup-*.exe` from [Releases](../../releases), or run from source per [`app/README.md`](app/README.md).
 

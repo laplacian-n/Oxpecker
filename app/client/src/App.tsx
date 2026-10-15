@@ -9,6 +9,7 @@ import { Work } from "./surfaces/Work";
 import { WorkerRail } from "./surfaces/WorkerRail";
 import { Browser } from "./surfaces/Browser";
 import { Landing } from "./surfaces/Landing";
+import { UpdateButton } from "./UpdateButton";
 import { sessionOptions } from "./session";
 
 // HashRouter, not BrowserRouter: the built client is loaded from a file:// URL by the Electron
@@ -71,7 +72,10 @@ function TierNav({ subscription, engagementId }: { subscription: EngagementSubsc
           </NavLink>
         );
       })}
-      <button onClick={tearOff}>Tear off ⧉</button>
+      <span className="nav-right">
+        <UpdateButton />
+        <button onClick={tearOff}>Tear off ⧉</button>
+      </span>
     </nav>
   );
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiOptions } from "../api";
+import { UpdateButton } from "../UpdateButton";
 import { getApiKey, setApiKey, getBaseUrl, setBaseUrl, sessionOptions } from "../session";
 
 // The landing (CLIENT_UI_DESIGN.md): where the operator authenticates and chooses an engagement.
@@ -51,7 +52,10 @@ export function Landing({ apiImpl = api }: { apiImpl?: typeof api }) {
 
   return (
     <div className="landing" data-testid="landing">
-      <h1>Oxpecker</h1>
+      <div className="landing-head">
+        <h1>Oxpecker</h1>
+        <UpdateButton />
+      </div>
       <form onSubmit={connect} className="landing-connect">
         <label>
           API key

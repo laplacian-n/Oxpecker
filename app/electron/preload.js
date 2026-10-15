@@ -20,4 +20,9 @@ contextBridge.exposeInMainWorld('oxpecker', {
   startClientExecutor: (serverBase, apiKey) =>
     ipcRenderer.invoke('oxpecker:start-executor', { serverBase, apiKey }),
   stopClientExecutor: () => ipcRenderer.invoke('oxpecker:stop-executor'),
+  // On-demand update check — the client's "Check for updates" button detects this method's
+  // presence to decide whether to render at all (an old shell exposes window.oxpecker but not
+  // this). Resolves a {status, version?, message} verdict; never rejects.
+  checkForUpdates: () => ipcRenderer.invoke('oxpecker:check-for-updates'),
+  appVersion: () => ipcRenderer.invoke('oxpecker:app-version'),
 });
