@@ -313,6 +313,36 @@ tools report "no executor connected"); shipping it to an installed `.exe` needs 
 (auto-update), since the executor lives in the app. Commands run on the client are **not**
 sandboxed — it is the operator's own computer, by design.
 
+## Control panel (run the server from a web page)
+
+Instead of SSHing in to hand-run `python -m agent.web.dev_server …`, a small supervisor serves an
+operator web UI over HTTPS on the LAN. It is a SEPARATE process from dev_server (a page dev_server
+served could not restart dev_server — it would be killing itself), and it:
+
+- starts / stops / restarts **dev_server** with the provider, model, host, port and RAG index you
+  pick, and the **embedding server** (CPU only) for RAG;
+- lets you paste the **OpenRouter API key** (written `0600`, never echoed back, never on a command
+  line — it reaches dev_server in the environment) and **rotate the web-UI key**;
+- shows connection/health, OpenRouter credit/usage, and the engagement spend total.
+
+Run it:
+
+```bash
+cd app && .venv/bin/python -m agent.web.control_panel --host 0.0.0.0 --port 7788
+```
+
+It prints an **admin token** and the `https://<lan-ip>:7788/` URL on startup (the token is also in
+`app/agent/state/control_panel_token.txt`). Open the URL, accept the self-signed certificate once,
+and paste the token. A self-signed cert is expected on a LAN; for a trusted cert use `mkcert` or put
+it behind a reverse proxy. `--no-tls` exists but is discouraged (the token would cross the LAN in
+the clear).
+
+Security: this process can launch servers and holds secrets, so it is only as safe as the admin
+token and the network it binds. Every action needs the token, secrets are write-only through the
+API, and process control accepts only validated parameters (provider/model/port/paths) — never a
+free-form command. The embedding server is always launched `-ngl 0` (CPU); the panel offers no GPU
+flag.
+
 ## Reaching it from Windows
 
 **Preferred — a tunnel, no code change and no open port:**
