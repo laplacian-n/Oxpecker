@@ -7,9 +7,13 @@ auto_approve grants it instead, bounded by the gates that run before approval (s
 deny, kill switch)."""
 from __future__ import annotations
 
+import shutil
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
+from ..isolated_state import isolated_state
 from .broker import Broker
 from .contracts import ActionRequest
 from .taint import TaintStore
@@ -35,6 +39,18 @@ def _run(broker, req):
 
 
 class AutoApproveTest(unittest.TestCase):
+    def setUp(self):
+        # Every dispatch writes taint, idempotency and evidence under config.STATE_DIR, keyed by
+        # the session_id. Without this the suite left auto-approve-* files in the operator's real
+        # agent/state — the .clear() in the finally blocks below covers taint but not the broker's
+        # own records. isolated_state redirects every STATE_DIR-relative path to a temp dir for the
+        # length of the test, so the whole dispatch writes there and nothing survives tearDown.
+        self._tmp = Path(tempfile.mkdtemp(prefix="auto-approve-test-state-"))
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self._iso = isolated_state(self._tmp)
+        self._iso.__enter__()
+        self.addCleanup(self._iso.__exit__, None, None, None)
+
     def test_auto_approve_grants_without_calling_confirm_fn(self):
         session_id, req = _tainted_active_request()
         try:
