@@ -29,6 +29,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install fastapi 'uvicorn[standard]' scikit-learn numpy cryptography pydantic requests jinja2 PyYAML fpdf2 'mcp<2' playwright httpx
 
+      - name: Install Chromium for the browser tests
+        # agent/browser/test_service.py asserts the browser channel's target-only-egress
+        # enforcement: the context.route gate in agent/browser/service.py that must refuse an
+        # out-of-scope navigation and an out-of-scope subresource. Without a Chromium binary
+        # those four tests skip, and they had never run on any machine, so that guarantee was
+        # unverified. --with-deps pulls the system libraries Chromium needs on a bare runner.
+        run: python -m playwright install --with-deps chromium
+
       - name: Run the agent suite
         working-directory: app
         # -t . matters: the tests import by package path, and discovering from the repo root
@@ -41,10 +49,22 @@ jobs:
           python -m unittest discover -t . -s agent -p 'test_*.py' 2>&1 | tee ../test-output.txt
 
       - name: Check that the suite was not hollowed out by skips
-        # A green run proves nothing if the tests did not execute. 60 of the 517 skip in a bare
-        # container because they need something this runner has no cheap way to provide — the
-        # Juice Shop lab (24), llama-server (15), the embedding server (7), the RAG corpus
-        # checkouts (11), SearXNG, a Chromium binary, outbound DNS.
+        # A green run proves nothing if the tests did not execute. 68 of the 1076 skip in a clean
+        # checkout because they need something this runner has no cheap way to provide — the
+        # Juice Shop lab (24), llama-server (15), the OpenRouter key that gates the live verifier
+        # tests (9), the embedding server (7), the RAG corpus checkouts (11), SearXNG (1) and
+        # outbound DNS (1). Chromium is no longer among them, because of the install step above.
+        #
+        # The ceiling stays at 70 rather than dropping to that measured 68. Nobody has measured
+        # this number ON THIS RUNNER: the DNS-gated test fetches example.com for real and this
+        # runner has outbound network, so it may run here and not there. Tightening a ceiling to
+        # a figure measured somewhere else is what made the state-leak gate below reject its own
+        # first build. Read the real number off this step's `skipped=` line and tighten it in its
+        # own commit.
+        #
+        # This ceiling is also the wrong instrument for the browser tests specifically, so they
+        # get their own step below rather than being trusted to a one-unit move in a figure that
+        # drifts with the network, a provider key and the corpus checkouts.
         #
         # So the floor is asserted rather than assumed, the same way
         # sandbox/test_seccomp_profile.py counts what it actually exercised. Raising either
@@ -65,6 +85,32 @@ jobs:
           if skipped > MAX_SKIPPED:
               sys.exit(f'{skipped} tests skipped, ceiling is {MAX_SKIPPED} — '
                        'a dependency probably stopped importing')
+          PY
+
+      - name: Check that the browser scope tests actually ran
+        working-directory: app
+        # These four are the only check anywhere that the context.route gate in
+        # agent/browser/service.py really refuses an out-of-scope navigation and an out-of-scope
+        # subresource — the browser channel's whole containment claim. Their setUpClass skips the
+        # entire class when no Chromium can be launched, which reports success over zero
+        # assertions, so "they are in the suite" is not the same as "they ran". A floor on the
+        # count plus a hard zero on skips says the second thing.
+        run: |
+          set -o pipefail
+          python -m unittest agent.browser.test_service -v 2>&1 | tee ../browser-output.txt
+          python - <<'PY'
+          import re, sys
+          out = open('../browser-output.txt').read()
+          m = re.search(r'^Ran (\d+) tests', out, re.M)
+          ran = int(m.group(1)) if m else 0
+          sk = re.search(r'skipped=(\d+)', out)
+          skipped = int(sk.group(1)) if sk else 0
+          print(f'browser tests: ran={ran} skipped={skipped}')
+          if skipped:
+              sys.exit(f'{skipped} browser test(s) skipped; the egress gate went unverified. '
+                       'Chromium is missing or unlaunchable on this runner.')
+          if ran < 4:
+              sys.exit(f'only {ran} browser tests ran, floor is 4')
           PY
 
       - name: Check that the suite did not write into the real state directory
