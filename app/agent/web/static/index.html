@@ -931,7 +931,7 @@ function renderChat(){
           <div style="max-width:1040px;margin:0 auto;padding:32px 40px 16px;display:flex;flex-direction:column;gap:18px">
             ${thread.length===0?'<div style="padding:80px 0;text-align:center;font:400 13.5px/1.6 \'Instrument Sans\';color:#8a8a8a">New session. Describe the target or task below.</div>':''}
             ${renderThread(thread)}
-            ${S.running&&(thread.length===0||thread[thread.length-1].role==='user')?renderWorkingIndicator():''}
+            ${S.running&&(thread.length===0||thread[thread.length-1].role==='user')?renderStreamingMessage():''}
           </div>
         </div>
         <div style="padding:6px 24px 20px;flex:none;position:relative">

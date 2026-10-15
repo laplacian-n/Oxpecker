@@ -3795,7 +3795,14 @@ async def stream_events(session_id: str):
             except queue.Empty:
                 await asyncio.sleep(0.06)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream",
+        # Keep intermediaries (and the browser) from buffering the stream into one late chunk —
+        # which would make token-by-token streaming arrive all at once. X-Accel-Buffering disables
+        # nginx proxy buffering; no-cache stops any caching of the event channel.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"},
+    )
 
 # ── WebSocket ──
 @app.websocket("/api/sessions/{session_id}/ws")

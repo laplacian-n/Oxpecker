@@ -70,6 +70,23 @@ class RealtimeStreamingRenderTest(unittest.TestCase):
         self.assertIn("render()", branch)
         self.assertIn("updateStreamingReasoning()", branch)
 
+    def test_the_live_area_renders_the_streaming_message_not_a_bare_spinner(self):
+        # The real bug: the transcript's live area called renderWorkingIndicator() (a spinner with no
+        # #streaming-content/#streaming-reasoning), so the streamed tokens had nowhere to land and
+        # only appeared on task_done. It must render renderStreamingMessage(), which carries those
+        # elements. renderStreamingMessage was defined but never called.
+        self.assertRegex(
+            self.html,
+            r"role==='user'\)\?renderStreamingMessage\(\)",
+            "the live streaming area must render renderStreamingMessage(), which holds the live"
+            " #streaming-content/#streaming-reasoning elements",
+        )
+        self.assertIn("renderStreamingMessage()", self.html)
+
+    def test_the_sse_endpoint_disables_proxy_buffering(self):
+        src = DEV_SERVER.read_text(encoding="utf-8")
+        self.assertRegex(src, r'"X-Accel-Buffering":\s*"no"')
+
 
 class NoStoreOnTheUiShellsTest(unittest.TestCase):
     """The UI shells are served no-store so a client never shows a stale page after the server's UI
