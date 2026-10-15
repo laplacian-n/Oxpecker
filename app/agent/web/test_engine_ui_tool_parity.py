@@ -48,11 +48,10 @@ KNOWN_MISSING_FROM_UI: set[str] = set()
 # honest about both directions. `http_request` is an engine gap (the engine has no such schema,
 # only the broker classifies it). `record_hypothesis`/`update_hypothesis_status`/`record_note` are
 # the in-memory lookalikes the graph tools replace — they disappear from the UI in step 2/3.
-# `browser_navigate`/`browser_click` drive the PERSISTENT live browser, which lives in dev_server's
-# own process; the engine's out-of-process workers (security-tools MCP subprocess) cannot reach it,
-# so these are intentionally UI-only for now — wiring them to the engine is a noted follow-up.
-KNOWN_UI_ONLY = {"http_request", "record_hypothesis", "update_hypothesis_status", "record_note",
-                 "browser_navigate", "browser_click"}
+# `browser_navigate`/`browser_click` were UI-only while only dev_server could reach the live
+# browser; the engine now drives it in-process through its own broker (loop.py `_dispatch_browser`),
+# so they are on BOTH sides and no longer belong here.
+KNOWN_UI_ONLY = {"http_request", "record_hypothesis", "update_hypothesis_status", "record_note"}
 
 
 class EngineUiToolParityTest(unittest.TestCase):

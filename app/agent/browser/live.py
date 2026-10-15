@@ -66,16 +66,28 @@ SHUTDOWN_TIMEOUT_S = 20.0
 # Nobody watching means no screencast, no timeout and no cost: the thread parks as before.
 PUMP_INTERVAL_S = 0.1
 
+# The key for the operator's own page in the per-worker page map. The operator watches ONE page —
+# their own — not whichever worker happened to navigate last, so the screencast and `/browser/input`
+# bind to this key, and an agent worker never gets it (worker ids are opaque engagement-scoped
+# strings, never this sentinel).
+OPERATOR_PAGE = "__operator__"
+
 
 class BrowserUnavailableError(RuntimeError):
     """The browser could not be started — no Chromium, or the profile could not be opened."""
 
 
 class _Command:
-    __slots__ = ("fn", "result", "error", "done")
+    __slots__ = ("fn", "worker", "resolve", "result", "error", "done")
 
-    def __init__(self, fn: Callable[[Any], Any]):
+    def __init__(self, fn: Callable[[Any], Any], *, worker: str | None = None,
+                 resolve: bool = True):
         self.fn = fn
+        # Which page this command runs against: a worker id, or OPERATOR_PAGE for the operator's.
+        self.worker = worker
+        # True: the thread resolves the page and calls fn(page). False: a page-map operation that
+        # needs the browser itself, so the thread calls fn(self) instead (see close_page).
+        self.resolve = resolve
         self.result: Any = None
         self.error: BaseException | None = None
         self.done = threading.Event()
@@ -83,7 +95,18 @@ class _Command:
 
 class LiveBrowser:
     """One persistent browser for one engagement. Thread-safe; every caller's work runs on the
-    browser's own thread, in submission order."""
+    browser's own thread, in submission order.
+
+    One BrowserContext per engagement (the login-holding, scope-gated profile) holds MANY pages:
+    the operator's one page, plus one page per agent worker, created on first use. Chromium
+    separates the cookie jar (on the context) from navigation (on the page), which is exactly the
+    split the engagement needs — the operator signs in once and every worker's page shares that
+    session, while worker A navigating to `/admin` does not drag worker B's page off `/profile`.
+
+    The egress gate rides on `context.route`, not on the page, so a page created later for a new
+    worker inherits the same scope check automatically — there is no per-page wiring step that
+    could be forgotten, which is why page-per-worker is safe by construction rather than by care.
+    """
 
     def __init__(self, engagement_id: str, profile_dir: Path, policy: Policy, *, headless: bool = True):
         self.engagement_id = engagement_id
@@ -91,6 +114,10 @@ class LiveBrowser:
         self.policy = policy
         self.headless = headless
         self.denied_requests: list[dict] = []
+        # worker id (or OPERATOR_PAGE) -> Page. Only ever touched on the browser thread, so no
+        # lock: pages are both created and closed inside commands dispatched by _run.
+        self._pages: dict[str, Any] = {}
+        self._context = None  # set on the browser thread once the context is up
         # The live view's single slot. Only ever the newest frame: a viewer wants what the page
         # looks like NOW, and a queue of stale frames is latency pretending to be history.
         self._frame: bytes | None = None
@@ -132,7 +159,11 @@ class LiveBrowser:
                 str(self.profile_dir), **_launch_kwargs(self.headless)
             )
             context.route("**/*", _make_route_handler(self.policy, self.denied_requests))
-            page = context.pages[0] if context.pages else context.new_page()
+            # The operator's page: the one Chromium already opened, or a fresh one. Worker pages are
+            # created lazily by _resolve_page the first time a worker drives the browser.
+            operator_page = context.pages[0] if context.pages else context.new_page()
+            self._context = context
+            self._pages[OPERATOR_PAGE] = operator_page
         except BaseException as e:  # noqa: BLE001 - reported to the constructor, not swallowed
             self._start_error = e
             self._started.set()
@@ -159,14 +190,19 @@ class LiveBrowser:
                     )
                 except queue.Empty:
                     try:
-                        page.title()  # the pump: one cheap round-trip, which flushes pending events
+                        # The pump flushes screencast events, which come off the OPERATOR page —
+                        # that is the only page the operator watches.
+                        self._pages[OPERATOR_PAGE].title()  # one cheap round-trip
                     except Exception:  # noqa: BLE001 - a dead page must not kill the thread
                         pass
                     continue
                 if cmd is None:  # stop() sentinel
                     return
                 try:
-                    cmd.result = cmd.fn(page)
+                    if cmd.resolve:
+                        cmd.result = cmd.fn(self._resolve_page(cmd.worker))
+                    else:
+                        cmd.result = cmd.fn(self)  # a page-map op; see close_page
                 except BaseException as e:  # noqa: BLE001 - handed back to the caller verbatim
                     cmd.error = e
                 finally:
@@ -181,10 +217,28 @@ class LiveBrowser:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _resolve_page(self, worker: str | None):
+        """The page for `worker` (OPERATOR_PAGE when None), created lazily. Browser thread only.
+
+        A new page is created with `context.new_page()`, which must happen on this thread, and it
+        inherits the context's `route` egress gate the moment it exists — no per-page wiring.
+        """
+        key = worker or OPERATOR_PAGE
+        page = self._pages.get(key)
+        if page is None:
+            page = self._context.new_page()
+            self._pages[key] = page
+        return page
+
     # -- the public, any-thread surface ----------------------------------------------------
 
-    def call(self, fn: Callable[[Any], Any], *, timeout: float = COMMAND_TIMEOUT_S) -> Any:
+    def call(self, fn: Callable[[Any], Any], *, worker: str | None = None,
+             timeout: float = COMMAND_TIMEOUT_S) -> Any:
         """Run `fn(page)` on the browser's thread and return its result.
+
+        `worker` selects whose page `fn` drives: an agent worker's id, or None for the operator's
+        page (the one the screencast shows). Each worker gets its own page, created on first call,
+        so parallel workers navigate independently while sharing the one logged-in profile.
 
         The callable is the whole API on purpose: anything that touches a Playwright object has
         to happen over there, so handing the page to a closure is the only boundary that cannot
@@ -192,13 +246,32 @@ class LiveBrowser:
         """
         if self._closed:
             raise BrowserUnavailableError("this browser has been stopped")
-        cmd = _Command(fn)
+        cmd = _Command(fn, worker=worker)
         self._queue.put(cmd)
         if not cmd.done.wait(timeout=timeout):
             raise TimeoutError(f"the browser did not finish the command within {timeout}s")
         if cmd.error is not None:
             raise cmd.error
         return cmd.result
+
+    def close_page(self, worker_id: str, *, timeout: float = COMMAND_TIMEOUT_S) -> None:
+        """Close one worker's page when that worker is done, so pages do not accumulate for the
+        life of the engagement. The operator's page cannot be closed this way — it is the one the
+        human is watching — and closing a worker that never opened a page is a no-op."""
+        if not worker_id or worker_id == OPERATOR_PAGE or self._closed:
+            return
+
+        def shut(lb: "LiveBrowser"):
+            page = lb._pages.pop(worker_id, None)
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001 - a page already gone is the outcome we wanted
+                    pass
+
+        cmd = _Command(shut, resolve=False)
+        self._queue.put(cmd)
+        cmd.done.wait(timeout=timeout)
 
     # -- the live view ---------------------------------------------------------------------
 
@@ -322,3 +395,16 @@ def stop_all() -> None:
         _browsers.clear()
     for b in browsers:
         b.stop()
+
+
+def close_worker_page(engagement_id: str, worker_id: str) -> None:
+    """Close a finished worker's page on its engagement's browser, if there is one. Best-effort:
+    a worker that never drove the browser, or an engagement with no live browser, is a no-op, and
+    the browser itself (with its shared profile and the operator's page) is left running."""
+    with _registry_lock:
+        browser = _browsers.get(engagement_id)
+    if browser is not None and browser.alive:
+        try:
+            browser.close_page(worker_id)
+        except Exception:  # noqa: BLE001 - cleanup must never fail a wave
+            log.debug("close_worker_page failed for %s/%s", engagement_id, worker_id, exc_info=True)

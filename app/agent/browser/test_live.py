@@ -176,6 +176,80 @@ class LiveBrowserTest(unittest.TestCase):
         self.assertTrue((d / "browser_profile").is_dir(),
                         f"no profile under {d}: {list(d.iterdir())}")
 
+    # -- a page per worker, one profile -----------------------------------------------------
+
+    @staticmethod
+    def _url_now():
+        def fn(page):
+            return page.url
+        return fn
+
+    def test_each_worker_drives_its_own_page_and_does_not_move_anothers(self):
+        """The semantic that makes parallel workers safe on one browser: worker A navigating must
+        not drag worker B's page with it. Without a page per worker, B's next click lands on A's
+        destination — a wrong result, not a slow one."""
+        d = self._engagement("eng-workers")
+        b = live.get("eng-workers", d, self.policy)
+        b.call(self._goto(self._url("/set")), worker="w0")
+        b.call(self._goto(self._url("/check")), worker="w1")
+        w0, w1 = b.call(self._url_now(), worker="w0"), b.call(self._url_now(), worker="w1")
+        self.assertTrue(w0.endswith("/set"), w0)
+        self.assertTrue(w1.endswith("/check"), w1)
+        self.assertNotEqual(w0, w1)
+
+    def test_workers_share_the_one_logged_in_profile(self):
+        """The other half of the split: separate pages, one cookie jar. A login one worker holds
+        is a login every worker holds, because the context — not the page — owns the cookies."""
+        d = self._engagement("eng-share-cookie")
+        b = live.get("eng-share-cookie", d, self.policy)
+        b.call(self._goto(self._url("/set")), worker="w0")       # w0 signs in
+        body = b.call(self._goto(self._url("/check")), worker="w1")  # w1 is already signed in
+        self.assertIn("session=handed-over", body, body[:200])
+
+    def test_the_operator_page_is_not_whatever_a_worker_last_touched(self):
+        """The operator watches their own page, not a random worker's. A worker navigating away
+        must leave the operator's page where the operator left it."""
+        d = self._engagement("eng-operator-page")
+        b = live.get("eng-operator-page", d, self.policy)
+        b.call(self._goto(self._url("/check")))  # operator (worker=None)
+        b.call(self._goto(self._url("/set")), worker="w0")
+        self.assertTrue(b.call(self._url_now()).endswith("/check"))
+
+    def test_a_fresh_worker_page_is_scope_gated_too(self):
+        """A page created later for a new worker must carry the same egress gate — the gate is on
+        the context, so it should, but this is the assertion that keeps it that way."""
+        d = self._engagement("eng-worker-scope")
+        b = live.get("eng-worker-scope", d, self.policy)
+        with self.assertRaises(Exception):
+            b.call(self._goto(self._url("/", server=self.out_of_scope)), worker="w9")
+        self.assertTrue(b.denied_requests, "the request was not recorded as denied")
+        self.assertIn("127.0.0.2", str(b.denied_requests))
+
+    def test_closing_a_worker_page_frees_it_and_spares_the_operator(self):
+        """A finished worker's page is closed so pages do not pile up for the whole engagement;
+        the operator's page is never closed this way, and a closed worker id is reusable."""
+        d = self._engagement("eng-close-page")
+        b = live.get("eng-close-page", d, self.policy)
+        b.call(self._goto(self._url("/")), worker="w0")
+        b.close_page("w0")
+        b.close_page(live.OPERATOR_PAGE)  # refused: the operator's page survives
+        self.assertIn("COOKIE[", b.call(self._goto(self._url("/"))))        # operator still works
+        self.assertIn("COOKIE[", b.call(self._goto(self._url("/")), worker="w0"))  # w0 recreated
+
+    def test_close_worker_page_is_a_safe_no_op_without_a_browser(self):
+        """A worker that never drove the browser, on an engagement with none running, must not
+        raise — the wave calls this in its finally for every worker."""
+        live.close_worker_page("no-such-engagement", "w0")  # must not raise
+
+    def test_close_worker_page_closes_that_workers_page_only(self):
+        d = self._engagement("eng-reg-close")
+        b = live.get("eng-reg-close", d, self.policy)
+        b.call(self._goto(self._url("/")), worker="w0")
+        live.close_worker_page("eng-reg-close", "w0")
+        self.assertNotIn("w0", b._pages)                       # the worker page is gone
+        self.assertIn(live.OPERATOR_PAGE, b._pages)            # the operator's survives
+        self.assertTrue(b.alive)                               # the browser is left running
+
     # -- the gate is the same gate ---------------------------------------------------------
 
     def test_an_out_of_scope_navigation_is_blocked_on_the_persistent_path_too(self):

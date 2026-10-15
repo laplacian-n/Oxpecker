@@ -82,6 +82,8 @@ from ..broker.contracts import ActionRequest as _ActionRequest
 from ..broker import taint as _taint
 from .. import injection_guard as _injection_guard
 from .. import tiers as _tiers
+from ..browser import agent_tools as _agent_browser
+from ..engagement import emit as _event_emit
 from ..engagement import intake as _intake
 from ..engagement.event_log import EngagementEventLog as _EngagementEventLog
 from ..engagement.event_log import project as _project_events
@@ -1748,11 +1750,11 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         if err:
             return err
 
-        def _go(page):
-            page.goto(url, timeout=20000)
-            return {"url": page.url, "title": page.title(), "text": page.inner_text("body")[:4000]}
+        # worker=current_worker(): a wave worker drives its own page; the chat agent (no worker on
+        # the thread) drives the operator's page, which is the one the screencast shows.
+        worker = _event_emit.current_worker()
         try:
-            return {"ok": True, **b.call(_go)}
+            return {"ok": True, **b.call(lambda p: _agent_browser.navigate(p, url), worker=worker)}
         except Exception as e:  # noqa: BLE001 — an out-of-scope nav arrives here as a navigation error
             msg = str(e).splitlines()[0][:300]
             out = {"ok": False, "error": f"{type(e).__name__}: {msg}"}
@@ -1772,12 +1774,9 @@ def _run_tool(name: str, args: dict, session: Session) -> dict:
         if err:
             return err
 
-        def _click(page):
-            page.mouse.click(x, y)
-            page.wait_for_timeout(300)  # let any resulting navigation/paint settle
-            return {"url": page.url, "title": page.title(), "text": page.inner_text("body")[:4000]}
+        worker = _event_emit.current_worker()
         try:
-            return {"ok": True, **b.call(_click)}
+            return {"ok": True, **b.call(lambda p: _agent_browser.click(p, x, y), worker=worker)}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"}
 
@@ -2458,34 +2457,10 @@ _BROWSER_FETCH_SCHEMA = {
 # knowledge_fetch + browser_fetch reach the network/target, so they are gated like the other
 # security tools. security_reference_search (a local corpus read) and osint_record (a local filing
 # write) touch no asset, so they live in the always-available base set alongside knowledge_search.
-_BROWSER_NAVIGATE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "browser_navigate",
-        "description": ("Drive the PERSISTENT per-engagement browser to an in-scope URL and read the "
-                        "page (url, title, visible text). Unlike browser_fetch (a fresh headless "
-                        "render), this keeps cookies/sign-ins across calls, so you can log in once "
-                        "and keep going. In scope, broker-mediated; the operator watches it live."),
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string", "description": "the in-scope URL to navigate to"},
-        }, "required": ["url"]},
-    },
-}
-_BROWSER_CLICK_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "browser_click",
-        "description": ("Click at a pixel position on the current page of the persistent browser, "
-                        "then read the resulting page (url, title, text). Use the coordinates from "
-                        "what you saw in the last browser_navigate/click result."),
-        "parameters": {"type": "object", "properties": {
-            "x": {"type": "integer", "description": "x pixel on the page"},
-            "y": {"type": "integer", "description": "y pixel on the page"},
-        }, "required": ["x", "y"]},
-    },
-}
+# The agent's browser-tool schemas are shared with the autonomous-worker path (agent/loop.py) so
+# the two runtimes expose the identical tool; see agent/browser/agent_tools.py.
 SECURITY_TOOL_SCHEMAS += [_KNOWLEDGE_FETCH_SCHEMA, _BROWSER_FETCH_SCHEMA,
-                          _BROWSER_NAVIGATE_SCHEMA, _BROWSER_CLICK_SCHEMA]
+                          _agent_browser.NAVIGATE_SCHEMA, _agent_browser.CLICK_SCHEMA]
 TOOL_SCHEMAS += [_OSINT_RECORD_SCHEMA, *_KNOWLEDGE_RAG_SCHEMAS]  # security_reference_search
 
 

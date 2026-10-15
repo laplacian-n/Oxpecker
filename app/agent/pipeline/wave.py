@@ -161,6 +161,14 @@ class WaveOrchestrator:
             w.result = WorkerResult(outcome="error", detail=f"{type(e).__name__}: {e}")
         finally:
             event_emit.set_current_worker(None)
+            # Free this worker's live-browser page (if it opened one), so pages do not sit idle
+            # between waves. The shared profile and the operator's page are untouched. Imported
+            # lazily so the pipeline does not pull the browser stack unless a worker used it.
+            try:
+                from ..browser.live import close_worker_page
+                close_worker_page(self.engagement_id, w.worker_id)
+            except Exception:  # noqa: BLE001 - cleanup must never turn a finished worker into a crash
+                pass
 
     def _await_barrier(self, claimed: list[_LiveWorker], deadline: float) -> None:
         """Wait for every worker, but no longer than the wall-clock. A worker still running at the

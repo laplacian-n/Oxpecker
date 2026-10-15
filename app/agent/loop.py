@@ -22,6 +22,7 @@ from . import budget as budget_mod
 from . import config
 from . import injection_guard
 from . import session as session_mod
+from .browser.agent_tools import BROWSER_LIVE_TOOLS
 from .engagement import emit as event_emit
 from .engagement.locks import engagement_lock
 from .engagement.spend import BudgetExhausted as SpendBudgetExhausted, SpendLedger
@@ -207,6 +208,13 @@ class AgentLoop:
         # (those only live in the project .venv) unless Phase 2+ mode is actually requested.
         self.mcp_client = None
         self.security_mcp_client = None
+        # The autonomous workers' browser tools run IN-PROCESS against the live browser (which the
+        # MCP subprocess cannot reach), through their own broker so the browser action is gated,
+        # audited and taint-escalated exactly like any other target action. Built lazily on first
+        # browser call; the approval mode matches the subprocess broker's (set below).
+        self._browser_broker = None
+        self._use_approval_queue = use_approval_queue
+        self._auto_approve = auto_approve
         self.tool_schemas = list(TOOL_SCHEMAS)
         if use_mcp_tools:
             from .mcp_tool_client import MCPToolClient
@@ -265,10 +273,17 @@ class AgentLoop:
             # schema here only makes the model *aware* a tool exists, it doesn't grant it
             # anything; knowledge_search/knowledge_fetch/browser_fetch all deny by default until
             # an RoE explicitly opts in (see agent/broker/broker.py's TOOL_ACTION_CLASS).
+            from .browser.agent_tools import CLICK_SCHEMA as _BROWSER_CLICK_SCHEMA
+            from .browser.agent_tools import NAVIGATE_SCHEMA as _BROWSER_NAVIGATE_SCHEMA
+
             self.tool_schemas += [
                 http_recon.SCHEMA, port_discovery.SCHEMA,
                 KNOWLEDGE_SEARCH_SCHEMA, KNOWLEDGE_FETCH_SCHEMA,
                 OSINT_RECORD_SCHEMA, BROWSER_FETCH_SCHEMA,
+                # The persistent live browser, driven in-process (see _dispatch_browser). Listing
+                # the schema only makes the model aware of it; the broker's browser_recon RoE gate
+                # still denies until an engagement opts the class in.
+                _BROWSER_NAVIGATE_SCHEMA, _BROWSER_CLICK_SCHEMA,
             ]
             # General-knowledge RAG (GTFOBins/LOLBAS/PayloadsAllTheThings, offline/pre-embedded —
             # see agent/knowledge_rag/'s module docstrings) — a reference lookup, not a target
@@ -781,11 +796,13 @@ class AgentLoop:
                 shared=tool_name in ENGAGEMENT_SHARED_TAINT_SOURCES,
             )
 
-        if tool_name not in BROKER_MEDIATED_TOOLS:
+        if tool_name not in BROKER_MEDIATED_TOOLS and tool_name not in BROWSER_LIVE_TOOLS:
             # Broker-mediated tools (http_recon, port_discovery) already get a richer audit
             # entry from Broker._finalize() inside the security-tools MCP subprocess — policy
-            # rule, policy version, and audit digest included. A second generic entry here
-            # would just be redundant noise, not additional safety.
+            # rule, policy version, and audit digest included. The live-browser tools go through
+            # this loop's OWN in-process broker (_dispatch_browser), which writes the same richer
+            # entry here in-process; either way a second generic entry below would just be
+            # redundant noise, not additional safety.
             self.audit.record(
                 turn_index=turn_index,
                 tool_name=tool_name,
@@ -863,6 +880,14 @@ class AgentLoop:
 
     def _dispatch(self, tool_name: str, args: dict, message_id: str | None = None) -> tuple[dict, str, str | None]:
         """Returns (result_dict, scope_decision, approval_identity_or_None)."""
+        if tool_name in BROWSER_LIVE_TOOLS:
+            # Driven in-process against the persistent live browser (the MCP subprocess cannot
+            # reach it), through this loop's own broker — a separate door from the operator's
+            # un-brokered /browser/input, so the audit trail keeps "agent did this" distinct from
+            # "operator did this". See _dispatch_browser.
+            result, decision = self._dispatch_browser(tool_name, args)
+            return result, decision, None
+
         if tool_name in BROKER_MEDIATED_TOOLS:
             # The broker (running inside the security-tools MCP subprocess) makes its own
             # scope/rate/kill-switch/approval decisions and writes its own audit entry — the
@@ -942,3 +967,89 @@ class AgentLoop:
             return result, decision, confirmed_by
 
         return {"ok": False, "error": f"unknown tool: {tool_name}"}, "rejected_unknown_tool", None
+
+    def _live_browser_broker(self):
+        """This loop's in-process broker for live-browser actions, built on first use. Identical
+        class and policy source to the security-tools subprocess's broker (security_mcp_server.py),
+        with the same approval mode — the only difference is that it runs here, where the browser
+        is, instead of over there, where it is not."""
+        if self._browser_broker is None:
+            from .broker.broker import Broker
+
+            self._browser_broker = Broker(
+                engagement_dir=config.ENGAGEMENTS_ROOT / self.engagement_id,
+                use_approval_queue=self._use_approval_queue,
+                auto_approve=self._auto_approve,
+            )
+        return self._browser_broker
+
+    def _dispatch_browser(self, tool_name: str, args: dict) -> tuple[dict, str]:
+        """browser_navigate / browser_click, driven in-process against the engagement's live
+        browser and gated by this loop's own broker (scope, the browser_recon RoE class, kill
+        switch, rate limit, taint escalation, evidence, audit — same as http_recon gets).
+
+        The page driven is this worker's own (`worker=current_worker()`): parallel wave workers
+        share the one logged-in profile but navigate independent pages, so one worker moving to
+        /admin cannot drag another's page off /profile. `current_worker()` is None on the chat
+        path, which resolves to the operator's page — but the chat path does not reach here (it
+        runs in dev_server), so in practice this is always a worker page.
+        """
+        from .broker.contracts import ActionRequest
+        from .browser import agent_tools, live as live_mod
+
+        engagement_dir = config.ENGAGEMENTS_ROOT / self.engagement_id
+        worker = event_emit.current_worker()
+
+        def execute(policy, arguments):
+            # The live browser's own egress handler enforces this same policy on every request the
+            # page makes, so an out-of-scope URL is aborted at the gate whatever the broker decided.
+            try:
+                b = live_mod.get(self.engagement_id, engagement_dir, policy)
+            except Exception as e:  # noqa: BLE001 — no Chromium / unopenable profile is a failed call
+                return {"ok": False,
+                        "error": f"the live browser is unavailable: {type(e).__name__}: {e}"}
+            if tool_name == "browser_navigate":
+                url = (arguments.get("url") or "").strip()
+                if not url:
+                    return {"ok": False, "error": "browser_navigate needs a url"}
+                try:
+                    return {"ok": True,
+                            **b.call(lambda p: agent_tools.navigate(p, url), worker=worker)}
+                except Exception as e:  # noqa: BLE001 — out-of-scope navs arrive as navigation errors
+                    msg = str(e).splitlines()[0][:300]
+                    if "scope" in msg.lower() or "ERR_BLOCKED" in msg or "net::ERR" in msg:
+                        # Let the broker record a scope denial rather than a generic failure.
+                        raise PermissionError(msg)
+                    return {"ok": False, "error": f"{type(e).__name__}: {msg}"}
+            # browser_click
+            try:
+                x, y = int(arguments.get("x")), int(arguments.get("y"))
+            except (TypeError, ValueError):
+                return {"ok": False,
+                        "error": "browser_click needs integer x and y (pixels on the page)"}
+            try:
+                return {"ok": True, **b.call(lambda p: agent_tools.click(p, x, y), worker=worker)}
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"}
+
+        request = ActionRequest(
+            tool=tool_name, arguments=args, session_id=self.session_id, device_id="wave-worker",
+            engagement_id=self.engagement_id,
+        )
+        response = self._live_browser_broker().dispatch(request, execute)
+        if response.status == "succeeded":
+            out = dict(response.output) if isinstance(response.output, dict) else {
+                "ok": True, "output": response.output}
+            return out, f"broker:{response.status}"
+        if response.status in ("denied", "needs_approval", "budget_exhausted", "cancelled"):
+            return {
+                "ok": False,
+                "error": f"blocked by the execution broker ({response.policy_rule}): "
+                         f"{response.detail or response.status}. This call was NOT made.",
+                "scope_rule": response.policy_rule,
+            }, f"broker:{response.status}"
+        return {
+            "ok": False,
+            "error": f"the call was attempted and did not complete ({response.status}): "
+                     f"{response.detail or 'no detail'}",
+        }, f"broker:{response.status}"
