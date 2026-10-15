@@ -36,10 +36,14 @@ function state(over: Partial<ChatSessionState> = {}): ChatSessionState {
   };
 }
 
+const DEFAULT_PROMPT = "You are the assistant. @@TOOL_LIST@@";
+
 const stub = (over = {}) => ({
   isolation: vi.fn(async () => ISO),
   setThinking: vi.fn(async () => ({ thinking: true })),
   steer: vi.fn(async () => ({ queued: true })),
+  defaultSystemPrompt: vi.fn(async () => ({ prompt: DEFAULT_PROMPT })),
+  setStage: vi.fn(async (_id: string, stage: string) => ({ stage })),
   ...over,
 });
 
@@ -174,4 +178,75 @@ test("12. with no session open there are no per-session controls to mislead with
   render(<SessionPanel state={state({ sessionId: null, sessions: [] })} apiImpl={stub() as any} />);
   expect(screen.queryByTestId("session-controls")).toBeNull();
   expect(screen.getByTestId("no-sessions")).toBeInTheDocument();
+});
+
+test("13. the new-session prompt starts from the server default, and an untouched default is not sent", async () => {
+  // Sending the default back would freeze a copy into the session, so a later change to the
+  // default would never reach it. Only an actual edit is sent.
+  const impl = stub();
+  const s = state();
+  render(<SessionPanel state={s} apiImpl={impl as any} />);
+  await userEvent.click(screen.getByTestId("toggle-new-session"));
+  await waitFor(() => expect(screen.getByTestId("new-system-prompt")).toHaveValue(DEFAULT_PROMPT));
+  expect(impl.defaultSystemPrompt).toHaveBeenCalledWith({});
+  await waitFor(() => expect(screen.getByTestId("iso-tier")).toBeInTheDocument());
+  await userEvent.click(screen.getByTestId("open-session"));
+  await waitFor(() => expect(s.create).toHaveBeenCalled());
+  const sent = (s.create as any).mock.calls[0][0];
+  expect(sent).not.toHaveProperty("system_prompt");
+});
+
+test("14. an edited prompt is passed to create; a blank one sends nothing", async () => {
+  const s = state();
+  render(<SessionPanel state={s} apiImpl={stub() as any} />);
+  await userEvent.click(screen.getByTestId("toggle-new-session"));
+  const box = await screen.findByTestId("new-system-prompt");
+  await waitFor(() => expect(box).toHaveValue(DEFAULT_PROMPT));
+  await userEvent.clear(box);
+  await userEvent.type(box, "  Only report what you verified.  ");
+  await userEvent.click(screen.getByTestId("open-session"));
+  await waitFor(() => expect(s.create).toHaveBeenLastCalledWith(expect.objectContaining({
+    system_prompt: "Only report what you verified.",
+  })));
+
+  // Opening closes the form once create settles, so wait for that before reopening it; the edited
+  // text is still there.
+  await waitFor(() => expect(screen.queryByTestId("new-session-form")).toBeNull());
+  await userEvent.click(screen.getByTestId("toggle-new-session"));
+  await waitFor(() => expect(screen.getByTestId("new-system-prompt")).toHaveValue("  Only report what you verified.  "));
+  await userEvent.clear(screen.getByTestId("new-system-prompt"));
+  await userEvent.click(screen.getByTestId("open-session"));
+  await waitFor(() => expect(s.create).toHaveBeenCalledTimes(2));
+  expect((s.create as any).mock.calls[1][0]).not.toHaveProperty("system_prompt");
+});
+
+test("15. if the default prompt cannot be loaded the box is blank and Open still works", async () => {
+  const impl = stub({ defaultSystemPrompt: vi.fn(async () => { throw new Error("500"); }) });
+  const s = state();
+  render(<SessionPanel state={s} apiImpl={impl as any} />);
+  await userEvent.click(screen.getByTestId("toggle-new-session"));
+  await waitFor(() => expect(impl.defaultSystemPrompt).toHaveBeenCalled());
+  expect(screen.getByTestId("new-system-prompt")).toHaveValue("");
+  await waitFor(() => expect(screen.getByTestId("iso-tier")).toBeInTheDocument());
+  await userEvent.click(screen.getByTestId("open-session"));
+  await waitFor(() => expect(s.create).toHaveBeenCalled());
+  expect((s.create as any).mock.calls[0][0]).not.toHaveProperty("system_prompt");
+});
+
+test("16. the stage selector sets the stage on this session and then refreshes the detail", async () => {
+  const impl = stub();
+  const onDetailChanged = vi.fn();
+  render(<SessionPanel state={state()} detail={{ stage: "RECON" }} apiImpl={impl as any}
+                       onDetailChanged={onDetailChanged} />);
+  expect(screen.getByTestId("stage-select")).toHaveValue("RECON");
+  expect([...screen.getByTestId("stage-select").querySelectorAll("option")].map((o) => o.value))
+    .toEqual(["RECON", "ANALYSIS", "VALIDATION", "REPORT"]);
+  await userEvent.selectOptions(screen.getByTestId("stage-select"), "VALIDATION");
+  await waitFor(() => expect(impl.setStage).toHaveBeenCalledWith("s1", "VALIDATION", {}));
+  expect(onDetailChanged).toHaveBeenCalled();
+});
+
+test("17. no stage selector until the session's detail says what stage it is in", async () => {
+  render(<SessionPanel state={state()} detail={{ thinking: false }} apiImpl={stub() as any} />);
+  expect(screen.queryByTestId("stage-select")).toBeNull();
 });
