@@ -246,11 +246,23 @@ def rotate_key(path: Path = config.EVIDENCE_KEY_PATH) -> str:
 class EvidenceStore:
     def __init__(
         self,
-        evidence_dir: Path = config.EVIDENCE_DIR,
-        index_path: Path = config.EVIDENCE_INDEX_PATH,
-        access_log_path: Path = config.EVIDENCE_ACCESS_LOG_PATH,
-        key_path: Path = config.EVIDENCE_KEY_PATH,
+        evidence_dir: Path | None = None,
+        index_path: Path | None = None,
+        access_log_path: Path | None = None,
+        key_path: Path | None = None,
     ):
+        # Resolved at call time, not as default-argument values frozen at import. As frozen
+        # defaults these bound whatever config held when this module was first imported, while
+        # agent/audit_log.py reads `config.EVIDENCE_KEY_PATH` in its own __init__ — so repointing
+        # the config moved the audit log's key and not the evidence store's, the two then signed
+        # the same bytes with different keys, and the broker's own ADR-0005 cross-reference
+        # assertion (`entry["content_digest"] == evidence_digest`) fired on a dispatch. Same
+        # bound-default hazard findings/model.py carries a fix and a comment for.
+        evidence_dir = evidence_dir if evidence_dir is not None else config.EVIDENCE_DIR
+        index_path = index_path if index_path is not None else config.EVIDENCE_INDEX_PATH
+        access_log_path = (access_log_path if access_log_path is not None
+                           else config.EVIDENCE_ACCESS_LOG_PATH)
+        key_path = key_path if key_path is not None else config.EVIDENCE_KEY_PATH
         self.evidence_dir = evidence_dir
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = index_path
