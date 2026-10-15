@@ -404,3 +404,36 @@ class TestEngagementBootstrap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunNeverVanishesTest(unittest.TestCase):
+    """A crash inside a phase must surface as a run_error event and a failed result, never unwind
+    silently out of the background run thread (the "entered ANALYSIS then nothing" bug)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="run-error-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._p = patch("agent.pipeline.autonomous_driver.config.ENGAGEMENTS_ROOT", self.tmp)
+        self._p.start()
+        self.addCleanup(self._p.stop)
+
+    def test_phase_crash_emits_run_error_and_returns(self):
+        events = []
+        d = AutonomousDriver(engagement_id="crash-eng", profile_name="web_api", mode="autonomous",
+                             session_id="s", on_event=events.append, tier="medium")
+        (d.engagement_dir).mkdir(parents=True, exist_ok=True)
+        (d.engagement_dir / "roe.json").write_text(
+            '{"engagement_id":"x","valid_from":"2020-01-01T00:00:00Z",'
+            '"valid_until":"2099-01-01T00:00:00Z","allowed_action_classes":["passive_recon"]}')
+        with patch.object(d, "_run_inner", side_effect=RuntimeError("boom in a phase")):
+            result = d.run()  # must NOT raise
+        self.assertEqual(result.status, "error")
+        self.assertIn("boom in a phase", result.reason)
+        types = [e["type"] for e in events]
+        self.assertIn("run_error", types)
+        err = next(e for e in events if e["type"] == "run_error")
+        self.assertIn("boom in a phase", err.get("error", ""))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -350,11 +350,16 @@ function handleServerEvent(evt){
       S.threads[sid].push({role:'system',content:(evt.scope==='in-turn'?'Compacted mid-run — folded ':'Context compacted — folded ')+(evt.folded||0)+' earlier messages into a summary'});
       render();softScroll();break;
     case 'task_done':stampDuration(sid);S.running=false;clearInterval(S.elapsedTimer);S.streamingText='';S.streamingReasoning='';render();break;
-    case 'task_error':S.running=false;clearInterval(S.elapsedTimer);S.streamingText='';toast('Error: '+evt.error);render();break;
-    case 'autonomous_event':
+    case 'task_error':S.running=false;clearInterval(S.elapsedTimer);S.streamingText='';if(!S.threads[sid])S.threads[sid]=[];S.threads[sid].push({role:'system',content:'⚠ Error: '+evt.error});toast('Error: '+evt.error);render();softScroll();break;
+    case 'autonomous_event':{
       if(!S.threads[sid])S.threads[sid]=[];
-      S.threads[sid].push({role:'system',content:'['+evt.event.type+'] '+(evt.event.detail||evt.event.phase||''),_raw:evt.event});
-      render();softScroll();break;
+      const e=evt.event||{};
+      // Render whichever descriptive field the event carries — different event types put their text
+      // in different keys (detail/phase for progress, reason/error/message for blocks and crashes),
+      // so a run that blocks or crashes shows WHY instead of an empty '[blocked] ' line.
+      const info=e.detail||e.phase||e.reason||e.error||e.message||'';
+      S.threads[sid].push({role:'system',content:'['+e.type+'] '+info,_raw:e});
+      render();softScroll();break;}
     case 'autonomous_done':
       stampDuration(sid);S.running=false;clearInterval(S.elapsedTimer);
       if(!S.threads[sid])S.threads[sid]=[];

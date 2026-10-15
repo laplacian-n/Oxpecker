@@ -216,6 +216,11 @@ class AutonomousDriver:
             # found live across 6 autonomous runs. /no_think keeps it decisive and tool-calling.
             force_no_think=True,
         )
+        # Announce the task BEFORE the call. A judgment turn on a reasoning model can run for
+        # minutes with no intermediate event; without this the UI shows the phase entered and then
+        # nothing until the turn ends, which reads as "hung". detail= so even an old UI renders it.
+        self._emit("judgment_task_start", task_type=task["task_type"], task_id=task["task_id"],
+                   detail=f"running {task['task_type']}")
         try:
             result = loop.run_task(prompt)
         finally:
@@ -407,7 +412,22 @@ class AutonomousDriver:
         # says nothing about a *different* session's assistant-mode chat hitting the same
         # engagement while this one is running).
         with engagement_lock(self.engagement_id):
-            return self._run_inner()
+            try:
+                return self._run_inner()
+            except Exception as e:  # noqa: BLE001 — a crashing phase must surface, never vanish
+                # Without this the exception unwinds out of the background run thread and the run
+                # simply goes silent after the last phase event — "entered ANALYSIS" then nothing.
+                # Emit a terminal event (visible in the UI and the engagement event log) and return
+                # a failed result so the caller still gets autonomous_done, instead of dying quietly.
+                try:
+                    phase = self.store.get_phase()["current_phase"]
+                except Exception:  # noqa: BLE001
+                    phase = ""
+                msg = f"{type(e).__name__}: {e}"
+                log.exception("autonomous run crashed in phase %s", phase)
+                self._emit("run_error", error=msg, detail=f"run crashed in {phase or '?'}: {msg}",
+                           phase=phase)
+                return AutonomousRunResult("error", msg, [], phase)
 
     def _run_inner(self) -> AutonomousRunResult:
         start = time.monotonic()
