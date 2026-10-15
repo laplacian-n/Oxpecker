@@ -48,8 +48,14 @@ class TaintStore:
         self,
         session_id: str,
         engagement_id: str | None = None,
-        taint_dir: Path = config.STATE_DIR / "broker" / "taint",
+        taint_dir: Path | None = None,
     ):
+        # Resolved at call time, not as a default-argument value frozen at import: as a frozen
+        # default this bound whatever config held when this module was first imported, so a
+        # caller that repoints the config afterwards silently kept the old path. Same hazard
+        # findings/model.py, evidence/store.py and broker/broker.py each carry a fix for.
+        taint_dir = (taint_dir if taint_dir is not None
+                     else config.STATE_DIR / "broker" / "taint")
         self.session_id = session_id
         self.engagement_id = engagement_id
         self.path = taint_dir / f"{session_id}.json"

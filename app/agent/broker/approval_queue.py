@@ -43,7 +43,13 @@ def _write_atomic(path: Path, content: str) -> None:
 
 class ApprovalQueue:
     def __init__(self, queue_dir: Path | None = None):
-        self.queue_dir = queue_dir if queue_dir is not None else QUEUE_DIR
+        # Falls back to config at call time rather than to the module-level QUEUE_DIR
+        # constant, which is computed once at import. Resolving against the constant meant a
+        # caller that repointed config.STATE_DIR — a test isolating its state, an operator
+        # moving AGENT_STATE_DIR — still had queued approvals written to the original location.
+        # QUEUE_DIR is kept as the documented default for anything that reads it directly.
+        self.queue_dir = (queue_dir if queue_dir is not None
+                          else config.STATE_DIR / "broker" / "approval_queue")
         self.queue_dir.mkdir(parents=True, exist_ok=True)
 
     def submit(self, *, session_id: str, tool: str, arguments: dict, reason: str) -> str:

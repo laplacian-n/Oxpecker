@@ -37,6 +37,10 @@ def main() -> int:
         from . import debug_trace as dt
         from . import dev_server as d
 
+        # Restored below: TRACE_DIR is a module constant, so leaving it pointed at this
+        # test's tmp dir makes everything that runs afterwards trace into a deleted
+        # directory. One file used to leave it at /proc/nonexistent/cannot-write.
+        _prior_trace_dir = dt.TRACE_DIR
         dt.TRACE_DIR = tmp / "trace"
         s = d.Session(session_id="confine", engagement_id="lab-default",
                       isolation_tier="direct")
@@ -197,6 +201,7 @@ def main() -> int:
     check("the state file follows the override rather than staying in the source tree",
           len(lines) > 1 and lines[1] == "/tmp/oxp-confine-probe/state.json", str(lines))
 
+    dt.TRACE_DIR = _prior_trace_dir
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:
         print("FAILED:", FAIL)

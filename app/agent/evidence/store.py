@@ -227,9 +227,11 @@ def _load_or_create_keys_once(path: Path) -> tuple[dict[str, bytes], str] | None
     return {DEFAULT_KEY_VERSION: raw_key}, DEFAULT_KEY_VERSION
 
 
-def rotate_key(path: Path = config.EVIDENCE_KEY_PATH) -> str:
+def rotate_key(path: Path | None = None) -> str:
     """Adds a new key version and makes it current; old versions are kept (not deleted) so
     blobs encrypted under them stay decryptable — rotation, not re-encryption-in-place."""
+    # Resolved at call time; see EvidenceStore.__init__ for why a frozen default is wrong here.
+    path = path if path is not None else config.EVIDENCE_KEY_PATH
     keys, _ = _load_or_create_keys(path)
     existing_versions = [int(v[1:]) for v in keys if v.startswith("v") and v[1:].isdigit()]
     new_version = f"v{max(existing_versions, default=0) + 1}"

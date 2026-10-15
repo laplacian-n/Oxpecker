@@ -65,7 +65,12 @@ class NotFoundError(RuntimeError):
 
 
 class Store:
-    def __init__(self, db_path: Path = config.MEMORY_SERVICE_DB_PATH):
+    def __init__(self, db_path: Path | None = None):
+        # Resolved at call time, not as a default-argument value frozen at import: as a frozen
+    # default this bound whatever config held when this module was first imported, so a
+    # caller that repoints the config afterwards silently kept the old path. Same hazard
+    # findings/model.py, evidence/store.py and broker/broker.py each carry a fix for.
+        db_path = db_path if db_path is not None else config.MEMORY_SERVICE_DB_PATH
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
         with self._connect() as conn:

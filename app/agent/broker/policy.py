@@ -201,7 +201,12 @@ def _parse_scope_file(path: Path) -> tuple[list[IPNetwork], set[str], set[str]]:
         raise PolicyError(f"{path}: {e}") from e
 
 
-def load_policy(engagement_dir: Path = config.ENGAGEMENT_DIR) -> Policy:
+def load_policy(engagement_dir: Path | None = None) -> Policy:
+    # Resolved at call time, not as a default-argument value frozen at import: as a frozen
+    # default this bound whatever config held when this module was first imported, so a
+    # caller that repoints the config afterwards silently kept the old path. Same hazard
+    # findings/model.py, evidence/store.py and broker/broker.py each carry a fix for.
+    engagement_dir = engagement_dir if engagement_dir is not None else config.ENGAGEMENT_DIR
     roe_path = engagement_dir / "roe.json"
     scope_path = engagement_dir / "scope.txt"
     deny_path = engagement_dir / "deny.txt"

@@ -42,18 +42,13 @@ AGENT_ROOT = Path(__file__).resolve().parent
 # Files that currently contribute zero tests to the runner. Shrink only.
 COLLECTS_NOTHING = {
     "agent.broker.test_browser_channel",
-    "agent.broker.test_injection_quarantine",
-    "agent.broker.test_knowledge_channels",
     "agent.sandbox.test_availability",
     "agent.sandbox.test_isolation",
     "agent.sandbox.test_seccomp_profile",
     "agent.sandbox.test_wsl2",
     "agent.security_tools.test_http_recon_https",
-    "agent.web.test_audit",
-    "agent.web.test_debug_trace",
     "agent.web.test_tool_parity",
     "agent.web.test_tools_wiring",
-    "agent.web.test_trace_cli",
 }
 
 # If the walk below finds far fewer files than the repo has, it is broken, and a ratchet over an

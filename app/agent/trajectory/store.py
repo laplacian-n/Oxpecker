@@ -89,7 +89,13 @@ class ChainLink:
 
 
 class TrajectoryStore:
-    def __init__(self, engagement_id: str, trajectory_dir: Path = config.TRAJECTORY_DIR):
+    def __init__(self, engagement_id: str, trajectory_dir: Path | None = None):
+        # Resolved at call time, not as a default-argument value frozen at import: as a frozen
+    # default this bound whatever config held when this module was first imported, so a
+    # caller that repoints the config afterwards silently kept the old path. Same hazard
+    # findings/model.py, evidence/store.py and broker/broker.py each carry a fix for.
+        trajectory_dir = (trajectory_dir if trajectory_dir is not None
+                          else config.TRAJECTORY_DIR)
         trajectory_dir.mkdir(parents=True, exist_ok=True)
         self.engagement_id = engagement_id
         self.path = trajectory_dir / f"{engagement_id}.jsonl"

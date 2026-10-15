@@ -18,8 +18,11 @@ from .. import config
 
 
 class KillSwitch:
-    def __init__(self, flag_path: Path = config.KILL_SWITCH_PATH):
-        self.flag_path = flag_path
+    def __init__(self, flag_path: Path | None = None):
+        # Resolved at call time, not frozen at import. The kill switch is the emergency stop:
+        # a path bound to a stale config is one nothing writes to, so a test (or an operator
+        # moving AGENT_STATE_DIR mid-process) could not point it anywhere and have it bite.
+        self.flag_path = flag_path if flag_path is not None else config.KILL_SWITCH_PATH
 
     def is_engaged(self) -> bool:
         return self.flag_path.exists()

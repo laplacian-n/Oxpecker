@@ -66,3 +66,34 @@ jobs:
               sys.exit(f'{skipped} tests skipped, ceiling is {MAX_SKIPPED} — '
                        'a dependency probably stopped importing')
           PY
+
+      - name: Check that the suite did not write into the real state directory
+        # agent/state is where a real engagement's audit records, evidence blobs, taint records
+        # and queued approvals live. A test that writes there leaves entries indistinguishable
+        # from a live engagement's, and nothing reports it: leaking is silent and the test still
+        # passes. The directory is gitignored and a CI checkout starts empty, so every file here
+        # after the run was put there by a test.
+        #
+        # This was 186 files before agent/isolated_state.py and the frozen-default fixes that
+        # went with it; the remainder come from tests that were already running. The ceiling is
+        # what this gate measured here, on its first run, and it may only shrink.
+        #
+        # 29 and not the 26 a local run shows: this runner has real outbound network, so three
+        # files appear that a proxied machine never produces — agent/state/internet/budgets,
+        # agent/state/internet/cache and technique_kb.db. The number has to come from the
+        # environment that enforces it, which is this one. The listing prints unconditionally so
+        # a change in the count names the files that caused it.
+        run: |
+          cd app
+          echo "files under agent/state after the suite:"
+          find agent/state -type f 2>/dev/null | sort || true
+          python - <<'PY'
+          import pathlib, sys
+          files = [p for p in pathlib.Path("agent/state").rglob("*") if p.is_file()] \
+              if pathlib.Path("agent/state").exists() else []
+          MAX_STATE_FILES = 29
+          print(f"count={len(files)} ceiling={MAX_STATE_FILES}")
+          if len(files) > MAX_STATE_FILES:
+              sys.exit(f"the suite left {len(files)} files in the real state dir, ceiling is "
+                       f"{MAX_STATE_FILES}; a test is missing agent/isolated_state.isolated_state")
+          PY

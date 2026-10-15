@@ -24,8 +24,12 @@ def _hash(token: str) -> str:
 
 
 class DeviceStore:
-    def __init__(self, path: Path = config.MEMORY_SERVICE_DEVICES_PATH):
-        self.path = path
+    def __init__(self, path: Path | None = None):
+        # Resolved at call time, not as a default-argument value frozen at import: as a frozen
+    # default this bound whatever config held when this module was first imported, so a
+    # caller that repoints the config afterwards silently kept the old path. Same hazard
+    # findings/model.py, evidence/store.py and broker/broker.py each carry a fix for.
+        self.path = path if path is not None else config.MEMORY_SERVICE_DEVICES_PATH
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self._write({})

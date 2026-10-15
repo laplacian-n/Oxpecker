@@ -119,7 +119,7 @@ def _validate_scope_line(line: str, errors: list, field_name: str) -> None:
 
 
 def create_engagement(
-    intake: EngagementIntake, engagements_root: Path = config.ENGAGEMENTS_ROOT,
+    intake: EngagementIntake, engagements_root: Path | None = None,
     *, overwrite: bool = False,
 ) -> Path:
     """Validates and writes roe.json/scope.txt/deny.txt for a named engagement. Raises
@@ -129,6 +129,9 @@ def create_engagement(
     `overwrite=True` rewrites those three files for an engagement that already exists (an edit),
     leaving every other file in the directory — the hypothesis graph, the event log, findings —
     untouched. Without it an existing engagement is refused, so a plain create never clobbers one."""
+    # Resolved at call time, not frozen at import; see the note in broker/broker.py.
+    engagements_root = (engagements_root if engagements_root is not None
+                        else config.ENGAGEMENTS_ROOT)
     intake.validate()
 
     engagement_dir = engagements_root / intake.engagement_id

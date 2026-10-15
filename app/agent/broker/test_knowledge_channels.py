@@ -10,6 +10,8 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+from ..isolated_state import isolated_state
 from unittest.mock import patch
 
 from .. import config
@@ -41,7 +43,7 @@ def _write_engagement(tmp: Path, allowed_action_classes: list[str]) -> Path:
     return eng_dir
 
 
-def main() -> int:
+def _checks() -> int:
     print("== Denied by default when RoE doesn't allow the class ==")
     tmp = Path(tempfile.mkdtemp(prefix="knowledge-channels-test-"))
     eng_dir = _write_engagement(tmp, ["passive_recon"])
@@ -281,6 +283,32 @@ def main() -> int:
         return 1
     return 0
 
+
+
+def main() -> int:
+    """Run the checks with every state path redirected into a temp dir.
+
+    These checks drive the real Broker, which writes audit records, taint records, queued
+    approvals and evidence blobs. Nothing here patched the config, so each run added all of
+    those to the operator's REAL agent/state — indistinguishable from a live engagement's once
+    they are sitting in the same directory. isolated_state derives the redirect list from config
+    rather than repeating a hand-written patch list that the next file would get wrong too; see
+    agent/isolated_state.py.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="kc-isolated-"))
+    try:
+        with isolated_state(tmp):
+            return _checks()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
+    """Let `unittest discover` run this file's checks. Without it, discovery imports this module,
+    finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
+    from ..script_suite import suite_for
+
+    return suite_for(__name__, min_checks=10)
 
 if __name__ == "__main__":
     import sys

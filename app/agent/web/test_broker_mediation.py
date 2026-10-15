@@ -45,6 +45,10 @@ def main() -> int:
         from . import debug_trace as dt
         from . import dev_server as d
 
+        # Restored below: TRACE_DIR is a module constant, so leaving it pointed at this
+        # test's tmp dir makes everything that runs afterwards trace into a deleted
+        # directory. One file used to leave it at /proc/nonexistent/cannot-write.
+        _prior_trace_dir = dt.TRACE_DIR
         dt.TRACE_DIR = tmp / "trace"
         dt._traces.clear()
         d._brokers.clear()
@@ -239,6 +243,7 @@ def main() -> int:
               set(saved) <= set(broker_mod.TOOL_ACTION_CLASS.values()) | {"http_recon_insecure"},
               str(saved))
 
+    dt.TRACE_DIR = _prior_trace_dir
     print(f"\n{len(PASS)}/{len(PASS)+len(FAIL)} checks passed")
     if FAIL:
         print("FAILED:", FAIL)

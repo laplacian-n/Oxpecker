@@ -15,6 +15,8 @@ import pathlib
 import tempfile
 from unittest.mock import patch
 
+from ..isolated_state import isolated_state
+
 PASS, FAIL = [], []
 
 
@@ -31,8 +33,9 @@ class _FakeLLM:
 def main() -> int:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="oxpecker-tracecli-test-"))
     audit_dir, trace_dir = tmp / "audit", tmp / "trace"
-    with patch("agent.config.AUDIT_DIR", audit_dir), \
-         patch("agent.config.EVIDENCE_KEY_PATH", tmp / "key.bin"):
+    # See agent/isolated_state.py: the pair this replaces left EVIDENCE_DIR pointing at the
+    # operator's real evidence store, so each run added blobs to it.
+    with isolated_state(tmp):
         from . import debug_trace as dt
         from . import dev_server as d
         from . import trace_cli as tc
@@ -204,6 +207,14 @@ def main() -> int:
         return 1
     return 0
 
+
+
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
+    """Let `unittest discover` run this file's checks. Without it, discovery imports this module,
+    finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
+    from ..script_suite import suite_for
+
+    return suite_for(__name__, min_checks=37)
 
 if __name__ == "__main__":
     import sys

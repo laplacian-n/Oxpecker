@@ -17,6 +17,8 @@ import pathlib
 import tempfile
 from unittest.mock import patch
 
+from ..isolated_state import isolated_state
+
 PASS, FAIL = [], []
 
 
@@ -28,8 +30,12 @@ def check(name: str, condition: bool, detail: str = ""):
 def main() -> int:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="oxpecker-audit-test-"))
     audit_dir = tmp / "audit"
-    with patch("agent.config.AUDIT_DIR", audit_dir), \
-         patch("agent.config.EVIDENCE_KEY_PATH", tmp / "evidence_key.bin"):
+    # isolated_state redirects every state path config knows about, derived from config
+    # itself. The hand-written pair this replaces moved AUDIT_DIR and the evidence key but not
+    # EVIDENCE_DIR or EVIDENCE_INDEX_PATH, so every dispatch here wrote an encrypted blob and an
+    # index record into the operator's real evidence store — while this file's own docstring
+    # said it "leaves no entries behind".
+    with isolated_state(tmp):
         from .. import audit_log as al
         from . import dev_server as d
 
@@ -187,6 +193,14 @@ def main() -> int:
         return 1
     return 0
 
+
+
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
+    """Let `unittest discover` run this file's checks. Without it, discovery imports this module,
+    finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
+    from ..script_suite import suite_for
+
+    return suite_for(__name__, min_checks=26)
 
 if __name__ == "__main__":
     import sys
