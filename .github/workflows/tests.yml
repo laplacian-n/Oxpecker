@@ -55,12 +55,11 @@ jobs:
         # tests (9), the embedding server (7), the RAG corpus checkouts (11), SearXNG (1) and
         # outbound DNS (1). Chromium is no longer among them, because of the install step above.
         #
-        # The ceiling stays at 70 rather than dropping to that measured 68. Nobody has measured
-        # this number ON THIS RUNNER: the DNS-gated test fetches example.com for real and this
-        # runner has outbound network, so it may run here and not there. Tightening a ceiling to
-        # a figure measured somewhere else is what made the state-leak gate below reject its own
-        # first build. Read the real number off this step's `skipped=` line and tighten it in its
-        # own commit.
+        # 67 is this runner's own figure, read off this step's `skipped=` line, not a number
+        # measured somewhere else: a local run reports 68 because the DNS-gated test fetches
+        # example.com for real and a proxied machine skips it where this one runs it. The ceiling
+        # sat at 70 until that figure was observed, because tightening to a number measured
+        # elsewhere is what made the state-leak gate below reject its own first build.
         #
         # This ceiling is also the wrong instrument for the browser tests specifically, so they
         # get their own step below rather than being trusted to a one-unit move in a figure that
@@ -79,7 +78,7 @@ jobs:
           skipped = int(m.group(1)) if m else 0
           executed = ran - skipped
           print(f'ran={ran} skipped={skipped} executed={executed}')
-          MIN_EXECUTED, MAX_SKIPPED = 450, 70
+          MIN_EXECUTED, MAX_SKIPPED = 450, 67
           if executed < MIN_EXECUTED:
               sys.exit(f'only {executed} tests actually executed, floor is {MIN_EXECUTED}')
           if skipped > MAX_SKIPPED:

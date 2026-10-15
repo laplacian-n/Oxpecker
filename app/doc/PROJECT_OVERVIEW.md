@@ -423,7 +423,10 @@ Per-engagement lab notebook injected into model context every turn:
 
 ### 9.1 Stack
 
-- **Backend**: FastAPI (`agent/web/server.py`, 743 lines)
+- **Backend**: FastAPI (`agent/web/dev_server.py`). NOT `agent/web/server.py`: that is the
+  stripped early scaffold with no audit log, no taint escalation and no injection screening —
+  three of the four components §2.6.1 says a tier may never remove. `agent.run_web_ui`, which
+  everything in `deploy/` launches, delegates to `dev_server.main()` for exactly that reason.
 - **Frontend**: Single static HTML/JS (`agent/web/static/index.html`, 3,185 lines)
 - **No build step, no framework** — ทำงานเลยจาก `python3 -m agent.run_web_ui`
 - **Port**: `127.0.0.1:8765` (loopback-only by default)

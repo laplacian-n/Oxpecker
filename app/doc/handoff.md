@@ -30,7 +30,7 @@ There are two backend files. **Only `dev_server.py` matters for now:**
 | File | Status | What it is |
 |------|--------|-----------|
 | `agent/web/dev_server.py` | **Active** | Standalone FastAPI backend. All-in-one, no dependencies on agent modules. This is what runs on Windows. |
-| `agent/web/server.py` | Legacy | Full-featured backend using all agent modules. Only runs on Linux where the full agent tree is installed. Not actively developed. |
+| `agent/web/server.py` | Dead | The stripped early scaffold. No audit log, no taint escalation, no injection screening. Nothing launches it — `agent.run_web_ui` goes to `dev_server`. Do not start it; "full-featured", as this table used to call it, was the opposite of true and sent at least one reader looking for a security hole that was not there. |
 
 ## How to run
 
@@ -213,7 +213,7 @@ agent/engagement/      # Engagement lifecycle
 agent/tools/           # Tool schemas
 agent/prompts/         # System prompts
 agent/loop.py          # Agent loop
-agent/web/server.py    # Full backend (uses all above)
+agent/web/server.py    # Dead scaffold — no audit log/taint/injection screening; nothing launches it
 ```
 
 ### Can be cleaned from git
