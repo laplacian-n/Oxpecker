@@ -34,8 +34,28 @@ async function postJson(path: string, body: unknown, opts: ApiOptions): Promise<
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error(`${path} failed (${resp.status})`);
+  if (!resp.ok) throw new Error(`${path} failed (${resp.status})${await detailOf(resp)}`);
   return resp.json();
+}
+
+// FastAPI puts the reason a request was refused in `detail`, and the engagement validator fills it
+// with every problem it found, joined — "allow_targets entry 'http://x' rejected: …;
+// authorized_by is required". Dropping it left the operator with a bare 400 and a form they had
+// to guess at. The status stays in the message ahead of it, because callers match on `(401)` and
+// `(409)` to tell an auth failure from a version mismatch.
+async function detailOf(resp: Response): Promise<string> {
+  try {
+    const body = await resp.json();
+    const detail = (body as { detail?: unknown })?.detail;
+    if (typeof detail === "string" && detail) return `: ${detail}`;
+    // 422 reports a list of field errors instead of a string.
+    if (Array.isArray(detail) && detail.length) {
+      return `: ${detail.map((d: any) => d?.msg ?? JSON.stringify(d)).join("; ")}`;
+    }
+  } catch {
+    /* not JSON, or already consumed — the status alone is still an answer */
+  }
+  return "";
 }
 
 export const api = {
@@ -59,6 +79,30 @@ export const api = {
     postJson(`/api/engagements/${engagementId}/pipeline/start`, body, opts),
   stopRun: (engagementId: string, opts: ApiOptions = {}) =>
     postJson(`/api/engagements/${engagementId}/pipeline/stop`, {}, opts),
+
+  // ── Engagements ──────────────────────────────────────────────────────────────────────────────
+  // The action classes an engagement may grant, each with the tools it gates and whether it is a
+  // default. Fetched rather than hardcoded on purpose: three hand-kept copies of this list had
+  // already drifted apart, and because the broker refuses on a class an engagement does not
+  // grant, a stale copy shows up as a tool that silently cannot run.
+  actionClasses: (opts: ApiOptions = {}): Promise<any[]> =>
+    getJson(`/api/action-classes`, opts),
+  // Scope entries are validated server-side only. The rules live in agent/engagement/intake.py,
+  // which delegates to the broker's own scope parser so that what intake accepts is exactly what
+  // the broker will enforce; a second opinion written in TypeScript would be a third one overall,
+  // and the one that rejected `*.example.com` last time.
+  createEngagement: (
+    body: {
+      engagement_id: string;
+      description?: string;
+      allow_targets: string[];
+      deny_targets?: string[];
+      allowed_action_classes?: string[];
+      authorized_by: string;
+      valid_hours?: number;
+    },
+    opts: ApiOptions = {},
+  ) => postJson(`/api/engagements`, body, opts),
 
   // ── Chat sessions ────────────────────────────────────────────────────────────────────────────
   // A chat session is where a conversation lives; it belongs to an engagement (Session.engagement_id)

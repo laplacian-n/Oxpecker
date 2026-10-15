@@ -788,16 +788,72 @@ class Finding:
 
 # Global stores
 _sessions: dict[str, Session] = {}
+
+# Every action class the broker knows, plus the one it derives from a request's arguments rather
+# than from the tool name. Derived, never typed out: broker.TOOL_ACTION_CLASS is the only place
+# that decides which class gates which tool, and a hand-kept copy of its values is a list that
+# goes stale the first time a tool is added.
+KNOWN_ACTION_CLASSES: frozenset[str] = frozenset(_broker_mod.TOOL_ACTION_CLASS.values()) | {
+    "http_recon_insecure",
+}
+
+# What a new engagement is granted unless the operator says otherwise, and the one definition of
+# it. There were three divergent copies before this: this engagement's literal, the classic UI's
+# create call, and nothing at all on the React side. The broker enforces the list for real
+# (broker.py refuses with "action class %r not permitted by current RoE"), so a class missing from
+# a copy is a tool that silently cannot run on every engagement that copy created:
+#
+#   * lab-default omitted `browser_recon`, which gates browser_navigate, browser_click and
+#     browser_fetch — the entire live agent browser, unusable on the engagement the UI opens by
+#     default, with the refusal surfacing as an RoE error rather than as a missing grant.
+#   * both copies omitted `knowledge_fetch`, below.
+#
+# Two classes are deliberately NOT granted by default, and the endpoint says why so the operator
+# can make the call rather than discover the gap from a refusal:
+#
+#   * knowledge_fetch performs a real HTTP GET against the open internet (SSRF-checked and
+#     IP-pinned, but still arbitrary remote content pulled into the agent's context, which is an
+#     injection vector — hence the quarantine and injection_guard layers around it). That is an
+#     egress decision for whoever authorises the engagement, not a default. Note that
+#     knowledge_search IS granted: it reaches one self-hosted SearXNG instance on loopback.
+#   * http_recon_insecure disables TLS verification. It exists for a lab target with a
+#     self-signed certificate and must never be on unless asked for.
+DEFAULT_ACTION_CLASSES: list[str] = [
+    "passive_recon", "active_web_request", "active_scan_light", "browser_recon",
+    "knowledge_search",
+]
+
+# What each class is for, in the terms an operator deciding whether to grant it needs. Keyed by
+# class; a class with no entry still appears in the endpoint, named by its tools alone.
+ACTION_CLASS_NOTES: dict[str, str] = {
+    "passive_recon": "read a target's own responses without changing anything",
+    "active_web_request": "send requests to the target that can change its state",
+    "active_scan_light": "light port discovery against the target",
+    "browser_recon": "drive the live browser against in-scope pages (navigate, click, fetch)",
+    "knowledge_search": "search reference material through the self-hosted SearXNG on loopback",
+    "knowledge_fetch": "fetch a URL from the open internet — real egress, and remote content "
+                       "entering the agent's context. Off unless you grant it deliberately.",
+    "http_recon_insecure": "skip TLS verification. For a lab target with a self-signed "
+                           "certificate only; never grant it to reach the internet.",
+}
+
 _engagements: dict[str, Engagement] = {"lab-default": Engagement(
     engagement_id="lab-default", description="Local lab environment",
     allow_targets=["127.0.0.1", "localhost"],
     # These are enforced now, and must be names the broker knows (broker.TOOL_ACTION_CLASS).
     # The previous value included "active_recon", which is not one — it was free text that
-    # nothing validated and nothing checked, so it neither permitted nor denied anything.
-    allowed_action_classes=["passive_recon", "active_web_request", "active_scan_light",
-                            "knowledge_search"],
+    # nothing validated and nothing checked, so it neither permitted nor denied anything. It then
+    # spelled out four of the five defaults, omitting browser_recon; see DEFAULT_ACTION_CLASSES.
+    allowed_action_classes=list(DEFAULT_ACTION_CLASSES),
     authorized_by="operator",
 )}
+# Forward-only, deliberately. _load_state() below replaces this dict from the state file, so an
+# installation that already persisted lab-default keeps the four classes it was created with and
+# still refuses the browser tools. Widening a STORED authorisation record on load is not something
+# this server should do behind the operator's back -- an engagement's allowed_action_classes is
+# the record of what someone signed off, and silently adding to it on an upgrade is the one
+# migration that must not be automatic. Such an installation fixes it by creating an engagement
+# with the defaults (the landing form now does this) or by deleting lab-default and restarting.
 _approvals: dict[str, ApprovalRequest] = {}
 _consults: dict[str, ConsultRequest] = {}
 # The hypothesis store (step 2b). Every read and write goes through the accessors below, so the
@@ -3909,7 +3965,7 @@ def create_engagement(req: CreateEngagementRequest):
         errors.append("authorized_by is required — record who authorised this engagement")
     if req.valid_hours <= 0:
         errors.append("valid_hours must be greater than zero")
-    known = set(_broker_mod.TOOL_ACTION_CLASS.values()) | {"http_recon_insecure"}
+    known = KNOWN_ACTION_CLASSES
     for cls in req.allowed_action_classes:
         if cls not in known:
             errors.append(
@@ -3978,6 +4034,32 @@ def _materialize_engine_engagement(eng: Engagement) -> bool:
         log.info("Engine engagement files not written for %r (%s: %s) — autonomous run unavailable "
                  "until the engagement is completed", eng.engagement_id, type(e).__name__, e)
         return False
+
+@app.get("/api/action-classes")
+def list_action_classes():
+    """The action classes an engagement can grant, which class gates which tools, and which are
+    granted by default.
+
+    Exists so a UI offering these never carries its own list. The classic UI's create call had
+    one, lab-default had another, and they disagreed with each other and with the broker — in a
+    way that silently refused tools at runtime rather than failing at creation. A client that
+    renders this response cannot drift.
+    """
+    tools_by_class: dict[str, list[str]] = {}
+    for tool, cls in _broker_mod.TOOL_ACTION_CLASS.items():
+        tools_by_class.setdefault(cls, []).append(tool)
+    return [
+        {
+            "action_class": cls,
+            # http_recon_insecure is derived from a request's arguments rather than from a tool
+            # name, so it gates no tool outright and lists none.
+            "tools": sorted(tools_by_class.get(cls, [])),
+            "default": cls in DEFAULT_ACTION_CLASSES,
+            "note": ACTION_CLASS_NOTES.get(cls, ""),
+        }
+        for cls in sorted(KNOWN_ACTION_CLASSES)
+    ]
+
 
 @app.get("/api/engagements")
 def list_engagements():
