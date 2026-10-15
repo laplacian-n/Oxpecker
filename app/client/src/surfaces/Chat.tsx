@@ -7,6 +7,8 @@ import { EngagementEvent } from "../projection";
 import { Conversation } from "./Conversation";
 import { ConversationSubscription } from "../conversationStream";
 import { useChatSession } from "../useChatSession";
+import { useSessionDetail } from "../useSessionDetail";
+import { SessionPanel } from "./SessionPanel";
 
 // Chat — the primary, always-present surface (CLIENT_UI_DESIGN.md §6.1). It now holds BOTH things
 // the operator does here: the conversation (<Conversation/>, streamed off the session event
@@ -48,7 +50,9 @@ export function Chat({
 }) {
   const projection = useEngagement(subscription);
   const goalRef = useRef<HTMLTextAreaElement>(null);
-  const { sessionId, error: sessionError } = useChatSession(engagementId, apiOptions);
+  const session = useChatSession(engagementId, apiOptions);
+  const { sessionId, error: sessionError } = session;
+  const { detail, refresh: refreshDetail } = useSessionDetail(sessionId, apiOptions);
   // One subscription per (window, session) — rebuilt only when the session changes, never on a
   // token, or every delta would tear down the stream that delivered it.
   const conversation = useMemo(
@@ -106,6 +110,11 @@ export function Chat({
           </span>
         )}
       </header>
+
+      {/* Sidebar beside the conversation, not above it: which conversation is open is a standing
+          choice, and the transcript is what the operator reads. */}
+      <SessionPanel state={session} detail={detail} onDetailChanged={refreshDetail}
+                    apiOptions={apiOptions} />
 
       {conversation && sessionId ? (
         <Conversation subscription={conversation} sessionId={sessionId} apiOptions={apiOptions} />
