@@ -151,10 +151,16 @@ class WaveOrchestrator:
 
     def _run_one(self, w: _LiveWorker) -> None:
         deadline = time.monotonic() + self.config.worker_wall_clock_s
+        # Tag everything this worker's thread emits (the AgentLoop's tool calls, deep in the stack)
+        # with this worker_id, so the flow view and the rail can attribute a tool call to the
+        # worker that made it. Set on the worker's own thread; cleared in finally.
+        event_emit.set_current_worker(w.worker_id)
         try:
             w.result = self.worker_runner(w.hypothesis_id, w.method, w.stop, deadline)
         except Exception as e:  # noqa: BLE001 - a worker crash is a recorded failure, not a wave crash
             w.result = WorkerResult(outcome="error", detail=f"{type(e).__name__}: {e}")
+        finally:
+            event_emit.set_current_worker(None)
 
     def _await_barrier(self, claimed: list[_LiveWorker], deadline: float) -> None:
         """Wait for every worker, but no longer than the wall-clock. A worker still running at the
