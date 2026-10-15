@@ -375,9 +375,16 @@ function handleServerEvent(evt){
     // screening was wired in, and nothing rendered it, so the one signal that says "this output
     // tried to redirect the agent" never reached the operator.
     case 'injection_flagged':
-      if(!S.threads[sid])S.threads[sid]=[];
-      S.threads[sid].push({role:'system',content:'\u26a0 Possible prompt injection in '+(evt.tool||'tool')+' output ('+(evt.verdict||'flagged')+(evt.reasons&&evt.reasons.length?': '+evt.reasons.join(', '):'')+')'+(evt.tainted?'. The session is now held to passive recon \u2014 each further action needs your approval for the next 5 minutes.':'. From the local knowledge index, so the session was not restricted.')});
-      render();softScroll();break;
+      // Only surface a flag that actually GATES the session (tainted \u2192 approval required). A
+      // non-gating flag (a benign encoded blob, or exempt knowledge-index output) is just wrapped as
+      // data for the model and would otherwise spam the chat with faint repeated notices the operator
+      // never acts on, so we keep it out of the conversation.
+      if(evt.tainted){
+        if(!S.threads[sid])S.threads[sid]=[];
+        S.threads[sid].push({role:'system',content:'\u26a0 Prompt injection flagged in '+(evt.tool||'tool')+' output ('+(evt.verdict||'flagged')+(evt.reasons&&evt.reasons.length?': '+evt.reasons.join(', '):'')+'). The session is held to passive recon \u2014 further actions need your approval for 5 minutes.'});
+        render();softScroll();
+      }
+      break;
     case 'taint_error':toast('Taint store write failed: '+evt.error);break;
     case 'audit_error':toast('Audit write failed: '+evt.error);break;
   }

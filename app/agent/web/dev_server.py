@@ -2187,7 +2187,13 @@ def _audited_run_tool(name: str, args: dict, session: Session, *, turn_index: in
     wrapped, scan = _injection_guard.wrap_and_flag(raw_text)
 
     tainted_by_this_result = False
-    if scan.matched and canonical not in _TAINT_EXEMPT_TOOLS:
+    # An "unknown" verdict is a high-entropy/encoded blob with NO injection phrasing — extremely
+    # common on real sites (Cloudflare email-protection hex, minified JS, base64 assets) and far too
+    # weak a signal to hold the whole session to passive recon behind approval. The output is still
+    # wrapped as data and still flagged in the UI; only the corroborated verdicts
+    # (suspicious/malicious) taint the session. This stops the "approve everything" spam a benign
+    # encoded blob used to cause.
+    if scan.verdict in ("suspicious", "malicious") and canonical not in _TAINT_EXEMPT_TOOLS:
         # The other half of what the wrapper markers start. Wrapping tells the model this text
         # is data; marking the session tells the *broker* that this session has handled
         # attacker-controlled text, so the next action beyond passive recon needs an operator.
