@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .. import config
+from ..isolated_state import isolated_state
 from .approval_queue import ApprovalQueue
 from .broker import Broker
 from .contracts import ActionRequest
@@ -38,7 +39,7 @@ def _write_engagement(tmp: Path, allowed_action_classes: list[str]) -> Path:
     return eng_dir
 
 
-def main() -> int:
+def _checks() -> int:
     from ..security_mcp_server import _browser_fetch
 
     tmp = Path(tempfile.mkdtemp(prefix="browser-channel-test-"))
@@ -118,6 +119,28 @@ def main() -> int:
         return 1
     return 0
 
+
+
+def main() -> int:
+    """Run the checks with every state path redirected into a temp dir.
+
+    These drive the real Broker, so without this the audit records, taint records and queued
+    approvals they produce land in the operator's real agent/state — see agent/isolated_state.py.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="browser-channel-isolated-"))
+    try:
+        with isolated_state(tmp):
+            return _checks()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - stdlib protocol
+    """Let `unittest discover` run this file's checks. Without it, discovery imports this module,
+    finds no TestCase, collects nothing, and reports success — see agent/script_suite.py."""
+    from ..script_suite import suite_for
+
+    return suite_for(__name__, min_checks=2)
 
 if __name__ == "__main__":
     import sys
