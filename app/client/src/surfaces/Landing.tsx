@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiOptions } from "../api";
 import { UpdateButton } from "../UpdateButton";
+import { EngagementForm } from "./EngagementForm";
 import { getApiKey, setApiKey, getBaseUrl, setBaseUrl, sessionOptions } from "../session";
 
 // The landing (CLIENT_UI_DESIGN.md): where the operator authenticates and chooses an engagement.
@@ -74,14 +75,23 @@ export function Landing({ apiImpl = api }: { apiImpl?: typeof api }) {
         <button type="submit" data-testid="connect">Connect</button>
       </form>
 
+      {/* Creating one, not only opening one. The list below is what this screen did; an operator
+          who had none had nowhere to go from here but the classic UI. */}
+      {engagements !== null && !error && (
+        <EngagementForm
+          apiOptions={sessionOptions()}
+          onCreated={() => { void load(sessionOptions()); }}
+        />
+      )}
+
       {loading && <p data-testid="landing-loading">Connecting…</p>}
       {error && <p className="landing-error" data-testid="landing-error">{error}</p>}
 
       {engagements !== null && !error && (
         engagements.length === 0 ? (
           <p data-testid="landing-empty">
-            No engagements yet. Create one (scoped to your target) in the classic UI at <a href="/">/</a>,
-            then it appears here.
+            No engagements yet. Create one above — it needs at least one in-scope target, because
+            an engagement that authorises nothing cannot be used.
           </p>
         ) : (
           <ul className="engagement-list" data-testid="engagement-list">

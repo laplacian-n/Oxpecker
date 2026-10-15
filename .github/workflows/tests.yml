@@ -206,7 +206,7 @@ jobs:
             const files = pick("Test Files");
             const tests = pick("Tests");
             console.log(`files=${files.passed} tests=${tests.passed} skipped=${tests.skipped}`);
-            const MIN_FILES = 17, MIN_TESTS = 93;
+            const MIN_FILES = 18, MIN_TESTS = 102;
             if (tests.skipped || files.skipped) {
               throw new Error(`${tests.skipped} test(s) and ${files.skipped} file(s) skipped; the client suite has no environment gates, so a skip means something stopped loading`);
             }

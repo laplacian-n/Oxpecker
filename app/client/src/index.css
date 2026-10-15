@@ -93,6 +93,23 @@ main { flex: 1; overflow: auto; padding: 16px; }
 .engagement-list li a:hover { border-color: #3a3a3a; text-decoration: none; }
 .eng-desc { color: var(--muted); }
 
+/* ── Engagement form (landing) ── */
+.engagement-form { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.engagement-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.engagement-form input[type="text"], .engagement-form input[type="number"], .engagement-form input:not([type]),
+.engagement-form textarea {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit;
+}
+.engagement-form textarea { resize: vertical; }
+.action-classes { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; }
+.action-classes legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
+/* Row direction, unlike the text fields above: the checkbox belongs beside its label, and the
+   form's column rule would otherwise stack it above. */
+.action-class { flex-direction: row !important; align-items: baseline; gap: 8px; color: var(--text); }
+.action-class code { color: var(--text); }
+.engagement-form-actions { display: flex; gap: 8px; }
+
 /* ── Conversation (chat surface) ── */
 .conversation { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
 .conversation-status { display: flex; gap: 8px; flex-wrap: wrap; }
