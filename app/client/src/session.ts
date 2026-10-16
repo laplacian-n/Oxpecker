@@ -11,6 +11,7 @@
 
 const KEY_STORAGE = "oxpecker.apiKey";
 const BASEURL_STORAGE = "oxpecker.baseUrl";
+const LAST_ENGAGEMENT_STORAGE = "oxpecker.lastEngagement";
 
 function read(name: string): string {
   try {
@@ -43,6 +44,17 @@ export function getBaseUrl(): string {
 
 export function setBaseUrl(url: string): void {
   write(BASEURL_STORAGE, url.replace(/\/$/, ""));
+}
+
+// The engagement the operator last had open, so the app reopens straight into it instead of the
+// picker. Per-viewer like the key — a convenience, not state the server owns. The picker (now at
+// /engagements) stays one click away for switching or creating; this only decides where "/" lands.
+export function getLastEngagement(): string {
+  return read(LAST_ENGAGEMENT_STORAGE);
+}
+
+export function setLastEngagement(engagementId: string): void {
+  write(LAST_ENGAGEMENT_STORAGE, engagementId);
 }
 
 // The options every subscription and api call takes, built from the stored session. One place, so
