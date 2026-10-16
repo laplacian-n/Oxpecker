@@ -145,6 +145,7 @@ const icons={
   check:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"></path></svg>',
   shieldSm:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"></path></svg>',
   monitor:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg>',
+  workers:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"></circle><path d="M3 20a6 6 0 0 1 12 0"></path><path d="M16 6a3 3 0 0 1 0 6M18 20a6 6 0 0 0-3-5.2"></path></svg>',
   doc:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12h6M9 16h6M9 8h6M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"></path></svg>',
   bolt:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>',
   key:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l9-9M16 7l3 3"></path></svg>',
@@ -233,6 +234,8 @@ const S = {
   apiKey: '',
 
   eventSource: null,
+  workers: [], models: [], toolsInFlight: [],
+  browserSeq: 0, browserErr: null,
   chainOpen: {},
   stepOpen: {},
   statsOpen: false,
@@ -308,6 +311,9 @@ const api={
   // RECON→CLOSEOUT engagement itself, streaming phase/wave events the SSE handler already renders.
   async startPipeline(sid,data){return(await fetch('/api/sessions/'+sid+'/pipeline/start',{method:'POST',headers:apiHeaders(),body:JSON.stringify(data)})).json()},
   async stopPipeline(sid){return(await fetch('/api/sessions/'+sid+'/pipeline/stop',{method:'POST',headers:apiHeaders()})).json()},
+  async engagementSnapshot(id){return(await fetch('/api/engagements/'+encodeURIComponent(id)+'/snapshot',{headers:apiHeaders()})).json()},
+  async browserStart(id){return(await fetch('/api/engagements/'+encodeURIComponent(id)+'/browser/start',{method:'POST',headers:apiHeaders()})).json()},
+  async browserStop(id){return(await fetch('/api/engagements/'+encodeURIComponent(id)+'/browser/stop',{method:'POST',headers:apiHeaders()})).json()},
 };
 
 /* SSE */
@@ -560,6 +566,105 @@ async function graphNodeAction(ordinal,action,reason,text){
   if(S.selectedNode===ordinal)S.nodeDetail=await api.getGraphNode((S.activeSession||S.engagementId),ordinal);render();}catch(e){toast('Failed: '+e.message)}
 }
 
+/* Workers view — the autonomous run's workers, read from the engagement snapshot (§4.2), the same
+   read-model the retired React client used. Shows what each worker is testing, its state and
+   outcome, plus the model roster (what the strategist has spent), and refreshes while the run
+   works — brought into the classic UI so the whole engagement lives in one place. */
+async function openWorkers(){
+  S.view='workers';
+  try{const s=await api.engagementSnapshot(S.engagementId);S.workers=s.workers||[];S.models=s.model_roster||[];S.toolsInFlight=s.tool_calls_in_flight||[];}
+  catch(e){S.workers=[];S.models=[];S.toolsInFlight=[];}
+  render();startWorkersPoll();
+}
+let _workersPoll=null;
+function _workersSig(ws,tf){return (ws||[]).map(w=>w.worker_id+':'+(w.status||'')+':'+(w.outcome||'')).join('|')+'#'+((tf||[]).map(t=>t.worker+':'+t.tool).join(','));}
+function startWorkersPoll(){
+  stopWorkersPoll();
+  _workersPoll=setInterval(async()=>{
+    if(S.view!=='workers'){stopWorkersPoll();return;}
+    try{const s=await api.engagementSnapshot(S.engagementId);
+      if(_workersSig(s.workers,s.tool_calls_in_flight)!==_workersSig(S.workers,S.toolsInFlight)){
+        S.workers=s.workers||[];S.models=s.model_roster||[];S.toolsInFlight=s.tool_calls_in_flight||[];render();}
+    }catch(e){}
+  },1800);
+}
+function stopWorkersPoll(){if(_workersPoll){clearInterval(_workersPoll);_workersPoll=null;}}
+
+/* Live agent browser — start the screencast, then poll the newest JPEG (204 when unchanged, the
+   seq riding in X-Frame-Seq so a still page is cheap). The <img> is updated in place so the frame
+   does not flicker on every render. */
+let _browserPoll=null;
+async function openBrowser(){
+  S.view='browser';S.browserErr=null;S.browserSeq=0;
+  render();
+  try{await api.browserStart(S.engagementId);}catch(e){S.browserErr='Could not start the browser: '+(e.message||e);render();}
+  startBrowserPoll();
+}
+function startBrowserPoll(){
+  stopBrowserPoll();
+  _browserPoll=setInterval(async()=>{
+    if(S.view!=='browser'){stopBrowserPoll();return;}
+    try{
+      const r=await fetch(SERVER_BASE+'/api/engagements/'+encodeURIComponent(S.engagementId)+'/browser/frame?since='+(S.browserSeq||0),{headers:apiHeaders()});
+      if(r.status===204||!r.ok)return;
+      const seq=parseInt(r.headers.get('X-Frame-Seq')||'0',10)||((S.browserSeq||0)+1);
+      const blob=await r.blob();const url=URL.createObjectURL(blob);
+      const img=document.getElementById('agentBrowserImg');
+      if(img){if(img.src&&img.src.indexOf('blob:')===0)URL.revokeObjectURL(img.src);img.src=url;img.style.display='block';}
+      const wait=document.getElementById('agentBrowserWait');if(wait)wait.style.display='none';
+      S.browserSeq=seq;
+    }catch(e){}
+  },500);
+}
+function stopBrowserPoll(){if(_browserPoll){clearInterval(_browserPoll);_browserPoll=null;}}
+
+function renderWorkers(){
+  const statusColor={running:'#d98c3a',finished:'#4ec9a3',idle:'#7d7d7d',error:'#e5484d'};
+  const inflight={};(S.toolsInFlight||[]).forEach(t=>{inflight[t.worker]=t.tool;});
+  const rows=(S.workers||[]).map(w=>{
+    const live=inflight[w.worker_id];
+    const st=live?'running':(w.status||'idle');
+    const col=statusColor[w.outcome==='error'?'error':st]||'#7d7d7d';
+    return `<div style="border:1px solid #1a1a1a;border-radius:10px;padding:12px 14px;background:#0a0a0a;display:flex;flex-direction:column;gap:5px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="width:7px;height:7px;border-radius:50%;background:${col};flex:none"></span>
+        <span style="font:600 13px 'Instrument Sans';color:#ededed">${esc(w.worker_id||'worker')}</span>
+        <span style="font:500 11px 'JetBrains Mono';color:${col};margin-left:auto">${esc(live?('→ '+live):st)}${w.outcome?(' · '+esc(w.outcome)):''}</span>
+      </div>
+      ${w.method?`<div style="font:400 12.5px 'Instrument Sans';color:#b5b5b5">${esc(w.method)}</div>`:''}
+      ${w.hypothesis?`<div style="font:400 11px 'JetBrains Mono';color:#5a5a5a">${esc(w.hypothesis)}</div>`:''}
+    </div>`;
+  }).join('');
+  const models=(S.models||[]).map(m=>`<span style="border:1px solid #1f1f1f;border-radius:5px;padding:2px 8px;font:400 11px 'JetBrains Mono';color:#7d7d7d">${esc(m.model_id)} · ${m.calls||0} calls · ${((m.prompt_tokens||0)+(m.completion_tokens||0)).toLocaleString()} tok · $${(m.cost||0).toFixed(4)}</span>`).join('');
+  return `<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid #1a1a1a;flex:none">
+      <div style="font:600 15px 'Instrument Sans'">Workers</div>
+      <div style="font:400 12px 'JetBrains Mono';color:#7d7d7d">${(S.workers||[]).length} worker(s)</div>
+      <div class="hv" data-action="closeWorkers" style="margin-left:auto;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:18px 24px;display:flex;flex-direction:column;gap:10px">
+      ${rows||'<div style="color:#7d7d7d;font:400 13px \'Instrument Sans\';text-align:center;margin-top:40px">No workers yet. Start an autonomous run and the strategist will spawn workers here.</div>'}
+      ${models?`<div style="margin-top:14px;padding-top:12px;border-top:1px solid #1a1a1a"><div style="font:600 12px 'Instrument Sans';color:#9a9a9a;margin-bottom:8px">Models</div><div style="display:flex;flex-wrap:wrap;gap:6px">${models}</div></div>`:''}
+    </div>
+  </div>`;
+}
+
+function renderBrowser(){
+  return `<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid #1a1a1a;flex:none">
+      <div style="font:600 15px 'Instrument Sans'">Agent browser</div>
+      <div style="font:400 12px 'JetBrains Mono';color:#7d7d7d">live screen</div>
+      <div class="hv" data-action="closeBrowser" style="margin-left:auto;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
+    </div>
+    <div style="flex:1;overflow:auto;padding:18px 24px;display:flex;align-items:flex-start;justify-content:center">
+      ${S.browserErr
+        ?`<div style="color:#e5484d;font:400 13px 'Instrument Sans';margin-top:40px">${esc(S.browserErr)}</div>`
+        :`<img id="agentBrowserImg" style="max-width:100%;border:1px solid #1a1a1a;border-radius:8px;background:#fff;display:none" alt="agent browser"/>
+          <div id="agentBrowserWait" style="color:#7d7d7d;font:400 13px 'Instrument Sans';margin-top:40px">Waiting for the agent's browser to paint a frame…</div>`}
+    </div>
+  </div>`;
+}
+
 function toast(text){clearTimeout(S.toastTimer);S.toast=text;render();S.toastTimer=setTimeout(()=>{S.toast=null;render();},4000);}
 function copyText(text){try{navigator.clipboard.writeText(text)}catch(e){}toast('Copied');}
 
@@ -704,6 +809,8 @@ function renderApp(){
     (S.view==='home'?renderHome():'')+
     (S.view==='chat'?renderChat():'')+
     (S.view==='graph'?renderGraph():'')+
+    (S.view==='workers'?renderWorkers():'')+
+    (S.view==='browser'?renderBrowser():'')+
     '</main>'+
     renderApprovalsDrawer()+renderModal()+renderToast();
 }
@@ -918,6 +1025,8 @@ function renderChat(){
       <div style="display:flex;align-items:center;gap:2px;flex:none">
         ${(window.oxpecker&&window.oxpecker.checkForUpdates)?`<div class="hv hv-color" data-action="checkUpdate" title="Check for a newer version of the desktop app" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⟳ ${S.updateMsg||'Updates'}</div>`:''}
         <div class="hv hv-color" data-action="openGraph" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.graph}Hypothesis Tree</div>
+        <div class="hv hv-color" data-action="openWorkers" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.workers}Workers</div>
+        <div class="hv hv-color" data-action="openBrowser" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.monitor}Browser</div>
         <div class="hv hv-color" data-action="toggleSteer" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:${S.steerOpen?A70:'#9a9a9a'}">${icons.steer}Steer</div>
         <div class="hv hv-color" data-action="copySessionId" style="display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:7px;cursor:pointer;font:500 12px 'Instrument Sans';color:#9a9a9a">${icons.copy}${S.idCopied?'Copied':''}</div>
       </div>
@@ -1764,6 +1873,10 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'checkUpdate': checkUpdate(); break;
     case 'openGraph': openGraph(); break;
     case 'closeGraph': stopGraphPoll(); S.view='chat'; S.selectedNode=null; S.nodeDetail=null; render(); break;
+    case 'openWorkers': openWorkers(); break;
+    case 'closeWorkers': stopWorkersPoll(); S.view='chat'; render(); break;
+    case 'openBrowser': openBrowser(); break;
+    case 'closeBrowser': stopBrowserPoll(); S.view='chat'; render(); break;
     case 'toggleSteer': S.steerOpen=!S.steerOpen; render(); break;
     case 'sendSteer': sendSteer(); break;
     case 'copySessionId': if(S.activeSession){copyText(S.activeSession);S.idCopied=true;render();setTimeout(()=>{S.idCopied=false;render()},1200);} break;
@@ -1919,6 +2032,8 @@ document.addEventListener('keydown',function(e){
     else if(S.menu){S.menu=null;render();}
     else if(S.statsOpen){S.statsOpen=false;render();}
     else if(S.view==='graph'){S.view='chat';S.selectedNode=null;S.nodeDetail=null;render();}
+    else if(S.view==='workers'){stopWorkersPoll();S.view='chat';render();}
+    else if(S.view==='browser'){stopBrowserPoll();S.view='chat';render();}
     return;
   }
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){
