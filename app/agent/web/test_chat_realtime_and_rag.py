@@ -125,6 +125,21 @@ class ClassicUiHeaderTest(unittest.TestCase):
         self.assertIn("case 'checkUpdate'", self.html)
         self.assertIn("async function checkUpdate(", self.html)
 
+    def test_the_worker_and_browser_views_the_retired_client_had_are_in_the_classic_ui(self):
+        # The views the ⧉ Workspace button used to reach (/app/ worker rail, agent browser) are
+        # brought into the classic UI so nothing was lost by retiring the React client: a header
+        # button, an action case, and the function + render behind each.
+        for action in ("openWorkers", "openBrowser"):
+            self.assertIn(f'data-action="{action}"', self.html, action)
+            self.assertIn(f"case '{action}'", self.html, action)
+            self.assertIn(f"async function {action}(", self.html, action)
+        self.assertIn("function renderWorkers(", self.html)
+        self.assertIn("function renderBrowser(", self.html)
+        # The worker view reads the §4.2 engagement snapshot (the same read-model the React client
+        # used), and the browser view polls the JPEG frame endpoint.
+        self.assertIn("engagementSnapshot", self.html)
+        self.assertIn("/browser/frame", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
