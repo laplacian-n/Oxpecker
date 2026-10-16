@@ -187,6 +187,13 @@ main:has(> .surface[data-surface="chat"]) { padding: 0; overflow: hidden; }
   display: flex; flex-direction: column; gap: 6px;
 }
 .conversation-notices { list-style: none; padding: 0; margin: 0 auto; width: 100%; max-width: 46rem; color: var(--accent); font-size: 12px; }
+/* The autonomous run, narrated as assistant-style activity lines in the chat column. Muted and
+   compact so a long run reads as a running commentary, not a wall of bubbles. */
+.run-activity { list-style: none; padding: 0; margin: 0 auto; width: 100%; max-width: 46rem; display: flex; flex-direction: column; gap: 3px; }
+.activity-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 10px; border-radius: 8px; font-size: 13px; }
+.activity-row:hover { background: var(--panel); }
+.activity-icon { width: 1.3em; text-align: center; flex-shrink: 0; color: var(--muted); }
+.activity-text { color: var(--text); overflow-wrap: anywhere; }
 .composer {
   display: flex; gap: 8px; align-items: flex-end;
   width: 100%; max-width: 46rem; margin: 0 auto; padding: 12px 16px 16px;

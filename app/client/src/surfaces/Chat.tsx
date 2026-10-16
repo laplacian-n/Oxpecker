@@ -5,6 +5,7 @@ import { ApprovalsPanel } from "./ApprovalsPanel";
 import { api, ApiOptions } from "../api";
 import { EngagementEvent } from "../projection";
 import { Conversation } from "./Conversation";
+import { RunActivity } from "./RunActivity";
 import { ConversationSubscription } from "../conversationStream";
 import { useChatSession } from "../useChatSession";
 import { useSessionDetail } from "../useSessionDetail";
@@ -143,7 +144,11 @@ export function Chat({
       <div className="chat-body">
         <div className="chat-main">
           {conversation && sessionId ? (
-            <Conversation subscription={conversation} sessionId={sessionId} apiOptions={apiOptions} />
+            <Conversation
+              subscription={conversation} sessionId={sessionId} apiOptions={apiOptions}
+              activity={<RunActivity events={projection.events} />}
+              hasActivity={projection.events.length > 0}
+            />
           ) : (
             <p data-testid="no-conversation" className="landing-error chat-empty">
               {sessionError
