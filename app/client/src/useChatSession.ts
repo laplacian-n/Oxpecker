@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiOptions } from "./api";
 
+// Caps the auto-open effect below at one created session per engagement for the life of the app
+// load. That effect creates a session when the engagement has none; if the server's session list
+// ever comes back without this engagement's sessions — a server running code old enough that the
+// list row omits engagement_id (so the client filter matches nothing), a transient empty response,
+// a races'd refetch — the effect would re-run on every mount and create a fresh empty session each
+// time. That is the "Untitled session ×6" pile-up. Recording the engagements already auto-created
+// for means a missing-from-list session is never mistaken for "none exist, make another".
+const autoCreatedEngagements = new Set<string>();
+
 // Which conversation the chat surface is showing, and the rest of this engagement's conversations.
 //
 // A message goes to a SESSION, not to an engagement, and a session belongs to an engagement
@@ -99,6 +108,15 @@ export function useChatSession(
           setSessionId(rows[0].session_id);
           return;
         }
+        if (autoCreatedEngagements.has(engagementId)) {
+          // Already auto-created one for this engagement this app load and the list is not showing
+          // it (see autoCreatedEngagements). Do not spawn another — leave the surface without a
+          // selection rather than pile up empty sessions; the operator can open one with "New".
+          return;
+        }
+        // Mark before the await, not after: two effect runs in the same tick (a dep identity change
+        // landing before the request resolves) must not both pass the guard and each create one.
+        autoCreatedEngagements.add(engagementId);
         const created = await apiImpl.createSession({ engagement_id: engagementId }, apiOptions);
         if (!live) return;
         setSessionId(created.session_id);
@@ -122,6 +140,9 @@ export function useChatSession(
       const created = await apiImpl.createSession(
         { engagement_id: engagementId, ...opts }, apiOptions,
       );
+      // An explicit open also satisfies the auto-open guard: this engagement now has a session, so
+      // a later remount against a list that does not show it must not auto-create a second one.
+      autoCreatedEngagements.add(engagementId);
       // Selected before the list is refetched: the operator asked for this conversation, and
       // waiting on a second round trip to show it reads as the button having done nothing.
       setSessionId(created.session_id);

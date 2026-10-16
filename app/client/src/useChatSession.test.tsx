@@ -139,3 +139,19 @@ test("8. no engagement means no session and no request", async () => {
   await waitFor(() => expect(screen.getByTestId("current")).toHaveTextContent("none"));
   expect(impl.sessions).not.toHaveBeenCalled();
 });
+
+test("9. a list that never reflects the new session auto-creates only one, not one per mount", async () => {
+  // The Untitled-session pile-up: a server old enough that its session-list row omits
+  // engagement_id makes the client filter drop every row, so the engagement always looks empty.
+  // Each mount (every navigation back to the surface) would create another empty session. The
+  // guard caps it at one for the engagement, so a stale server costs one stray session, not six.
+  // A distinct engagement id, because the guard's record of "already auto-created" is module-level
+  // and outlives a single test — exactly so it can outlive a remount in the app.
+  const impl = { ...fakeApi([]), sessions: vi.fn(async () => []) }; // list never shows the created one
+  const first = render(<Harness engagementId="stale-eng" apiImpl={impl} />);
+  await waitFor(() => expect(impl.createSession).toHaveBeenCalledTimes(1));
+  first.unmount();
+  render(<Harness engagementId="stale-eng" apiImpl={impl} />);
+  await new Promise((r) => setTimeout(r, 50)); // let the second mount's effect run
+  expect(impl.createSession).toHaveBeenCalledTimes(1);
+});
