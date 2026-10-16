@@ -93,33 +93,29 @@ class NoStoreOnTheUiShellsTest(unittest.TestCase):
     is updated — the "I reinstalled and nothing changed" symptom was a cached shell, since these
     changes are server-side (the .exe is a thin client that loads the UI from the server)."""
 
-    def test_both_ui_shells_are_served_no_store(self):
+    def test_the_classic_ui_shell_is_served_no_store(self):
         from fastapi.testclient import TestClient
 
         with TestClient(dev_server.app) as client:
-            # / is a redirect to /app/ now; the classic shell it used to serve lives at /classic.
+            # / serves the classic UI (no-store), and /classic is its alias. The React client at
+            # /app/ is retired — it redirects to / — so there is no second shell to check.
+            self.assertEqual(client.get("/").headers.get("cache-control"), "no-store")
             self.assertEqual(client.get("/classic").headers.get("cache-control"), "no-store")
-            # /app/ serves the SPA shell (or a 503 when unbuilt) — either way, not cached.
-            appresp = client.get("/app/")
-            if appresp.status_code == 200:
-                self.assertEqual(appresp.headers.get("cache-control"), "no-store")
 
 
-class ClassicUiReachesTheWorkspaceAndUpdatesTest(unittest.TestCase):
-    """The desktop app opens the classic UI (/) by default, so the multi-surface workspace (/app/)
-    and the update check must be reachable FROM the classic header, or the operator never sees
-    them — which is exactly what happened."""
+class ClassicUiHeaderTest(unittest.TestCase):
+    """The classic UI is the whole product now, so its header must not link to the retired React
+    client (a door into a UI that redirects straight back is a trap), and the update check must
+    still be reachable from it."""
 
     def setUp(self):
         self.html = INDEX_HTML.read_text(encoding="utf-8")
 
-    def test_a_workspace_link_deep_links_into_app_with_the_key(self):
-        self.assertIn("data-action=\"openWorkspace\"", self.html)
-        self.assertIn("case 'openWorkspace'", self.html)
-        self.assertIn("/app/", self.html)
-        # carries the key and deep-links to the engagement's surface, not a bare picker
-        self.assertRegex(self.html, r"key='\+encodeURIComponent\(S\.apiKey\)")
-        self.assertIn("/flow", self.html)
+    def test_the_header_no_longer_links_to_the_retired_react_client(self):
+        self.assertNotIn("openWorkspace", self.html,
+                         "the classic header still has the Workspace link into /app/, which is "
+                         "retired — the operator clicks it and lands back where they were")
+        self.assertNotIn("/app/", self.html)
 
     def test_the_update_button_is_method_detected_like_the_react_one(self):
         # Rendered only when the shell actually exposes checkForUpdates (a browser tab / old shell

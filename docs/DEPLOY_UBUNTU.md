@@ -66,24 +66,14 @@ implementation, so `/api/sessions/{id}/ws` silently stops being a WebSocket rout
 plain HTTP (404). The shipped UI uses SSE and does not need it, but a client that opens the
 WebSocket will fail confusingly without it.
 
-### Build the operator client
+### The UI
 
-The new operator client (CLIENT_UI_DESIGN.md) is a React bundle that `dev_server` serves at
-`/app/`. It is built from source on the server — the bundle is not committed — so build it once
-after cloning (and after any pull that changes `app/client/`):
+The classic single-file UI is the whole product and needs no build step — it is served straight
+from `app/agent/web/static/index.html`. A browser or the Electron client opens
+`http://<ubuntu-host>:7777/` and gets it, and the Electron shell defaults to `/`.
 
-```bash
-# needs Node 18+ (nvm, or `sudo apt install -y nodejs npm`)
-sudo -u oxpecker npm --prefix /opt/oxpecker/app/client install
-sudo -u oxpecker npm --prefix /opt/oxpecker/app/client run build
-```
-
-The classic single-file UI is the default: a browser or the Electron client opens
-`http://<ubuntu-host>:7777/` and gets it, and the Electron shell defaults to `/`. The React
-operator client is the opt-in alternative at `/app/` (the classic UI deep-links to it for the
-flow/worker/browser views); set `"uiPath": "/app/"` in `electron/config.local.json` to open
-straight into it. Until the React bundle is built, `/app/` serves a short "client not built" page
-with the build command above.
+The separate React operator client that used to live at `/app/` is retired: the server redirects
+`/app*` back to `/`, so there is nothing to build and no second UI to point at.
 
 `tree` is not a Python dependency, but `config.COMMAND_ALLOWLIST` lets the model call it via
 `run_command`, and it is not installed by any other package on a stock Ubuntu image. Found by
@@ -291,8 +281,8 @@ it talks to this server over the LAN and lets the operator type the server addre
   Nothing runs locally — the agent and all data stay on the server.
 
 A browser at `http://<ubuntu-host>:7777/` is the same UI without installing anything: `/` serves
-the classic single-file UI, which is what the desktop app opens too. The React operator client is
-the opt-in alternative at `/app/`.
+the classic single-file UI, which is what the desktop app opens too. (The old React client at
+`/app/` is retired and redirects to `/`.)
 
 **Offline mode (experimental).** Set `"bundledClient": true` (in `electron/config.json` before
 building, or `config.local.json` in dev) and the desktop app loads the UI from inside itself rather
