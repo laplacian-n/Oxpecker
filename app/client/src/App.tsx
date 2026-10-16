@@ -1,5 +1,6 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { HashRouter, Routes, Route, Navigate, NavLink, Link, useParams } from "react-router-dom";
+import { api } from "./api";
 import { EngagementSubscription } from "./subscription";
 import { useEngagement } from "./useEngagement";
 import { surfacesForTier, SurfaceName } from "./tier/surfacing";
@@ -10,7 +11,7 @@ import { WorkerRail } from "./surfaces/WorkerRail";
 import { Browser } from "./surfaces/Browser";
 import { Landing } from "./surfaces/Landing";
 import { UpdateButton } from "./UpdateButton";
-import { sessionOptions } from "./session";
+import { sessionOptions, getApiKey, getLastEngagement, setLastEngagement } from "./session";
 
 // HashRouter, not BrowserRouter: the built client is loaded from a file:// URL by the Electron
 // shell and served as a static bundle by the Python server, neither of which does server-side
@@ -34,6 +35,11 @@ function useRouteSubscription(engagementId: string) {
     void subscription.start();
     return () => subscription.close();
   }, [subscription]);
+  // Remember the engagement in view so the app reopens straight into it (see Home). Written on
+  // every engagement surface, so the last one the operator looked at wins.
+  useEffect(() => {
+    if (engagementId) setLastEngagement(engagementId);
+  }, [engagementId]);
   return subscription;
 }
 
@@ -52,7 +58,7 @@ function TierNav({ subscription, engagementId }: { subscription: EngagementSubsc
   ];
   return (
     <nav>
-      <Link to="/" data-testid="nav-home" className="nav-home" title="engagements">⌂</Link>
+      <Link to="/engagements" data-testid="nav-home" className="nav-home" title="engagements">⌂</Link>
       <span className="eng-id" data-testid="nav-engagement">{engagementId}</span>
       <span className="tier-badge" data-testid="tier-badge">
         tier: {projection.tier}
@@ -153,11 +159,43 @@ function BrowserRouteInner({ subscription }: { subscription: EngagementSubscript
   return <Browser subscription={subscription} engagementId={engagementId} apiOptions={sessionOptions()} />;
 }
 
+// The app's front door. The operator asked to open straight into a chat, not onto the engagement
+// picker — that picker as the forced first screen was the friction they kept hitting. So "/" lands
+// where they last were (or on a sensible default), and the picker moves to /engagements, one click
+// away behind ⌂ for switching, creating or changing the key. The picker is still the fallback when
+// there is no key, the server cannot be reached, or the install has no engagements yet to open.
+export function Home() {
+  const [to, setTo] = useState<string | null>(null); // null while deciding
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      if (!getApiKey()) { if (live) setTo("/engagements"); return; }
+      try {
+        const list = await api.engagements(sessionOptions());
+        const ids = (Array.isArray(list) ? list : []).map((e: any) => e.engagement_id);
+        if (!live) return;
+        const last = getLastEngagement();
+        const pick = (last && ids.includes(last) && last)
+          || (ids.includes("lab-default") ? "lab-default" : ids[0]);
+        setTo(pick ? `/${pick}/chat` : "/engagements"); // no engagements → go create one
+      } catch {
+        if (live) setTo("/engagements"); // unreachable or key rejected — show connect
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+  if (to === null) {
+    return <div className="landing" data-testid="home-deciding"><p>Opening…</p></div>;
+  }
+  return <Navigate to={to} replace />;
+}
+
 export function App() {
   return (
     <HashRouter>
       <Routes>
-        <Route path="/" element={<Landing />} />
+        <Route path="/" element={<Home />} />
+        <Route path="/engagements" element={<Landing />} />
         <Route path="/:engagementId/chat" element={<Surface gate="chat" render={(s) => <ChatRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/work" element={<Surface gate="notebook" render={(s) => <WorkRouteInner subscription={s} />} />} />
         <Route path="/:engagementId/flow" element={<Surface gate="flow" render={(s) => <FlowView subscription={s} />} />} />
