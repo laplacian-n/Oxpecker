@@ -3176,37 +3176,18 @@ CLIENT_DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
 
 
 @app.get("/app")
-def client_root_redirect():
-    # The built index.html references assets as ./assets/... (vite base "./"), which only resolves
-    # correctly when the document is served at a path ending in '/'. Redirect so /app/assets/... is
-    # what the browser requests.
-    return RedirectResponse("/app/")
-
-
 @app.get("/app/")
 @app.get("/app/{path:path}")
-def serve_client(path: str = ""):
-    if not CLIENT_DIST.is_dir():
-        return HTMLResponse(
-            "<!doctype html><meta charset='utf-8'>"
-            "<body style=\"background:#0a0a0a;color:#ededed;font:15px system-ui;padding:48px;max-width:40rem;margin:auto\">"
-            "<h2>Oxpecker client not built</h2>"
-            "<p>The operator client has not been built on this server yet. Run, from the repo:</p>"
-            "<pre style='background:#1c1c1c;padding:12px;border-radius:8px'>npm --prefix app/client install\n"
-            "npm --prefix app/client run build</pre>"
-            "<p>then reload this page. The classic UI is still at "
-            "<a style='color:#8ab4ff' href='/classic'>/classic</a>.</p>",
-            status_code=503,
-        )
-    # Serve the requested file when it exists inside dist (the built assets); otherwise the SPA
-    # entry (index.html) — HashRouter does its own routing, so every non-file path is index.html.
-    if path:
-        target = (CLIENT_DIST / path).resolve()
-        if target.is_file() and str(target).startswith(str(CLIENT_DIST.resolve())):
-            return FileResponse(target)  # hashed asset bundles — safe to cache
-    # The SPA shell, like the classic UI: served no-store so a client never shows a stale shell
-    # after a redeploy. The hashed JS/CSS it pulls are content-addressed, so those stay cacheable.
-    return FileResponse(CLIENT_DIST / "index.html", headers={"Cache-Control": "no-store"})
+def retired_client(path: str = ""):
+    """The React operator client is retired: the classic UI at / is the whole product now.
+
+    /app* used to serve that client. It redirects to / instead, so a bookmark, an older desktop
+    build still opening /app/, a tear-off window, or any lingering link lands on the classic UI
+    rather than stranding the operator in a UI that no longer exists — the "I got stuck in there and
+    can't get out" the operator hit. Every path under /app (including its old asset URLs) redirects,
+    so nothing of the SPA can load. CLIENT_DIST stays defined (a patch target elsewhere) but unused.
+    """
+    return RedirectResponse("/")
 
 # ── Sessions ──
 @app.post("/api/sessions")

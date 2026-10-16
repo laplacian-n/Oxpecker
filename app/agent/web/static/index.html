@@ -916,7 +916,6 @@ function renderChat(){
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:2px;flex:none">
-        <div class="hv hv-color" data-action="openWorkspace" title="Open the multi-surface workspace (flow, worker rail, agent browser, tear-off windows)" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⧉ Workspace</div>
         ${(window.oxpecker&&window.oxpecker.checkForUpdates)?`<div class="hv hv-color" data-action="checkUpdate" title="Check for a newer version of the desktop app" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⟳ ${S.updateMsg||'Updates'}</div>`:''}
         <div class="hv hv-color" data-action="openGraph" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.graph}Hypothesis Tree</div>
         <div class="hv hv-color" data-action="toggleSteer" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:${S.steerOpen?A70:'#9a9a9a'}">${icons.steer}Steer</div>
@@ -1762,14 +1761,6 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'deleteSession': deleteSession(el.dataset.id,e); break;
     case 'send': sendMessage(); break;
     case 'stopRun': stopRun(); break;
-    case 'openWorkspace': {
-      // Carry the key, and deep-link straight to the current engagement's flow surface (the
-      // HashRouter route is /:engagementId/flow) so Workspace lands on the n8n view with content,
-      // not an empty engagement picker. No engagement yet → the picker.
-      const q=S.apiKey?('?key='+encodeURIComponent(S.apiKey)):'';
-      const hash=S.engagementId?('#/'+encodeURIComponent(S.engagementId)+'/flow'):'';
-      window.location.href='/app/'+q+hash; break;
-    }
     case 'checkUpdate': checkUpdate(); break;
     case 'openGraph': openGraph(); break;
     case 'closeGraph': stopGraphPoll(); S.view='chat'; S.selectedNode=null; S.nodeDetail=null; render(); break;

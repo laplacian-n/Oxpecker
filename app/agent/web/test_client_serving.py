@@ -1,7 +1,7 @@
-"""dev_server serves the new operator client (CLIENT_UI_DESIGN.md) at /app/, same-origin, so its
-relative API calls and ?key= auth reach the backend with no CORS. These pin: the SPA entry and its
-assets are served when the bundle is built; a server that has not built it gets a helpful 503, not
-a blank page; /app redirects to /app/ (so ./assets/ resolves); and the path cannot escape dist.
+"""The front door is the classic single-file UI at /, and the React operator client at /app/ is
+retired: every path under /app redirects to /. These pin both halves — that / serves the classic UI
+(built or not, since it has no build step), and that nothing under /app can strand an operator in a
+UI that no longer exists — so the retirement cannot silently regress into serving the old client.
 
 Run directly: `python3 -m unittest agent.web.test_client_serving`.
 """
@@ -75,58 +75,32 @@ class ClientServingTest(unittest.TestCase):
         # after the server's UI is updated.
         self.assertEqual(resp.headers.get("cache-control"), "no-store")
 
-    def test_the_unbuilt_page_points_at_an_address_that_exists(self):
-        """It used to point at /, which now redirects back to the page showing the message.
+    def test_app_root_redirects_to_the_classic_ui(self):
+        """/app/ no longer serves the React client; it sends the operator to the classic UI at /.
 
-        Asserted by following the link rather than by matching the href text: a link that reads
-        /classic and 404s is the same dead end as one that loops.
+        This is the un-trap: a desktop build still opening /app/, or a bookmark, lands on the UI
+        that exists rather than one that was removed.
         """
+        for p in ("/app", "/app/"):
+            resp = self.client.get(p, follow_redirects=False)
+            self.assertIn(resp.status_code, (307, 308), p)
+            self.assertEqual(resp.headers["location"], "/", p)
+
+    def test_every_path_under_app_redirects_including_old_asset_urls(self):
+        """Not just the root: a deep route or an old ./assets/ URL redirects too, so none of the
+        retired SPA can load (a half-loaded shell that then 404s its own assets is its own trap)."""
+        for p in ("/app/some/deep/route", "/app/assets/index-abc.js", "/app/flow"):
+            resp = self.client.get(p, follow_redirects=False)
+            self.assertIn(resp.status_code, (307, 308), p)
+            self.assertEqual(resp.headers["location"], "/", p)
+
+    def test_the_redirect_does_not_depend_on_a_built_client(self):
+        """The old client serving branched on whether dist existed; the retirement does not look at
+        it at all, so a machine that once built the bundle and one that never did behave the same."""
         with patch.object(dev_server, "CLIENT_DIST", self.tmp / "does-not-exist"):
-            resp = self.client.get("/app/")
-        self.assertEqual(resp.status_code, 503)
-        self.assertIn("/classic", resp.text)
-        self.assertNotIn("href='/'", resp.text)
-        self.assertEqual(self.client.get("/classic").status_code, 200)
-
-    def test_serves_index_when_built(self):
-        with patch.object(dev_server, "CLIENT_DIST", self._build_fake_dist()):
-            resp = self.client.get("/app/")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("Oxpecker", resp.text)
-        self.assertIn("id=root", resp.text)
-
-    def test_serves_an_asset_when_built(self):
-        with patch.object(dev_server, "CLIENT_DIST", self._build_fake_dist()):
-            resp = self.client.get("/app/assets/index-abc.js")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("client", resp.text)
-
-    def test_unknown_path_falls_back_to_index_for_the_spa(self):
-        with patch.object(dev_server, "CLIENT_DIST", self._build_fake_dist()):
-            resp = self.client.get("/app/some/deep/route")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("id=root", resp.text)  # HashRouter entry, not a 404
-
-    def test_helpful_503_when_not_built(self):
-        with patch.object(dev_server, "CLIENT_DIST", self.tmp / "does-not-exist"):
-            resp = self.client.get("/app/")
-        self.assertEqual(resp.status_code, 503)
-        self.assertIn("not built", resp.text)
-
-    def test_bare_app_redirects_to_trailing_slash(self):
-        resp = self.client.get("/app", follow_redirects=False)
+            resp = self.client.get("/app/", follow_redirects=False)
         self.assertIn(resp.status_code, (307, 308))
-        self.assertEqual(resp.headers["location"], "/app/")
-
-    def test_path_cannot_escape_dist(self):
-        dist = self._build_fake_dist()
-        secret = self.tmp / "secret.txt"
-        secret.write_text("TOP SECRET")
-        with patch.object(dev_server, "CLIENT_DIST", dist):
-            resp = self.client.get("/app/../secret.txt")
-        # a traversal attempt resolves outside dist, so it is not served as a file — it falls back
-        # to the SPA index instead of leaking the file
-        self.assertNotIn("TOP SECRET", resp.text)
+        self.assertEqual(resp.headers["location"], "/")
 
 
 class EnsureClientBuiltTest(unittest.TestCase):
