@@ -26,10 +26,16 @@ export function Conversation({
   subscription,
   sessionId,
   apiOptions = {},
+  activity = null,
+  hasActivity = false,
 }: {
   subscription: ConversationSubscription;
   sessionId: string;
   apiOptions?: ApiOptions;
+  // The autonomous run narration (RunActivity), shown at the top of the transcript so a run reads
+  // as the agent telling you what it is doing. In a plain chat there is none and this is null.
+  activity?: React.ReactNode;
+  hasActivity?: boolean;
 }) {
   const c = useConversation(subscription);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -93,11 +99,12 @@ export function Conversation({
       </div>
 
       <div className="transcript-scroll">
-        {c.messages.length === 0 && !c.streamingText && !c.streamingReasoning && (
+        {c.messages.length === 0 && !c.streamingText && !c.streamingReasoning && !hasActivity && (
           <p className="conversation-empty" data-testid="conversation-empty">
             Ask anything, or describe the target. Your message goes to the agent.
           </p>
         )}
+        {activity}
         <ol className="transcript" data-testid="transcript">
           {c.messages.map((m, i) => (
             <li key={m.message_id ?? i} data-role={m.role} data-testid={`msg-${i}`}>
