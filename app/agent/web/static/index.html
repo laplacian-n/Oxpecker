@@ -146,6 +146,7 @@ const icons={
   shieldSm:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"></path></svg>',
   monitor:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg>',
   workers:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"></circle><path d="M3 20a6 6 0 0 1 12 0"></path><path d="M16 6a3 3 0 0 1 0 6M18 20a6 6 0 0 0-3-5.2"></path></svg>',
+  flow:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="5" rx="1"></rect><rect x="15" y="16" width="6" height="5" rx="1"></rect><rect x="9" y="16" width="0.1" height="0.1"></rect><path d="M6 8v4a2 2 0 0 0 2 2h10"></path></svg>',
   doc:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12h6M9 16h6M9 8h6M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"></path></svg>',
   bolt:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>',
   key:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l9-9M16 7l3 3"></path></svg>',
@@ -236,6 +237,7 @@ const S = {
   eventSource: null,
   workers: [], models: [], toolsInFlight: [],
   browserSeq: 0, browserErr: null,
+  flowSnap: null,
   chainOpen: {},
   stepOpen: {},
   statsOpen: false,
@@ -618,6 +620,90 @@ function startBrowserPoll(){
 }
 function stopBrowserPoll(){if(_browserPoll){clearInterval(_browserPoll);_browserPoll=null;}}
 
+/* Flow view (§6.3) — the wiring diagram, ported from the retired React client: a fixed architecture
+   (strategist, worker pool, broker, hypothesis graph, evidence/notebook/findings stores, a model
+   column) with live worker instances and the traffic on the wires. Reads the same engagement
+   snapshot the Workers view does; an edge is drawn per stored artifact so an output that goes
+   nowhere is visible (§6.3.1). Drawn as SVG so it needs no library. */
+let _flowPoll=null;
+async function openFlow(){S.view='flow';try{S.flowSnap=await api.engagementSnapshot(S.engagementId);}catch(e){S.flowSnap={};}render();startFlowPoll();}
+function _flowSig(s){s=s||{};return ((s.workers||[]).map(w=>w.worker_id+':'+(w.status||'')).join('|'))+'#'+((s.tool_calls_in_flight||[]).map(t=>t.worker+':'+t.tool).join(','))+'#'+((s.artifacts||[]).length)+'#'+((s.model_roster||[]).map(m=>(m.cost||0).toFixed(4)).join(','));}
+function startFlowPoll(){stopFlowPoll();_flowPoll=setInterval(async()=>{if(S.view!=='flow'){stopFlowPoll();return;}try{const s=await api.engagementSnapshot(S.engagementId);if(_flowSig(s)!==_flowSig(S.flowSnap)){S.flowSnap=s;render();}}catch(e){}},1800);}
+function stopFlowPoll(){if(_flowPoll){clearInterval(_flowPoll);_flowPoll=null;}}
+function _flowPrice(m){const t=(m.prompt_tokens||0)+(m.completion_tokens||0);if(!(t>0))return null;return Math.round((m.cost/(t/1e6))*1e4)/1e4;}
+function buildFlow(snap){
+  const NW=152,NH=54;
+  const nodes=[
+    {id:'strategist',x:300,y:0,label:'Strategist',kind:'role'},
+    {id:'pool',x:300,y:120,label:'Worker pool',kind:'pool'},
+    {id:'broker',x:300,y:380,label:'Broker',kind:'broker'},
+    {id:'evidence',x:70,y:500,label:'Evidence store',kind:'store'},
+    {id:'notebook',x:300,y:500,label:'Notebook',kind:'store'},
+    {id:'findings',x:530,y:500,label:'Findings',kind:'store'},
+    {id:'graph',x:560,y:120,label:'Hypothesis graph',kind:'graph'},
+  ];
+  const edges=[
+    {source:'strategist',target:'pool'},{source:'pool',target:'broker'},
+    {source:'broker',target:'evidence'},{source:'strategist',target:'graph'},
+  ];
+  const live=(snap.workers||[]).filter(w=>w.status!=='finished');
+  const inflight={};(snap.tool_calls_in_flight||[]).forEach(c=>{inflight[c.worker]=c.tool;});
+  (snap.model_roster||[]).forEach((m,i)=>{
+    const id='model-'+m.model_id;const p=_flowPrice(m);
+    nodes.push({id,x:-240,y:i*92,label:String(m.model_id),kind:'model',detail:[m.role,(p===null?'—/Mtok':'$'+p.toFixed(4)+'/Mtok'),'spent $'+(m.cost||0).toFixed(4)].filter(Boolean).join('  ')});
+    edges.push({source:id,target:'strategist',animated:live.length>0});
+  });
+  live.forEach((w,i)=>{
+    const id='worker-'+w.worker_id;const tool=inflight[w.worker_id];
+    nodes.push({id,x:150+i*172,y:240,label:'worker '+w.worker_id,kind:'worker',detail:[w.method,tool?('→ '+tool):null].filter(Boolean).join('  ')});
+    edges.push({source:'strategist',target:id});
+    edges.push({source:id,target:'broker',animated:!!tool});
+  });
+  const STORE={evidence:'evidence',notebook:'notebook',findings:'findings'};
+  const byId={};nodes.forEach(n=>byId[n.id]=n);
+  (snap.artifacts||[]).forEach(a=>{
+    const target=STORE[a.store]||'evidence';
+    const src=(a.worker&&byId['worker-'+a.worker])?'worker-'+a.worker:'pool';
+    edges.push({source:src,target,label:a.artifact||'artifact'});
+  });
+  return {nodes,edges,NW,NH};
+}
+function renderFlow(){
+  const snap=S.flowSnap||{};
+  const g=buildFlow(snap);const NW=g.NW,NH=g.NH;
+  const byId={};g.nodes.forEach(n=>byId[n.id]=n);
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  g.nodes.forEach(n=>{minX=Math.min(minX,n.x);minY=Math.min(minY,n.y);maxX=Math.max(maxX,n.x+NW);maxY=Math.max(maxY,n.y+NH);});
+  const pad=70;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;const W=maxX-minX,H=maxY-minY;
+  const KIND={role:'#e5484d',pool:'#8ab4ff',broker:'#d98c3a',store:'#4ec9a3',graph:'#b18aff',model:'#565656',worker:'#ededed'};
+  const cx=n=>n.x+NW/2,cy=n=>n.y+NH/2;
+  const wires=g.edges.map(e=>{
+    const s=byId[e.source],t=byId[e.target];if(!s||!t)return'';
+    const sx=cx(s),sy=cy(s),tx=cx(t),ty=cy(t);const cp=Math.max(34,Math.abs(ty-sy)/2);
+    const d='M '+sx+' '+sy+' C '+sx+' '+(sy+cp)+', '+tx+' '+(ty-cp)+', '+tx+' '+ty;
+    const col=e.animated?'#8ab4ff':'#242424';const cls=e.animated?'flow-wire flow-wire-live':'flow-wire';
+    const lbl=e.label?'<text x="'+((sx+tx)/2)+'" y="'+((sy+ty)/2-4)+'" fill="#6a6a6a" font-size="9.5" font-family="\'JetBrains Mono\',monospace" text-anchor="middle">'+esc(String(e.label).slice(0,24))+'</text>':'';
+    return '<path class="'+cls+'" d="'+d+'" stroke="'+col+'" stroke-width="1.5" fill="none"/>'+lbl;
+  }).join('');
+  const boxes=g.nodes.map(n=>{
+    const col=KIND[n.kind]||'#565656';const det=n.detail?(n.detail.length>30?n.detail.slice(0,29)+'…':n.detail):'';
+    return '<g><rect x="'+n.x+'" y="'+n.y+'" width="'+NW+'" height="'+NH+'" rx="9" fill="#0c0c0c" stroke="'+col+'" stroke-width="1.5"/>'
+      +'<text x="'+(n.x+NW/2)+'" y="'+(n.y+(det?21:NH/2+5))+'" fill="#ededed" font-size="12.5" font-weight="600" font-family="\'Instrument Sans\'" text-anchor="middle">'+esc(n.label)+'</text>'
+      +(det?'<text x="'+(n.x+NW/2)+'" y="'+(n.y+38)+'" fill="#8a8a8a" font-size="9.5" font-family="\'JetBrains Mono\',monospace" text-anchor="middle">'+esc(det)+'</text>':'')
+      +'</g>';
+  }).join('');
+  return '<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">'
+    +'<style>.flow-wire-live{stroke-dasharray:5 5;animation:flowdash 1s linear infinite}@keyframes flowdash{to{stroke-dashoffset:-10}}</style>'
+    +'<div style="display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid #1a1a1a;flex:none">'
+    +'<div style="font:600 15px \'Instrument Sans\'">Flow</div>'
+    +'<div style="font:400 12px \'JetBrains Mono\';color:#7d7d7d">strategist → workers → broker</div>'
+    +'<div class="hv" data-action="closeFlow" style="margin-left:auto;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px \'Instrument Sans\';cursor:pointer;color:#b5b5b5">Close</div>'
+    +'</div>'
+    +'<div style="flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;padding:24px">'
+    +'<svg viewBox="'+minX+' '+minY+' '+W+' '+H+'" style="width:100%;max-width:'+(W*1.25)+'px;height:auto" preserveAspectRatio="xMidYMid meet">'+wires+boxes+'</svg>'
+    +'</div></div>';
+}
+
 function renderWorkers(){
   const statusColor={running:'#d98c3a',finished:'#4ec9a3',idle:'#7d7d7d',error:'#e5484d'};
   const inflight={};(S.toolsInFlight||[]).forEach(t=>{inflight[t.worker]=t.tool;});
@@ -810,6 +896,7 @@ function renderApp(){
     (S.view==='chat'?renderChat():'')+
     (S.view==='graph'?renderGraph():'')+
     (S.view==='workers'?renderWorkers():'')+
+    (S.view==='flow'?renderFlow():'')+
     (S.view==='browser'?renderBrowser():'')+
     '</main>'+
     renderApprovalsDrawer()+renderModal()+renderToast();
@@ -1026,6 +1113,7 @@ function renderChat(){
         ${(window.oxpecker&&window.oxpecker.checkForUpdates)?`<div class="hv hv-color" data-action="checkUpdate" title="Check for a newer version of the desktop app" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⟳ ${S.updateMsg||'Updates'}</div>`:''}
         <div class="hv hv-color" data-action="openGraph" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.graph}Hypothesis Tree</div>
         <div class="hv hv-color" data-action="openWorkers" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.workers}Workers</div>
+        <div class="hv hv-color" data-action="openFlow" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.flow}Flow</div>
         <div class="hv hv-color" data-action="openBrowser" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.monitor}Browser</div>
         <div class="hv hv-color" data-action="toggleSteer" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:${S.steerOpen?A70:'#9a9a9a'}">${icons.steer}Steer</div>
         <div class="hv hv-color" data-action="copySessionId" style="display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:7px;cursor:pointer;font:500 12px 'Instrument Sans';color:#9a9a9a">${icons.copy}${S.idCopied?'Copied':''}</div>
@@ -1875,6 +1963,8 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'closeGraph': stopGraphPoll(); S.view='chat'; S.selectedNode=null; S.nodeDetail=null; render(); break;
     case 'openWorkers': openWorkers(); break;
     case 'closeWorkers': stopWorkersPoll(); S.view='chat'; render(); break;
+    case 'openFlow': openFlow(); break;
+    case 'closeFlow': stopFlowPoll(); S.view='chat'; render(); break;
     case 'openBrowser': openBrowser(); break;
     case 'closeBrowser': stopBrowserPoll(); S.view='chat'; render(); break;
     case 'toggleSteer': S.steerOpen=!S.steerOpen; render(); break;
@@ -2033,6 +2123,7 @@ document.addEventListener('keydown',function(e){
     else if(S.statsOpen){S.statsOpen=false;render();}
     else if(S.view==='graph'){S.view='chat';S.selectedNode=null;S.nodeDetail=null;render();}
     else if(S.view==='workers'){stopWorkersPoll();S.view='chat';render();}
+    else if(S.view==='flow'){stopFlowPoll();S.view='chat';render();}
     else if(S.view==='browser'){stopBrowserPoll();S.view='chat';render();}
     return;
   }
