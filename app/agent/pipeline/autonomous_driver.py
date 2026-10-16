@@ -64,7 +64,7 @@ CONSULT_TIMEOUT_S = 3600  # generous — "run all day," the operator might not b
 
 @dataclass
 class AutonomousRunResult:
-    status: str  # "closed_out" | "blocked" | "stopped_by_operator" | "wall_clock_exceeded"
+    status: str  # "closed_out" | "already_closed_out" | "blocked" | "stopped_by_operator" | "wall_clock_exceeded"
     reason: str
     phases_completed: list[str] = field(default_factory=list)
     final_phase: str = ""
@@ -434,6 +434,26 @@ class AutonomousDriver:
         phases_completed: list[str] = []
         attempts: dict[str, int] = {}
         self._bootstrap_engagement()
+
+        # A run started against an engagement that already reached CLOSEOUT has nothing left to do.
+        # Resuming would re-emit the terminal REPORT/CLOSEOUT phases and report "finished", which
+        # reads as the run having silently done nothing — the operator typed a target and the run
+        # ended at once. Stop at the door instead and point them at the existing report and at
+        # starting a new engagement to scan again. No state is touched: the finished engagement and
+        # its report are left exactly as they are (the operator chose warn-and-guide over reset).
+        if self.store.get_phase()["current_phase"] == "CLOSEOUT":
+            self._emit(
+                "already_closed_out",
+                detail="This engagement already completed a run and is closed out; its report is "
+                       "in the Workspace. Re-sending here does not re-scan a finished engagement — "
+                       "start a new engagement to run again.",
+            )
+            return AutonomousRunResult(
+                "already_closed_out",
+                "engagement already closed out — open the report, or start a new engagement to "
+                "scan again",
+                phases_completed, "CLOSEOUT",
+            )
 
         while True:
             if self.stop_event.is_set():
