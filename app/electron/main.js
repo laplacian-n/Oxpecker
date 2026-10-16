@@ -236,14 +236,11 @@ async function ensureServer(c, healthUrl, label) {
 async function startEverything() {
   cfg = loadConfig();
 
-  // Which UI the shell opens. The operator client (CLIENT_UI_DESIGN.md) at /app/ is the default
-  // now that it holds the conversation, engagement creation, the session sidebar and the five
-  // surfaces. The classic single-file UI is still served, at /classic — set "uiPath": "/classic"
-  // in config.local.json to open that instead.
-  //
-  // The server redirects / to /app/ as well, so an older config.local.json carrying "uiPath": "/"
-  // still arrives at the same place rather than breaking.
-  const uiPath = cfg.uiPath || '/app/';
+  // Which UI the shell opens. The classic single-file UI at / is the default again — it is the
+  // single, fast conversation surface the operator wants. The React client is still served at
+  // /app/ (the classic UI deep-links to it for the flow/worker/browser views); set
+  // "uiPath": "/app/" in config.local.json to open straight into that instead.
+  const uiPath = cfg.uiPath || '/';
   // Hand the server's API key to the UI in the URL so the operator never pastes it: both the
   // classic UI and the newer client adopt ?key= on load and scrub it from the address. Set
   // "apiKey" in config.local.json.

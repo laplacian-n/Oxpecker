@@ -3131,21 +3131,21 @@ def client_jobs_result(job_id: str, req: ClientJobResultRequest):
 
 
 # ── Static / index ──
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def index():
-    """The operator client is the UI now; / goes there.
+    """The classic single-file UI is the front door again.
 
-    A redirect rather than serving the client's index.html here, because the built shell
-    references its assets as ./assets/... (vite base "./"), which only resolves under a path
-    ending in '/'. Served at /, the browser would ask for /assets/... and get nothing.
+    An earlier change redirected / to the React client at /app/ and made that the default the
+    Electron shell opened. The operator asked for the classic UI back — it is the fast, single
+    conversation surface they want — so / serves it directly once more (same body as /classic).
+    The React client stays reachable at /app/ for the multi-surface views the classic UI deep-links
+    to (flow/worker/browser), but it is no longer what a new arrival or the shell lands on.
 
-    Unconditional, deliberately: making this depend on whether CLIENT_DIST happens to exist would
-    make / behave differently on a machine that has run the build and one that has not, including
-    between a developer's checkout and CI. /app/ answers an unbuilt client with instructions and
-    a link to /classic, so the classic UI stays reachable either way; main() also builds the
-    client on launch when npm is present.
+    no-store: a living dashboard served fresh every request, so a redeploy is seen on reload rather
+    than masked by a cached copy.
     """
-    return RedirectResponse("/app/")
+    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/classic", response_class=HTMLResponse)
