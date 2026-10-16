@@ -36,31 +36,32 @@ class ClientServingTest(unittest.TestCase):
         (dist / "assets" / "index-abc.js").write_text("console.log('client')")
         return dist
 
-    def test_root_redirects_to_the_operator_client(self):
-        """/ is the operator client's door; the classic single-file UI moved to /classic.
+    def test_root_serves_the_classic_ui(self):
+        """/ is the classic single-file UI's door again — it is the default the operator wanted.
 
-        A redirect rather than serving the client's index.html at /, because the built shell asks
-        for ./assets/... (vite base "./"), which only resolves under a path ending in '/'.
+        Served directly (not a redirect): the classic UI is one self-contained HTML document with
+        inline assets, so there is nothing to resolve under a trailing-slash path the way the React
+        bundle's ./assets/... needs. The React client stays at /app/ for the views that link to it.
         """
         resp = self.client.get("/", follow_redirects=False)
-        self.assertEqual(resp.status_code, 307)
-        self.assertEqual(resp.headers["location"], "/app/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("<!doctype html>", resp.text.lower())
+        self.assertEqual(resp.headers.get("cache-control"), "no-store")
 
-    def test_the_redirect_does_not_depend_on_whether_the_client_was_built(self):
-        """Both ways round, which is the whole point of making it unconditional.
+    def test_root_serves_the_classic_ui_whether_or_not_the_react_client_is_built(self):
+        """/ does not depend on the React bundle at all now — it is the classic UI either way.
 
-        "Serve the client when it is built, the classic UI otherwise" was the obvious design and
-        is the wrong one: / would then behave differently on a machine that has run the build and
-        one that has not — a developer's checkout versus CI, or the same box before and after
-        `npm run build` — and every test touching / would silently depend on that. /app/ is the
-        one place that handles an unbuilt client, and it links to /classic.
+        The classic UI has no build step (it is committed HTML), so a machine that has never run
+        `npm run build` serves exactly the same front door as one that has. Only /app/ depends on
+        the bundle, and it is the one place that handles the unbuilt case.
         """
         with patch.object(dev_server, "CLIENT_DIST", self._build_fake_dist()):
             built = self.client.get("/", follow_redirects=False)
         with patch.object(dev_server, "CLIENT_DIST", self.tmp / "does-not-exist"):
             unbuilt = self.client.get("/", follow_redirects=False)
-        self.assertEqual((built.status_code, built.headers["location"]), (307, "/app/"))
-        self.assertEqual((unbuilt.status_code, unbuilt.headers["location"]), (307, "/app/"))
+        self.assertEqual(built.status_code, 200)
+        self.assertEqual(unbuilt.status_code, 200)
+        self.assertIn("<!doctype html>", unbuilt.text.lower())
 
     def test_the_classic_ui_is_retired_to_classic_and_still_served(self):
         # Retired, not deleted: the unbuilt-client page below links to it, so it has to be there
