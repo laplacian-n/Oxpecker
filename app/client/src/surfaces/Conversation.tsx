@@ -92,42 +92,49 @@ export function Conversation({
         )}
       </div>
 
-      <ol className="transcript" data-testid="transcript">
-        {c.messages.map((m, i) => (
-          <li key={m.message_id ?? i} data-role={m.role} data-testid={`msg-${i}`}>
-            {m.reasoning_content && (
-              <details className="reasoning">
-                <summary>thinking</summary>
-                <pre>{m.reasoning_content}</pre>
+      <div className="transcript-scroll">
+        {c.messages.length === 0 && !c.streamingText && !c.streamingReasoning && (
+          <p className="conversation-empty" data-testid="conversation-empty">
+            Ask anything, or describe the target. Your message goes to the agent.
+          </p>
+        )}
+        <ol className="transcript" data-testid="transcript">
+          {c.messages.map((m, i) => (
+            <li key={m.message_id ?? i} data-role={m.role} data-testid={`msg-${i}`}>
+              {m.reasoning_content && (
+                <details className="reasoning">
+                  <summary>thinking</summary>
+                  <pre>{m.reasoning_content}</pre>
+                </details>
+              )}
+              <div className="msg-body">{m.content}</div>
+              {m.tool_name && <span className="tool-tag">{m.tool_name}</span>}
+            </li>
+          ))}
+        </ol>
+
+        {/* The live tail: the turn in flight. Reasoning first, because that is the order it
+            arrives in and the order it is useful in. */}
+        {(c.streamingReasoning || c.streamingText) && (
+          <div className="live-tail" data-testid="live-tail">
+            {c.streamingReasoning && (
+              <details className="reasoning" open data-testid="live-reasoning">
+                <summary>thinking…</summary>
+                <pre>{c.streamingReasoning}</pre>
               </details>
             )}
-            <div className="msg-body">{m.content}</div>
-            {m.tool_name && <span className="tool-tag">{m.tool_name}</span>}
-          </li>
-        ))}
-      </ol>
+            {c.streamingText && <div className="msg-body" data-testid="live-text">{c.streamingText}</div>}
+          </div>
+        )}
 
-      {/* The live tail: the turn in flight. Reasoning first, because that is the order it
-          arrives in and the order it is useful in. */}
-      {(c.streamingReasoning || c.streamingText) && (
-        <div className="live-tail" data-testid="live-tail">
-          {c.streamingReasoning && (
-            <details className="reasoning" open data-testid="live-reasoning">
-              <summary>thinking…</summary>
-              <pre>{c.streamingReasoning}</pre>
-            </details>
-          )}
-          {c.streamingText && <div className="msg-body" data-testid="live-text">{c.streamingText}</div>}
-        </div>
-      )}
+        {c.notices.length > 0 && (
+          <ul className="conversation-notices" data-testid="conv-notices">
+            {c.notices.map((n, i) => <li key={i}>{n}</li>)}
+          </ul>
+        )}
 
-      {c.notices.length > 0 && (
-        <ul className="conversation-notices" data-testid="conv-notices">
-          {c.notices.map((n, i) => <li key={i}>{n}</li>)}
-        </ul>
-      )}
-
-      <div ref={tailRef} />
+        <div ref={tailRef} />
+      </div>
 
       <div className="composer" data-testid="composer">
         <textarea

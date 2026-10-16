@@ -84,6 +84,19 @@ export function Chat({
     if (streamSaysRunning) setBusy(false); // the stream confirms a run — stop guessing
   }, [streamSaysRunning]);
 
+  // The run controls, approvals and raw event feed live in a drawer that is closed by default, so
+  // the surface opens as a plain conversation — the Claude/GPT-style chat the operator asked for —
+  // and the engagement machinery is one click away rather than stacked under every message. The
+  // drawer auto-opens when a run is going or an approval is waiting, because those are the moments
+  // the operator needs it; after that they can close it again.
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const pendingApprovals = Object.values(projection.approvals ?? {}).filter(
+    (a: any) => a?.status === "pending",
+  ).length;
+  useEffect(() => {
+    if (running || pendingApprovals > 0) setToolsOpen(true);
+  }, [running, pendingApprovals]);
+
   const start = async () => {
     const goal = goalRef.current?.value.trim() ?? "";
     setError("");
@@ -106,63 +119,86 @@ export function Chat({
 
   return (
     <div className="surface" data-surface="chat">
-      <header>
+      <header className="chat-head">
         <h1>Chat</h1>
         {running && <span className="run-badge" data-testid="run-active">● running</span>}
+        {pendingApprovals > 0 && (
+          <span className="run-badge chat-head-warn" data-testid="head-approvals">
+            ⚠ {pendingApprovals} awaiting approval
+          </span>
+        )}
         {projection.missed > 0 && (
-          <span role="status" data-testid="missed">
+          <span role="status" data-testid="missed" className="chat-head-warn">
             disconnected — you missed {projection.missed} events
           </span>
         )}
+        <button
+          className="tools-toggle" data-testid="tools-toggle" aria-expanded={toolsOpen}
+          onClick={() => setToolsOpen((v) => !v)}
+        >
+          {toolsOpen ? "Close panel ✕" : "⚙ Run & tools"}
+        </button>
       </header>
 
-      {/* Sidebar beside the conversation, not above it: which conversation is open is a standing
-          choice, and the transcript is what the operator reads. */}
-      <SessionPanel state={session} detail={detail} onDetailChanged={refreshDetail}
-                    apiOptions={apiOptions} />
+      <div className="chat-body">
+        <div className="chat-main">
+          {conversation && sessionId ? (
+            <Conversation subscription={conversation} sessionId={sessionId} apiOptions={apiOptions} />
+          ) : (
+            <p data-testid="no-conversation" className="landing-error chat-empty">
+              {sessionError
+                ? `No conversation: ${sessionError}`
+                : "Opening a conversation for this engagement…"}
+            </p>
+          )}
+        </div>
 
-      {conversation && sessionId ? (
-        <Conversation subscription={conversation} sessionId={sessionId} apiOptions={apiOptions} />
-      ) : (
-        <p data-testid="no-conversation" className="landing-error">
-          {sessionError
-            ? `No conversation: ${sessionError}`
-            : "Opening a conversation for this engagement…"}
-        </p>
-      )}
+        {/* The engagement machinery — conversation switcher + settings, the autonomous run control,
+            approvals and the raw event feed — in a drawer that is closed by default so the surface
+            reads as a chat first. Kept in the DOM when closed (display:none, not unmounted) so the
+            run controls stay addressable; the heavy event list is the one part gated on open. */}
+        <aside className={`chat-tools${toolsOpen ? " is-open" : ""}`} data-testid="chat-tools">
+          <SessionPanel state={session} detail={detail} onDetailChanged={refreshDetail}
+                        apiOptions={apiOptions} />
 
-      {/* The control: start an autonomous run with a goal, or stop one in flight. §6.1 — chat is
-          where the operator drives the engagement. */}
-      <div className="run-control" data-testid="run-control">
-        {running ? (
-          <button onClick={stop} data-testid="stop-run">Stop run</button>
-        ) : (
-          <>
-            <textarea
-              ref={goalRef} data-testid="chat-input" rows={2} defaultValue=""
-              placeholder="Goal for the run — e.g. find auth and injection flaws on the in-scope target"
-            />
-            <button onClick={start} data-testid="start-run">Start autonomous run</button>
-          </>
-        )}
+          {/* Start an autonomous run with a goal, or stop one in flight. §6.1 — chat is where the
+              operator drives the engagement. */}
+          <div className="run-control" data-testid="run-control">
+            {running ? (
+              <button onClick={stop} data-testid="stop-run">Stop run</button>
+            ) : (
+              <>
+                <textarea
+                  ref={goalRef} data-testid="chat-input" rows={2} defaultValue=""
+                  placeholder="Goal for the run — e.g. find auth and injection flaws on the in-scope target"
+                />
+                <button onClick={start} data-testid="start-run">Start autonomous run</button>
+              </>
+            )}
+          </div>
+          {error && <p className="landing-error" data-testid="run-error">{error}</p>}
+
+          {/* §7: approvals surface in chat too, because chat is the surface the operator is actually
+              looking at. One request, one state — resolving here clears it everywhere. */}
+          <ApprovalsPanel projection={projection} apiOptions={apiOptions} />
+
+          {/* Keyed by identity (seq), never by position (§2.1 rule 4). The row list renders only
+              while the drawer is open: it grows to hundreds of rows during a run, and reconciling
+              that behind a closed drawer is the load that made the surface stutter. The count below
+              is one node and always renders, so a flood is observable without the list. */}
+          {toolsOpen && (
+            <ol data-testid="event-feed" className="chat-log">
+              {projection.events.map((e) => (
+                <li key={e.seq} data-kind={e.kind}>
+                  #{e.seq} {e.kind}
+                  {e.payload?.detail ? ` — ${e.payload.detail}` : ""}
+                </li>
+              ))}
+            </ol>
+          )}
+          <div data-testid="event-count" className="event-count">{projection.events.length}</div>
+        </aside>
       </div>
-      {error && <p className="landing-error" data-testid="run-error">{error}</p>}
-
-      {/* §7: approvals surface in chat too, because chat is the surface the operator is actually
-          looking at. One request, one state — resolving here clears it everywhere. */}
-      <ApprovalsPanel projection={projection} apiOptions={apiOptions} />
-
-      {/* Keyed by identity (seq), never by position (§2.1 rule 4): an event arriving mid-list
-          never recreates the rows below it. */}
-      <ol data-testid="event-feed" className="chat-log">
-        {projection.events.map((e) => (
-          <li key={e.seq} data-kind={e.kind}>
-            #{e.seq} {e.kind}
-            {e.payload?.detail ? ` — ${e.payload.detail}` : ""}
-          </li>
-        ))}
-      </ol>
-      <div data-testid="event-count">{projection.events.length}</div>
     </div>
   );
 }
