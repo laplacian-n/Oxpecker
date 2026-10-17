@@ -65,7 +65,13 @@ const A75 = 'oklch(75% 0.17 25)';
 // the default). Set when the UI is bundled and loaded from file:// (the desktop offline build),
 // so /api and /static resolve to the configured server. Defined here, before LOGO uses it.
 const SERVER_BASE=(function(){try{return localStorage.getItem('serverBase')||''}catch(e){return ''}})();
-const LOGO = SERVER_BASE ? SERVER_BASE + '/static/oxpecker-logo.png' : 'oxpecker-logo.png';
+// The logo lives in the server's static dir, served at /static/. When the UI is served over http
+// (same-origin, the normal case, SERVER_BASE empty) that is an absolute /static/ path; a remote
+// server prefixes SERVER_BASE. Only the bundled offline build loads the page from file://, where
+// oxpecker-logo.png sits next to index.html, so there it is a bare relative name.
+const LOGO = (location.protocol === 'file:')
+  ? 'oxpecker-logo.png'
+  : (SERVER_BASE || '') + '/static/oxpecker-logo.png';
 
 function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
@@ -1299,7 +1305,7 @@ function initHomeCanvas(){
     cols=Math.max(1,Math.ceil(width/cellSize));rows=Math.max(1,Math.ceil(height/cellSize));
     const n=cols*rows;heat=new Float32Array(n);rate=new Float32Array(n).fill(1.4);ambient=new Float32Array(n);
     const rand=mulberry32(0xa53f9c1^(cols*71+rows));
-    for(let i=0;i<n;i++){if(rand()<0.05)ambient[i]=0.16+rand()*0.22;}
+    for(let i=0;i<n;i++){if(rand()<0.085)ambient[i]=0.22+rand()*0.30;}
   }
   function draw(){
     const r=cv.getBoundingClientRect();
@@ -1309,7 +1315,7 @@ function initHomeCanvas(){
       if(lum<=0.03)continue;
       const ch=WAKE_RAMP[Math.min(WAKE_RAMP.length-1,Math.floor(lum*(WAKE_RAMP.length-1)))];
       if(ch===' ')continue;
-      ctx.globalAlpha=Math.min(1,0.3+lum*0.7);
+      ctx.globalAlpha=Math.min(1,0.42+lum*0.58);
       ctx.fillText(ch,gx*cellSize+cellSize/2,gy*cellSize+cellSize/2);
     }
     ctx.globalAlpha=1;
@@ -1422,7 +1428,7 @@ function renderHome(){
   const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Autonomous',consult:'Autonomous'}[S.mode]||'Assistant';
   return`<div style="flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;overflow:hidden">
     <canvas id="homeCanvas" style="position:absolute;inset:0;width:100%;height:100%;color:${A};pointer-events:none"></canvas>
-    <div style="position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,0,0,.78) 0%,rgba(0,0,0,.42) 45%,transparent 80%);pointer-events:none"></div>
+    <div style="position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,0,0,.66) 0%,rgba(0,0,0,.34) 45%,transparent 80%);pointer-events:none"></div>
     <div style="position:relative;width:100%;max-width:720px;display:flex;flex-direction:column;align-items:center">
       <h1 style="font:500 34px/1.2 'Instrument Sans';letter-spacing:-.02em;margin:0 0 14px;text-align:center;align-self:stretch;white-space:nowrap">Ready when you are.</h1>
       <div style="font:400 14px/1.5 'Instrument Sans';color:#7d7d7d;margin-bottom:28px;text-align:center;align-self:stretch">Describe a target and scope, or switch to Autonomous to let the pipeline run itself.</div>
