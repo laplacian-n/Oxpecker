@@ -126,17 +126,22 @@ class ClassicUiHeaderTest(unittest.TestCase):
         self.assertIn("async function checkUpdate(", self.html)
 
     def test_the_views_the_retired_client_had_are_in_the_classic_ui(self):
-        # Every view the ⧉ Workspace button used to reach (/app/ flow diagram, worker rail, agent
-        # browser) is brought into the classic UI so nothing was lost by retiring the React client:
-        # a header button, an action case, and the function behind each.
-        for action in ("openWorkers", "openFlow", "openBrowser"):
+        # Every view the ⧉ Workspace button used to reach is in the classic UI, so nothing was lost
+        # by retiring the React client. The three header surfaces each have a button, an action
+        # case, and the function behind it: the hypothesis graph, the Flow wiring diagram, and the
+        # agent browser.
+        for action in ("openGraph", "openFlow", "openBrowser"):
             self.assertIn(f'data-action="{action}"', self.html, action)
             self.assertIn(f"case '{action}'", self.html, action)
             self.assertIn(f"function {action}(", self.html, action)
-        for fn in ("renderWorkers", "renderBrowser", "renderFlow", "buildFlow"):
+        for fn in ("renderGraph", "renderBrowser", "renderFlow"):
             self.assertIn(f"function {fn}(", self.html, fn)
-        # The worker and flow views read the §4.2 engagement snapshot (the read-model the React
-        # client used); the browser view polls the JPEG frame endpoint.
+        # The separate Workers rail is merged INTO the Flow surface (FLOW_SURFACE_DESIGN §9): a
+        # worker is a node in its wave, not a second list of the same truth. The Workers entry
+        # point survives as a shim onto the flow, so "show me the workers" still resolves.
+        self.assertRegex(self.html, r"function openWorkers\(\)\{return openFlow\(\);\}")
+        # The flow view reads the §4.2 engagement snapshot (the read-model the React client used);
+        # the browser view polls the JPEG frame endpoint.
         self.assertIn("engagementSnapshot", self.html)
         self.assertIn("/browser/frame", self.html)
 
