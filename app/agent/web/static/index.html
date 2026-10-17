@@ -32,7 +32,15 @@ body{font-variant-numeric:tabular-nums}
 .lai-px i:nth-child(1),.lai-px i:nth-child(5),.lai-px i:nth-child(7){animation-delay:90ms}
 .lai-px i:nth-child(2),.lai-px i:nth-child(6),.lai-px i:nth-child(8){animation-delay:180ms}
 .lai-px i:nth-child(3),.lai-px i:nth-child(9){animation-delay:270ms}
-@media(prefers-reduced-motion:reduce){.lai-px i{animation:none;opacity:.6}.lai-spin,.lai-shimmer,.lai-pulse,.lai-in{animation:none}.lai-caret::after{animation:none}}
+/* Hypothesis graph — while a worker is actually working on a branch, that branch lights up:
+   the edges flow + glow and the node brightens, then both settle back to normal when it stops. */
+@keyframes g-flow{to{stroke-dashoffset:-16}}
+@keyframes g-edge-glow{0%,100%{opacity:.4}50%{opacity:1}}
+@keyframes g-node-glow{0%,100%{box-shadow:0 0 0 0 oklch(62% 0.21 25 / 0);filter:brightness(1)}50%{box-shadow:0 0 20px 3px oklch(62% 0.21 25 / .5);filter:brightness(1.5)}}
+.gedge-live{stroke-dasharray:7 7;animation:g-flow .9s linear infinite,g-edge-glow 1.8s ease-in-out infinite}
+.gnode-live{animation:g-node-glow 1.8s ease-in-out infinite}
+
+@media(prefers-reduced-motion:reduce){.lai-px i{animation:none;opacity:.6}.lai-spin,.lai-shimmer,.lai-pulse,.lai-in,.gedge-live,.gnode-live{animation:none}.lai-caret::after{animation:none}}
 
 .hv:hover{background:#111!important}
 .hv2:hover{background:#141414!important}
@@ -57,7 +65,7 @@ const A75 = 'oklch(75% 0.17 25)';
 // the default). Set when the UI is bundled and loaded from file:// (the desktop offline build),
 // so /api and /static resolve to the configured server. Defined here, before LOGO uses it.
 const SERVER_BASE=(function(){try{return localStorage.getItem('serverBase')||''}catch(e){return ''}})();
-const LOGO = SERVER_BASE + '/static/oxpecker-logo.png';
+const LOGO = SERVER_BASE ? SERVER_BASE + '/static/oxpecker-logo.png' : 'oxpecker-logo.png';
 
 function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
@@ -89,7 +97,7 @@ function md(text){
     } else if(l.startsWith('|')){
       const rows=[];
       while(i<lines.length&&lines[i].startsWith('|')){
-        if(!/^\|[\s:|-]+\|?$/.test(lines[i]))rows.push(lines[i].split('|').slice(1,-1).map(c=>esc(c.trim())));
+        if(!/^\|[\s:|-]+\|?$/.test(lines[i]))rows.push(lines[i].split('|').slice(1,-1).map(c=>inlineMd(c.trim())));
         i++;
       }
       if(rows.length){
@@ -109,7 +117,8 @@ function md(text){
 function inlineMd(s){
   return esc(s)
     .replace(/`([^`]+)`/g,'<code style="font:400 0.88em \'JetBrains Mono\',monospace;background:#161616;padding:1px 5px;border-radius:3px;color:#e5e5e5">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g,'<strong style="font-weight:600;color:#fff">$1</strong>');
+    .replace(/\*\*([^*]+)\*\*/g,'<strong style="font-weight:600;color:#fff">$1</strong>')
+    .replace(/(^|[^*\w])\*(\S[^*\n]*?\S|\S)\*(?![*\w])/g,'$1<em style="font-style:italic;color:#e8e8e8">$2</em>');
 }
 
 function timeAgo(ts){
@@ -203,6 +212,10 @@ const S = {
   selectedNode: null,
   nodeDetail: null,
   graphZoom: 1,
+  // Graph canvas is transform-panned (not scrolled), so it can be dragged past its own edges
+  // and the work always ends up where you put it. gNeedsCenter centres the tree on next paint.
+  gPan: {x:0,y:0},
+  gNeedsCenter: true,
   gFilter: {q:'',phase:'',status:'',conf:'',activeOnly:false},
   collapsed: {},
 
@@ -214,9 +227,6 @@ const S = {
 
   panel: null,
   panelW: 440,
-
-  steerOpen: false,
-  steerText: '',
 
   ctxOpen: false,
   ctxDetail: false,
@@ -237,6 +247,19 @@ const S = {
   eventSource: null,
   workers: [], models: [], toolsInFlight: [],
   browserSeq: 0, browserErr: null,
+  /* Browser surface — real tab strip with two kinds of tabs:
+       owner:'agent' → a page the agent's own headless browser drives (live screencast)
+       owner:'me'    → a page YOU drive. The agent may READ it (DOM/text snapshot) when
+                       share:true, but it can never click, type or navigate in it.
+     In the real build an agent read is the browser_read_tab tool hitting the operator tab's
+     snapshot endpoint; nothing in the write path is exposed for owner:'me' tabs. */
+  browserTabs:[
+    {id:'ag-w1',owner:'agent',worker:'w1',title:'shop.acme-lab.test — Sign in',url:'https://shop.acme-lab.test/login',screencast:true},
+    {id:'ag-w2',owner:'agent',worker:'w2',title:'api.acme-lab.test — /api/orders/1012',url:'https://api.acme-lab.test/api/orders/1012',screencast:false},
+    {id:'me-1',owner:'me',title:'ACME Shop — My orders',url:'https://shop.acme-lab.test/account/orders',share:true},
+  ],
+  browserTab:'ag-w1',
+  browserReadAt:null,   // when the agent last pulled a snapshot of one of your tabs
   flowSnap: null,
   chainOpen: {},
   stepOpen: {},
@@ -437,13 +460,13 @@ async function loadSessionHistory(sid){
 }
 async function openSession(sid){
   if(sid===S.activeSession)return;
-  S.activeSession=sid;S.view='chat';S.panel=null;S.steerOpen=false;S.streamingText='';S.streamingReasoning='';S.ctxUsage=null;
+  S.activeSession=sid;S.view='chat';S.panel=null;S.streamingText='';S.streamingReasoning='';S.ctxUsage=null;
   if(!S.threads[sid])await loadSessionHistory(sid);
   connectSSE(sid);render();scrollToBottom();
 }
 function goHome(){
   stopGraphPoll();
-  S.activeSession=null;S.view='home';S.panel=null;S.steerOpen=false;S.running=false;
+  S.activeSession=null;S.view='home';S.panel=null;S.running=false;
   // A new chat starts clean: drop the previous session's context reading and any in-flight stream,
   // so the context indicator does not carry the old conversation's usage into the fresh one.
   S.ctxUsage=null;S.streamingText='';S.streamingReasoning='';
@@ -464,7 +487,21 @@ function syncClientExecutor(){
 }
 
 async function sendMessage(){
-  const text=S.input.trim();if(!text||S.running)return;
+  const text=S.input.trim();if(!text)return;
+  // Steering has no separate button or bar any more: while a task is running, whatever you type
+  // into the chat box IS the steer. It goes to /steer — the run keeps going and picks the
+  // instruction up at its next step — instead of queueing a second turn.
+  if(S.running){
+    if(!S.activeSession)return;
+    S.input='';const _ta=document.getElementById('chatInput');if(_ta)_ta.value='';
+    try{
+      await api.steer(S.activeSession,text);
+      if(!S.threads[S.activeSession])S.threads[S.activeSession]=[];
+      S.threads[S.activeSession].push({role:'user',content:text,_steer:true});
+      render();scrollToBottom();
+    }catch(e){toast('Steer failed: '+e.message);}
+    return;
+  }
   let sid=S.activeSession;
   if(!sid){
     try{
@@ -513,19 +550,25 @@ async function checkUpdate(){
   catch(e){toast('Update check failed: '+((e&&e.message)||e));}
   finally{S.updateMsg=null;render();}
 }
-async function sendSteer(){
-  const t=S.steerText.trim();if(!t||!S.activeSession)return;
-  try{await api.steer(S.activeSession,t);S.steerText='';S.steerOpen=false;
-  if(!S.threads[S.activeSession])S.threads[S.activeSession]=[];
-  S.threads[S.activeSession].push({role:'system',content:'Steer: '+t});render();scrollToBottom();}catch(e){toast('Steer failed: '+e.message)}
+/* Resolving a request removes its card immediately (optimistic), then re-polls to stay honest.
+   When the queue empties the drawer closes itself — it used to stay open showing
+   "No pending approvals" after you had answered everything. */
+async function closeApprovalsIfEmpty(){if(!S.approvals.length&&!S.consults.length)S.approvalsOpen=false;}
+async function resolveApproval(id,approved){
+  S.approvals=S.approvals.filter(a=>a.request_id!==id);await closeApprovalsIfEmpty();render();
+  try{await api.resolveApproval(id,approved);toast(approved?'Approved':'Declined');await pollApprovals();await closeApprovalsIfEmpty();render();}
+  catch(e){toast('Failed: '+e.message)}
 }
-async function resolveApproval(id,approved){try{await api.resolveApproval(id,approved);toast(approved?'Approved':'Declined');pollApprovals();}catch(e){toast('Failed: '+e.message)}}
-async function resolveConsult(id,answer){try{await api.resolveConsult(id,answer);toast('Answered');pollConsults();}catch(e){toast('Failed: '+e.message)}}
+async function resolveConsult(id,answer){
+  S.consults=S.consults.filter(c=>c.request_id!==id);await closeApprovalsIfEmpty();render();
+  try{await api.resolveConsult(id,answer);toast('Answered');await pollConsults();await closeApprovalsIfEmpty();render();}
+  catch(e){toast('Failed: '+e.message)}
+}
 async function pollApprovals(){try{const d=await api.listApprovals(S.activeSession);const j=JSON.stringify(d);if(j!==S._prevApprovalsJson){S._prevApprovalsJson=j;S.approvals=d;render(true);}}catch(e){}}
 async function pollConsults(){try{const d=await api.listConsults(S.activeSession);const j=JSON.stringify(d);if(j!==S._prevConsultsJson){S._prevConsultsJson=j;S.consults=d;render(true);}}catch(e){}}
 
 async function openGraph(){
-  S.view='graph';S.graphTab='tree';S.selectedNode=null;S.nodeDetail=null;
+  S.view='graph';S.graphTab='tree';S.selectedNode=null;S.nodeDetail=null;S.gNeedsCenter=true;
   try{S.graphData=await api.getGraph((S.activeSession||S.engagementId));}catch(e){S.graphData={exists:false,nodes:[],edges:[]};}
   render();startGraphPoll();
 }
@@ -568,30 +611,6 @@ async function graphNodeAction(ordinal,action,reason,text){
   if(S.selectedNode===ordinal)S.nodeDetail=await api.getGraphNode((S.activeSession||S.engagementId),ordinal);render();}catch(e){toast('Failed: '+e.message)}
 }
 
-/* Workers view — the autonomous run's workers, read from the engagement snapshot (§4.2), the same
-   read-model the retired React client used. Shows what each worker is testing, its state and
-   outcome, plus the model roster (what the strategist has spent), and refreshes while the run
-   works — brought into the classic UI so the whole engagement lives in one place. */
-async function openWorkers(){
-  S.view='workers';
-  try{const s=await api.engagementSnapshot(S.engagementId);S.workers=s.workers||[];S.models=s.model_roster||[];S.toolsInFlight=s.tool_calls_in_flight||[];}
-  catch(e){S.workers=[];S.models=[];S.toolsInFlight=[];}
-  render();startWorkersPoll();
-}
-let _workersPoll=null;
-function _workersSig(ws,tf){return (ws||[]).map(w=>w.worker_id+':'+(w.status||'')+':'+(w.outcome||'')).join('|')+'#'+((tf||[]).map(t=>t.worker+':'+t.tool).join(','));}
-function startWorkersPoll(){
-  stopWorkersPoll();
-  _workersPoll=setInterval(async()=>{
-    if(S.view!=='workers'){stopWorkersPoll();return;}
-    try{const s=await api.engagementSnapshot(S.engagementId);
-      if(_workersSig(s.workers,s.tool_calls_in_flight)!==_workersSig(S.workers,S.toolsInFlight)){
-        S.workers=s.workers||[];S.models=s.model_roster||[];S.toolsInFlight=s.tool_calls_in_flight||[];render();}
-    }catch(e){}
-  },1800);
-}
-function stopWorkersPoll(){if(_workersPoll){clearInterval(_workersPoll);_workersPoll=null;}}
-
 /* Live agent browser — start the screencast, then poll the newest JPEG (204 when unchanged, the
    seq riding in X-Frame-Seq so a still page is cheap). The <img> is updated in place so the frame
    does not flicker on every render. */
@@ -631,127 +650,531 @@ function _flowSig(s){s=s||{};return ((s.workers||[]).map(w=>w.worker_id+':'+(w.s
 function startFlowPoll(){stopFlowPoll();_flowPoll=setInterval(async()=>{if(S.view!=='flow'){stopFlowPoll();return;}try{const s=await api.engagementSnapshot(S.engagementId);if(_flowSig(s)!==_flowSig(S.flowSnap)){S.flowSnap=s;render();}}catch(e){}},1800);}
 function stopFlowPoll(){if(_flowPoll){clearInterval(_flowPoll);_flowPoll=null;}}
 function _flowPrice(m){const t=(m.prompt_tokens||0)+(m.completion_tokens||0);if(!(t>0))return null;return Math.round((m.cost/(t/1e6))*1e4)/1e4;}
-function buildFlow(snap){
-  const NW=152,NH=54;
-  const nodes=[
-    {id:'strategist',x:300,y:0,label:'Strategist',kind:'role'},
-    {id:'pool',x:300,y:120,label:'Worker pool',kind:'pool'},
-    {id:'broker',x:300,y:380,label:'Broker',kind:'broker'},
-    {id:'evidence',x:70,y:500,label:'Evidence store',kind:'store'},
-    {id:'notebook',x:300,y:500,label:'Notebook',kind:'store'},
-    {id:'findings',x:530,y:500,label:'Findings',kind:'store'},
-    {id:'graph',x:560,y:120,label:'Hypothesis graph',kind:'graph'},
-  ];
-  const edges=[
-    {source:'strategist',target:'pool'},{source:'pool',target:'broker'},
-    {source:'broker',target:'evidence'},{source:'strategist',target:'graph'},
-  ];
-  const live=(snap.workers||[]).filter(w=>w.status!=='finished');
-  const inflight={};(snap.tool_calls_in_flight||[]).forEach(c=>{inflight[c.worker]=c.tool;});
-  (snap.model_roster||[]).forEach((m,i)=>{
-    const id='model-'+m.model_id;const p=_flowPrice(m);
-    nodes.push({id,x:-240,y:i*92,label:String(m.model_id),kind:'model',detail:[m.role,(p===null?'—/Mtok':'$'+p.toFixed(4)+'/Mtok'),'spent $'+(m.cost||0).toFixed(4)].filter(Boolean).join('  ')});
-    edges.push({source:id,target:'strategist',animated:live.length>0});
-  });
-  live.forEach((w,i)=>{
-    const id='worker-'+w.worker_id;const tool=inflight[w.worker_id];
-    nodes.push({id,x:150+i*172,y:240,label:'worker '+w.worker_id,kind:'worker',detail:[w.method,tool?('→ '+tool):null].filter(Boolean).join('  ')});
-    edges.push({source:'strategist',target:id});
-    edges.push({source:id,target:'broker',animated:!!tool});
-  });
-  const STORE={evidence:'evidence',notebook:'notebook',findings:'findings'};
-  const byId={};nodes.forEach(n=>byId[n.id]=n);
-  (snap.artifacts||[]).forEach(a=>{
-    const target=STORE[a.store]||'evidence';
-    const src=(a.worker&&byId['worker-'+a.worker])?'worker-'+a.worker:'pool';
-    edges.push({source:src,target,label:a.artifact||'artifact'});
-  });
-  return {nodes,edges,NW,NH};
+/* ---------------------------------------------------------------------------------------------
+   The Flow surface (FLOW_SURFACE_DESIGN.md)
+   ---------------------------------------------------------------------------------------------
+   Rebuilt from the bezier tangle into the lane canvas the design specifies. The rules it encodes:
+
+   §5  LANES. Six fixed columns — models, control, hypotheses, wave, call pipeline, stores — and
+       an edge may ONLY join adjacent lanes. That single constraint is what removes the tangle:
+       a worker's artifact no longer flies across the canvas to a store, it travels
+       worker → gate → exec → channel → store, which is the path the bytes actually took.
+       Lane x is a constant. Nodes appear and fade; nothing auto-layouts, nothing slides.
+   §5  ROUTING. Orthogonal edges with a reserved vertical channel between each lane pair; edges
+       sharing a channel are offset a few px so they read as separate wires.
+   §6  VOCABULARY. Three weights: structure (square, muted), instances (rounded, filled),
+       records (chips). Colour is reserved for verdicts — amber waiting, red refused,
+       green supported, grey dead. Components are shape and weight, never hue.
+   §7  EDGES. allowed / refused / awaiting-approval / settled, each distinguishable at a glance.
+       The refused edge stops short of its target and names the gate it died at.
+   §8  WAVE. A container with the barrier as its right edge, ghost rows for dispatched-but-
+       unclaimed experiments, and finished waves collapsed to one row above rather than deleted.
+   §4  BROKER. Not a pipe — twelve gates in a fixed order. Click the gate station to expand it.
+   §9  WORKER DRAWER. The Workers panel folded in as the worker node's expanded form.
+   §11 MODES. Tainted and kill-switch reframe the whole canvas, with a banner that says why.
+
+   Not built yet, and deliberately: edge hover cards, the §12 scrubber, and tear-off. Everything
+   drawn below is fed by the demo snapshot; §13 lists which fields the real stream still owes us. */
+
+const FLOW_GATES=['idempotency replay','kill switch','policy load (fail closed)','known tool','RoE action class','program terms','scope','deny list','cooldown','kill switch (again)','taint / insecure TLS','approval'];
+/* Five lanes, not six. The model column is gone: a model is not a station traffic passes through,
+   it is the thing that POWERS a station, so each model now hangs underneath the node it actually
+   drives (n8n's sub-node idiom) instead of every model firing into the Strategist and leaving by
+   the same wire. strategist-large → Strategist, worker-4b → the wave, judge-mid → the finding gate
+   on Findings, which is where it genuinely does its work. */
+const FLOW_LANES=[
+  {id:'inputs', x:0,    w:186,title:'INPUTS'},
+  {id:'control',x:246,  w:152,title:'CONTROL'},
+  {id:'hypo',   x:458,  w:176,title:'HYPOTHESES'},
+  {id:'wave',   x:694,  w:320,title:'WAVE'},
+  {id:'pipe',   x:1074, w:372,title:'CALL PIPELINE'},
+  {id:'stores', x:1506, w:176,title:'STORES'},
+];
+const F_TOP=52;
+const V_OK='#4ec9a3',V_WAIT='#d98c3a',V_NO='#e5484d',V_DEAD='#565656',V_LIVE='#8ab4ff';
+function _flowPrice(m){const t=(m.prompt_tokens||0)+(m.completion_tokens||0);if(!(t>0))return null;return Math.round((m.cost/(t/1e6))*1e4)/1e4;}
+function _lane(id){return FLOW_LANES.find(l=>l.id===id);}
+function _clip(s,n){s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s;}
+/* Horizontal S-curve: leaves the right handle going right, enters the left handle going right,
+   so a wire never doubles back on itself. The control-point reach grows with the gap, which is
+   what makes a short hop read as a gentle bend and a long one as a sweep. */
+function _curve(x1,y1,x2,y2){
+  const dx=Math.max(34,Math.min(150,Math.abs(x2-x1)*0.55));
+  return 'M '+x1+' '+y1+' C '+(x1+dx)+' '+y1+', '+(x2-dx)+' '+y2+', '+x2+' '+y2;
 }
+/* Attachment curve: a sub-node hanging below its owner leaves upward and arrives downward. */
+function _attach(x1,y1,x2,y2){
+  const dy=Math.max(26,Math.abs(y2-y1)*0.55);
+  return 'M '+x1+' '+y1+' C '+x1+' '+(y1+dy)+', '+x2+' '+(y2-dy)+', '+x2+' '+y2;
+}
+
 function renderFlow(){
   const snap=S.flowSnap||{};
-  const g=buildFlow(snap);const NW=g.NW,NH=g.NH;
-  const byId={};g.nodes.forEach(n=>byId[n.id]=n);
-  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  g.nodes.forEach(n=>{minX=Math.min(minX,n.x);minY=Math.min(minY,n.y);maxX=Math.max(maxX,n.x+NW);maxY=Math.max(maxY,n.y+NH);});
-  const pad=70;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;const W=maxX-minX,H=maxY-minY;
-  const KIND={role:'#e5484d',pool:'#8ab4ff',broker:'#d98c3a',store:'#4ec9a3',graph:'#b18aff',model:'#565656',worker:'#ededed'};
-  const cx=n=>n.x+NW/2,cy=n=>n.y+NH/2;
-  const wires=g.edges.map(e=>{
-    const s=byId[e.source],t=byId[e.target];if(!s||!t)return'';
-    const sx=cx(s),sy=cy(s),tx=cx(t),ty=cy(t);const cp=Math.max(34,Math.abs(ty-sy)/2);
-    const d='M '+sx+' '+sy+' C '+sx+' '+(sy+cp)+', '+tx+' '+(ty-cp)+', '+tx+' '+ty;
-    const col=e.animated?'#8ab4ff':'#242424';const cls=e.animated?'flow-wire flow-wire-live':'flow-wire';
-    const lbl=e.label?'<text x="'+((sx+tx)/2)+'" y="'+((sy+ty)/2-4)+'" fill="#6a6a6a" font-size="9.5" font-family="\'JetBrains Mono\',monospace" text-anchor="middle">'+esc(String(e.label).slice(0,24))+'</text>':'';
-    return '<path class="'+cls+'" d="'+d+'" stroke="'+col+'" stroke-width="1.5" fill="none"/>'+lbl;
-  }).join('');
-  const boxes=g.nodes.map(n=>{
-    const col=KIND[n.kind]||'#565656';const det=n.detail?(n.detail.length>30?n.detail.slice(0,29)+'…':n.detail):'';
-    return '<g><rect x="'+n.x+'" y="'+n.y+'" width="'+NW+'" height="'+NH+'" rx="9" fill="#0c0c0c" stroke="'+col+'" stroke-width="1.5"/>'
-      +'<text x="'+(n.x+NW/2)+'" y="'+(n.y+(det?21:NH/2+5))+'" fill="#ededed" font-size="12.5" font-weight="600" font-family="\'Instrument Sans\'" text-anchor="middle">'+esc(n.label)+'</text>'
-      +(det?'<text x="'+(n.x+NW/2)+'" y="'+(n.y+38)+'" fill="#8a8a8a" font-size="9.5" font-family="\'JetBrains Mono\',monospace" text-anchor="middle">'+esc(det)+'</text>':'')
-      +'</g>';
-  }).join('');
+  const mode=snap.mode||{};
+  const workers=snap.workers||[];
+  const wave=snap.wave||{number:0,dispatched:[]};
+  const finished=snap.finished_waves||[];
+  const calls=snap.calls_in_pipeline||[];
+  const models=snap.model_roster||[];
+  const sel=workers.find(w=>w.worker_id===S.flowWorker)||null;
+
+  const pos={};
+  let html='',svg='',dots='';
+  const box=(id,x,y,w,hh,inner,extra)=>{pos[id]={x,y,w,h:hh};
+    html+='<div '+(extra||'')+' style="position:absolute;left:'+x+'px;top:'+y+'px;width:'+w+'px;height:'+hh+'px;box-sizing:border-box;'+(extra&&extra.indexOf('data-action')>-1?'cursor:pointer;':'')+'">'+inner+'</div>';};
+  const handle=(x,y,col)=>{dots+='<circle cx="'+x+'" cy="'+y+'" r="3.2" fill="#0a0a0a" stroke="'+(col||'#3a3a3a')+'" stroke-width="1.4"/>';};
+
+  let laneHdr='';
+  FLOW_LANES.forEach(l=>{laneHdr+='<div style="position:absolute;left:'+l.x+'px;top:0;width:'+l.w+'px;font:600 10px \'JetBrains Mono\',monospace;letter-spacing:.14em;color:#4a4a4a">'+l.title+'<div style="height:1px;background:#1a1a1a;margin-top:7px"></div></div>';});
+
+  /* INPUTS — everything the strategist reads before it decides anything. Each one is a real
+     source in the engine: the operator's turn and steers, the loaded RoE, the hypothesis graph it
+     re-reads every wave, the knowledge corpus it retrieves from, and the worker reports coming
+     back from the previous wave. A wire lights only while that source is actually feeding. */
+  const iL=_lane('inputs');
+  const anyRunning=workers.some(w=>w.status==='running');
+  const reports=workers.filter(w=>w.status!=='running').length;
+  const inputs=[
+    {id:'in-op',   label:'Operator',       sub:'turn · steer · approvals',            live:false},
+    {id:'in-roe',  label:'Rules of engagement', sub:'3 targets · 1 denied · 4 classes', live:false},
+    {id:'in-graph',label:'Hypothesis graph',sub:(snap.hypotheses||[]).length+' nodes · re-read each wave',live:anyRunning},
+    {id:'in-kb',   label:'Knowledge base',  sub:'547k chunks · 6 hits @ 0.70',         live:anyRunning},
+    {id:'in-rep',  label:'Worker reports',  sub:reports+' back from this wave',        live:reports>0},
+  ];
+  inputs.forEach((n,i)=>{
+    box(n.id,iL.x,F_TOP+i*56,iL.w,46,
+      '<div style="height:100%;border:1px solid '+(n.live?'#2b3a52':'#1f1f1f')+';border-radius:10px;background:#090909;padding:7px 10px;display:flex;flex-direction:column;gap:2px">'
+      +'<div style="display:flex;align-items:center;gap:6px"><span style="width:5px;height:5px;border-radius:50%;flex:none;background:'+(n.live?V_LIVE:'#3a3a3a')+'"></span>'
+      +'<span style="font:600 11.5px \'Instrument Sans\';color:#dcdcdc">'+n.label+'</span></div>'
+      +'<div style="font:400 9.5px \'JetBrains Mono\',monospace;color:#6a6a6a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+n.sub+'</div></div>');
+  });
+
+  /* CONTROL */
+  const cL=_lane('control');
+  box('strategist',cL.x,F_TOP,cL.w,66,
+    '<div style="height:100%;border:1px solid #2e2e2e;border-radius:10px;background:#0d0d0d;padding:9px 11px;display:flex;flex-direction:column;gap:4px">'
+    +'<div style="font:600 12.5px \'Instrument Sans\';color:#ededed">Strategist</div>'
+    +'<div style="font:400 10px \'JetBrains Mono\',monospace;color:#6a6a6a">reads the graph,<br>dispatches the wave</div></div>');
+
+
+  /* HYPOTHESES */
+  const hL=_lane('hypo');
+  const hypCol={claimed:V_WAIT,supported:V_OK,refuted:V_NO,open:'#5a5a5a'};
+  (snap.hypotheses||[]).forEach((hy,i)=>{
+    box('hyp-'+hy.id,hL.x,F_TOP+i*38,hL.w,30,
+      '<div style="height:100%;border:1px solid #1f1f1f;border-radius:999px;background:#0a0a0a;padding:0 11px;display:flex;align-items:center;gap:7px">'
+      +'<span style="width:6px;height:6px;border-radius:50%;flex:none;background:'+(hypCol[hy.state]||'#5a5a5a')+'"></span>'
+      +'<span style="font:600 10.5px \'JetBrains Mono\',monospace;color:#b5b5b5;flex:none">'+esc(hy.id)+'</span>'
+      +'<span style="font:400 10.5px \'Instrument Sans\';color:#7d7d7d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(hy.title)+'</span></div>');
+  });
+
+  /* WAVE */
+  const wL=_lane('wave');
+  let wy=F_TOP;
+  finished.forEach(f=>{
+    html+='<div style="position:absolute;left:'+wL.x+'px;top:'+wy+'px;width:'+wL.w+'px;height:24px;box-sizing:border-box;border:1px solid #1a1a1a;border-radius:7px;background:#070707;display:flex;align-items:center;gap:8px;padding:0 10px;font:400 10.5px \'JetBrains Mono\',monospace;color:#5a5a5a">'
+      +'wave '+f.wave+' · '+f.workers+' workers · '+esc(f.summary)+'</div>';
+    wy+=28;
+  });
+  const ghosts=(wave.dispatched||[]).filter(d=>!d.claimed_by);
+  const frameTop=wy, rowH=94, hdrH=30;
+  const frameH=hdrH+workers.length*(rowH+8)+ghosts.length*30+30;
+  const callsByWorker={};calls.forEach(c=>{(callsByWorker[c.worker]=callsByWorker[c.worker]||[]).push(c);});
+  const pickCall=id=>{const l=callsByWorker[id]||[];return l.find(c=>c.status==='awaiting')||l.find(c=>c.status==='refused')||l.find(c=>c.status==='allowed')||null;};
+  const blocked={};calls.forEach(c=>{(c.blocked_workers||[]).forEach(b=>{blocked[b]=c.request_id;});});
+  html+='<div style="position:absolute;left:'+wL.x+'px;top:'+frameTop+'px;width:'+wL.w+'px;height:'+frameH+'px;box-sizing:border-box;border:1px dashed #2a2a2a;border-radius:12px;background:rgba(255,255,255,.012)"></div>';
+  html+='<div style="position:absolute;left:'+(wL.x+12)+'px;top:'+(frameTop+9)+'px;font:600 10.5px \'JetBrains Mono\',monospace;color:#8a8a8a">WAVE '+wave.number+' · '+workers.length+' running in parallel</div>';
+  html+='<div style="position:absolute;left:'+wL.x+'px;top:'+(frameTop+frameH-24)+'px;width:'+wL.w+'px;text-align:right;padding-right:10px;box-sizing:border-box;font:500 10px \'JetBrains Mono\',monospace;color:'+V_WAIT+'">barrier in '+Math.max(0,(wave.barrier_s||0)-(wave.elapsed_s||0))+'s</div>';
+  pos['wave-frame']={x:wL.x,y:frameTop,w:wL.w,h:frameH};
+
+  const outCol={supported:V_OK,refuted:V_NO,error:V_NO,timeout:V_WAIT};
+  workers.forEach((w,i)=>{
+    const y=frameTop+hdrH+i*(rowH+8);
+    const call=pickCall(w.worker_id);
+    const running=w.status==='running';
+    const held=(call&&call.status==='awaiting')||!!blocked[w.worker_id];
+    const liveCall=(callsByWorker[w.worker_id]||[]).find(c=>c.status==='allowed');
+    const col=held?V_WAIT:(running?'#ededed':(outCol[w.outcome]||V_DEAD));
+    const pct=Math.min(100,Math.round(100*(w.elapsed_s||0)/(w.wall_clock_s||1)));
+    const on=S.flowWorker===w.worker_id;
+    box('worker-'+w.worker_id,wL.x+12,y,wL.w-24,rowH,
+      '<div style="height:100%;border:1px solid '+(on?col:'#262626')+';border-radius:12px;background:'+(on?'#121212':'#0d0d0d')+';padding:9px 11px;display:flex;flex-direction:column;gap:4px;opacity:'+(running||held?1:.65)+'">'
+      +'<div style="display:flex;align-items:center;gap:7px">'
+        +'<span class="'+(running&&!held?'lai-pulse':'')+'" style="width:7px;height:7px;border-radius:50%;flex:none;background:'+col+'"></span>'
+        +'<span style="font:600 12px \'JetBrains Mono\',monospace;color:#ededed">'+esc(w.worker_id)+'</span>'
+        +'<span style="font:400 10.5px \'JetBrains Mono\',monospace;color:#8a8a8a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.hypothesis||'')+'</span>'
+        +(w.tier&&w.tier!=='bubblewrap'?'<span style="margin-left:auto;flex:none;font:500 9px \'JetBrains Mono\',monospace;color:'+V_WAIT+';border:1px solid #2e2420;border-radius:4px;padding:1px 5px">'+esc(w.tier)+'</span>':'')
+      +'</div>'
+      +'<div style="font:400 11px \'Instrument Sans\';color:#b5b5b5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.method||'')+'</div>'
+      +'<div style="display:flex;align-items:center;gap:7px">'
+        +'<span style="font:500 10.5px \'JetBrains Mono\',monospace;color:'+(held?V_WAIT:V_LIVE)+'">'+(held?'⏸ awaiting '+esc((call&&call.request_id)||blocked[w.worker_id]||'')+(liveCall?' · → '+esc(liveCall.tool):''):(call?'→ '+esc(call.tool):(w.outcome?esc(w.outcome):'idle')))+'</span>'
+        +'<span style="flex:1;height:3px;border-radius:2px;background:#1a1a1a;overflow:hidden"><span style="display:block;height:100%;width:'+pct+'%;background:'+(pct>85?V_NO:'#3a3a3a')+'"></span></span>'
+      +'</div>'
+      +'<div style="font:400 9.5px \'JetBrains Mono\',monospace;color:#5a5a5a">'+(w.calls||0)+' calls · '+(w.artifacts||0)+' artifacts · '+(w.refusals||0)+' refused</div>'
+      +'</div>','data-action="flowOpenWorker" data-id="'+esc(w.worker_id)+'"');
+  });
+  ghosts.forEach((d,i)=>{
+    const y=frameTop+hdrH+workers.length*(rowH+8)+i*30;
+    html+='<div style="position:absolute;left:'+(wL.x+12)+'px;top:'+y+'px;width:'+(wL.w-24)+'px;height:26px;box-sizing:border-box;border:1px dashed #242424;border-radius:8px;display:flex;align-items:center;gap:7px;padding:0 10px;font:400 10px \'JetBrains Mono\',monospace;color:#4a4a4a">'
+      +esc(d.hypothesis_id)+' · '+esc(_clip(d.method,22))+' — '+esc(d.reason||'unclaimed')+'</div>';
+  });
+
+  /* CALL PIPELINE — the three stations are now visibly ONE chain: a labelled rail runs behind
+     them, each station has in/out handles, and short curves join them so you can see a call
+     entering at the Broker and leaving at the Channel. A refusal drops out under the Broker and
+     never reaches the Executor, which is the whole point of the ordering. */
+  const pL=_lane('pipe');
+  const stW=108,stGap=14,stY=F_TOP+64;
+  const stations=[
+    {id:'gate',label:'Broker',sub:'authorise',foot:'12 gates'},
+    {id:'exec',label:'Executor',sub:'confine',foot:'bwrap · vm'},
+    {id:'channel',label:'Channel',sub:'egress',foot:'4 routes'}];
+  const gateOpen=!!S.flowGateOpen;
+  const gateCounts=snap.gate_counts||{};
+  const gateH=gateOpen?(44+FLOW_GATES.length*17+10):78;
+  html+='<div style="position:absolute;left:'+pL.x+'px;top:'+(F_TOP+40)+'px;width:'+pL.w+'px;font:400 9.5px \'JetBrains Mono\',monospace;color:#4a4a4a">request → authorise → confine → egress</div>';
+  // the rail the stations sit on, drawn first so the boxes sit over it
+  svg+='<path d="'+_curve(pL.x-18,stY+39,pL.x+3*stW+2*stGap+18,stY+39)+'" stroke="#1c1c1c" stroke-width="7" fill="none" stroke-linecap="round"/>';
+  stations.forEach((st,i)=>{
+    const x=pL.x+i*(stW+stGap);
+    const busy=calls.some(c=>c.station===st.id&&c.status==='allowed');
+    const isGate=st.id==='gate';
+    const hh=isGate?gateH:78;
+    box('st-'+st.id,x,stY,stW,hh,
+      '<div style="height:100%;border:1px solid '+(busy?'#3a4a63':'#242424')+';border-radius:10px;background:#0a0a0a;padding:8px 9px;display:flex;flex-direction:column;gap:2px'+(busy?';box-shadow:0 0 0 1px rgba(138,180,255,.14)':'')+'">'
+      +'<div style="display:flex;align-items:center;gap:5px"><span style="font:600 11.5px \'Instrument Sans\';color:#ededed">'+st.label+'</span><span style="font:400 9px \'JetBrains Mono\',monospace;color:#4a4a4a">'+(i+1)+'/3</span></div>'
+      +'<div style="font:400 9.5px \'JetBrains Mono\',monospace;color:#6a6a6a">'+st.sub+(isGate?(gateOpen?' ▾':' ▸'):'')+'</div>'
+      +(isGate&&gateOpen
+        ?'<div style="margin-top:4px;display:flex;flex-direction:column;gap:2px">'+FLOW_GATES.map((gname,gi)=>{
+            const n=gateCounts[gname]||gateCounts[gname.split(' ')[0]]||0;
+            return '<div style="display:flex;gap:5px;font:400 9px \'JetBrains Mono\',monospace;color:'+(n?V_NO:'#5a5a5a')+'"><span style="color:#3a3a3a;flex:none">'+(gi+1)+'</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(gname)+'</span>'+(n?'<span style="margin-left:auto;flex:none">'+n+'</span>':'')+'</div>';
+          }).join('')+'</div>'
+        :'<div style="margin-top:auto;font:400 9px \'JetBrains Mono\',monospace;color:'+(isGate?V_NO:'#4a4a4a')+'">'+(isGate?(Object.keys(gateCounts).reduce((a,k)=>a+gateCounts[k],0)+' refused'):st.foot)+'</div>')
+      +'</div>',isGate?'data-action="flowToggleGate"':'');
+    // in / out handles, and the curve joining this station to the next
+    handle(x,stY+39,busy?V_LIVE:'#3a3a3a');
+    handle(x+stW,stY+39,busy?V_LIVE:'#3a3a3a');
+    if(i<stations.length-1){
+      const nx=pL.x+(i+1)*(stW+stGap);
+      const flowing=calls.some(c=>c.status==='allowed'&&(c.station===st.id||c.station===stations[i+1].id));
+      svg+='<path'+(flowing?' class="flow-wire-live"':'')+' d="'+_curve(x+stW,stY+39,nx,stY+39)+'" stroke="'+(flowing?V_LIVE:'#2a2a2a')+'" stroke-width="1.6" fill="none" marker-end="url(#fa'+(flowing?'l':'d')+')"/>';
+    }
+    calls.filter(c=>c.station===st.id&&c.status==='allowed').forEach((c,k)=>{
+      html+='<div class="lai-pulse" style="position:absolute;left:'+(x+8+k*52)+'px;top:'+(stY+hh+6)+'px;font:500 9px \'JetBrains Mono\',monospace;color:'+V_LIVE+';border:1px solid #27354a;border-radius:4px;padding:1px 5px;background:#0b1118">'+esc(c.worker)+'</div>';
+    });
+  });
+  const refused=calls.filter(c=>c.status==='refused');
+  const ry=stY+gateH+34;
+  refused.forEach((c,i)=>{
+    html+='<div style="position:absolute;left:'+pL.x+'px;top:'+(ry+i*34)+'px;width:'+(stW*2+stGap)+'px;box-sizing:border-box;border:1px dashed '+V_NO+';border-radius:8px;padding:5px 8px;background:rgba(229,72,77,.05)">'
+      +'<div style="font:500 9.5px \'JetBrains Mono\',monospace;color:'+V_NO+'">✗ '+esc(c.worker)+' · '+esc(c.gate)+'</div>'
+      +'<div style="font:400 9px \'Instrument Sans\';color:#8a8a8a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.reason||'')+'</div></div>';
+    svg+='<path d="'+_attach(pL.x+stW/2,stY+gateH,pL.x+stW/2,ry+i*34)+'" stroke="'+V_NO+'" stroke-width="1.5" stroke-dasharray="4 4" fill="none"/>';
+  });
+
+  /* STORES */
+  const sL=_lane('stores');
+  const artCount={};(snap.artifacts||[]).forEach(a=>{artCount[a.store]=(artCount[a.store]||0)+1;});
+  const gateStates={proposed:V_WAIT,judging:V_WAIT,supported:V_OK,refuted:V_NO,recorded:'#8a8a8a'};
+  const fgList=snap.finding_gate||[];
+  const judging=fgList.some(f=>f.state==='judging');
+  let sy=F_TOP;
+  [['evidence','Evidence'],['notebook','Notebook'],['audit','Audit log'],['findings','Findings']].forEach(s=>{
+    const isF=s[0]==='findings';
+    const fg=isF?fgList:[];
+    const hh=56+fg.length*22;
+    box('store-'+s[0],sL.x,sy,sL.w,hh,
+      '<div style="height:100%;border:1px solid '+(isF&&judging?'#3a2e1e':'#242424')+';border-radius:10px;background:#0a0a0a;padding:8px 10px;display:flex;flex-direction:column;gap:3px">'
+      +'<div style="font:600 11.5px \'Instrument Sans\';color:#ededed">'+s[1]+'</div>'
+      +'<div style="font:400 9.5px \'JetBrains Mono\',monospace;color:#6a6a6a">'+(s[0]==='audit'?'hash-chained':((artCount[s[0]]||0)+' this run'))+'</div>'
+      +fg.map(f=>'<div style="display:flex;gap:5px;align-items:center;font:400 9px \'JetBrains Mono\',monospace;color:#7d7d7d"><span style="width:5px;height:5px;border-radius:50%;flex:none;background:'+(gateStates[f.state]||V_DEAD)+'"></span>'+esc(f.finding_id)+' · '+esc(f.state)+'</div>').join('')
+      +'</div>');
+    sy+=hh+10;
+  });
+
+  /* ---- traffic edges: curved, and lit ONLY while that particular thing is working ----------- */
+  const E=(a,b,state,label)=>{
+    const s=pos[a],t=pos[b];if(!s||!t)return;
+    const x1=s.x+s.w,y1=s.y+s.h/2,x2=t.x,y2=t.y+t.h/2;
+    const col=state==='refused'?V_NO:(state==='awaiting'?V_WAIT:(state==='live'?V_LIVE:'#242424'));
+    const dash=state==='refused'?' stroke-dasharray="4 4"':'';
+    const cls=state==='live'?' class="flow-wire-live"':(state==='awaiting'?' class="lai-pulse"':'');
+    svg+='<path'+cls+' d="'+_curve(x1,y1,x2,y2)+'" stroke="'+col+'" stroke-width="'+(state==='settled'?1:1.6)+'" fill="none"'+dash+'/>';
+    handle(x1,y1,state==='settled'?'#3a3a3a':col);handle(x2,y2,state==='settled'?'#3a3a3a':col);
+    if(label)svg+='<text x="'+((x1+x2)/2)+'" y="'+(((y1+y2)/2)-7)+'" fill="'+col+'" font-size="9" font-family="\'JetBrains Mono\',monospace" text-anchor="middle">'+esc(label)+'</text>';
+  };
+  inputs.forEach(n=>E(n.id,'strategist',n.live?'live':'settled'));
+  (snap.hypotheses||[]).forEach(hy=>{
+    const w=workers.find(x=>x.hypothesis_id===hy.id);
+    const wRunning=!!w&&w.status==='running';
+    E('strategist','hyp-'+hy.id,hy.state==='claimed'&&wRunning?'live':'settled');
+    if(w)E('hyp-'+hy.id,'worker-'+w.worker_id,wRunning?'live':'settled');
+  });
+  calls.forEach(c=>{
+    if(!pos['worker-'+c.worker])return;
+    E('worker-'+c.worker,'st-gate',c.status==='awaiting'?'awaiting':(c.status==='refused'?'refused':'live'));
+  });
+  Object.keys(artCount).forEach(st=>E('st-channel','store-'+st,'settled',artCount[st]+'×'));
+
+  /* ---- models as sub-nodes: each one hangs under the node it powers ------------------------- */
+  const byRole={};models.forEach(m=>{byRole[m.role||m.model_id]=m;});
+  const busyCalls=calls.filter(c=>c.status==='allowed');
+  const subs=[
+    // the strategist is only thinking while the run itself is live
+    {m:byRole.strategist,owner:'strategist',label:'Model',live:!!S.running},
+    // the worker model is lit while a worker call is actually in the pipeline, not merely spawned
+    {m:byRole.worker,owner:'wave-frame',label:'Model',live:busyCalls.length>0,tools:true},
+    // the judge works only while a finding is being judged — its wire is dark the rest of the time
+    {m:byRole.judge,owner:'store-findings',label:'Judge',live:judging},
+  ];
+  let subBottom=0;
+  subs.forEach(sb=>{
+    if(!sb.m||!pos[sb.owner])return;
+    const o=pos[sb.owner];
+    const cxp=o.x+o.w/2, top=o.y+o.h+56, r=27;
+    const p=_flowPrice(sb.m);
+    const col=sb.live?V_LIVE:'#2e2e2e';
+    svg+='<path'+(sb.live?' class="flow-wire-live"':'')+' d="'+_attach(cxp,o.y+o.h,cxp,top-r)+'" stroke="'+col+'" stroke-width="1.5" stroke-dasharray="5 5" fill="none"/>';
+    svg+='<text x="'+(cxp+9)+'" y="'+(o.y+o.h+22)+'" fill="#5a5a5a" font-size="9" font-family="\'JetBrains Mono\',monospace">'+sb.label+'</text>';
+    svg+='<rect x="'+(cxp-4)+'" y="'+(o.y+o.h-4)+'" width="8" height="8" transform="rotate(45 '+cxp+' '+(o.y+o.h)+')" fill="#0a0a0a" stroke="'+col+'" stroke-width="1.3"/>';
+    html+='<div style="position:absolute;left:'+(cxp-r)+'px;top:'+(top-r)+'px;width:'+(r*2)+'px;height:'+(r*2)+'px;border-radius:50%;border:1px solid '+(sb.live?'#2b3a52':'#242424')+';background:#0b0d11;display:flex;align-items:center;justify-content:center;font:600 13px \'JetBrains Mono\',monospace;color:'+(sb.live?V_LIVE:'#6a6a6a')+'">'+esc(String(sb.m.model_id)[0].toUpperCase())+'</div>';
+    html+='<div style="position:absolute;left:'+(cxp-76)+'px;top:'+(top+r+7)+'px;width:152px;text-align:center;font:600 10.5px \'JetBrains Mono\',monospace;color:#b5b5b5">'+esc(sb.m.model_id)+'</div>';
+    html+='<div style="position:absolute;left:'+(cxp-76)+'px;top:'+(top+r+22)+'px;width:152px;text-align:center;font:400 9.5px \'JetBrains Mono\',monospace;color:#5a5a5a">'+(sb.m.calls||0)+' calls · '+(p===null?'—':'$'+p.toFixed(4))+'/Mtok'+(sb.live?'':' · idle')+'</div>';
+    subBottom=Math.max(subBottom,top+r+44);
+    if(!sb.tools)return;
+    /* Every tool a worker can reach, hung off the worker model — the engine's full tool surface,
+       not just the ones that happen to be busy. Each one lights ONLY while a call of that tool is
+       in the pipeline; the rest sit dark, so the row doubles as "what it could do" and "what it
+       is doing right now". */
+    const TOOLS=[
+      {id:'http_request',label:'http_request',ab:'hr'},
+      {id:'run_command',label:'run_command',ab:'rc'},
+      {id:'browser',label:'browser',ab:'br'},
+      {id:'knowledge_search',label:'knowledge_search',ab:'ks'},
+      {id:'knowledge_fetch',label:'knowledge_fetch',ab:'kf'},
+      {id:'record_hypothesis',label:'record_hypothesis',ab:'rh'},
+      {id:'store_artifact',label:'store_artifact',ab:'sa'},
+    ];
+    const tr=19, gap=104, ty=top+r+74;
+    const tx0=cxp-((TOOLS.length-1)*gap)/2;
+    TOOLS.forEach((t,ti)=>{
+      const tcx=tx0+ti*gap;
+      const inUse=busyCalls.some(c=>c.tool===t.id);
+      const tcol=inUse?V_LIVE:'#262626';
+      svg+='<path'+(inUse?' class="flow-wire-live"':'')+' d="'+_attach(cxp,top+r,tcx,ty-tr)+'" stroke="'+tcol+'" stroke-width="1.4" stroke-dasharray="5 5" fill="none"/>';
+      html+='<div style="position:absolute;left:'+(tcx-tr)+'px;top:'+(ty-tr)+'px;width:'+(tr*2)+'px;height:'+(tr*2)+'px;border-radius:50%;border:1px solid '+(inUse?'#2b3a52':'#1f1f1f')+';background:#090b0e;display:flex;align-items:center;justify-content:center;font:600 10px \'JetBrains Mono\',monospace;color:'+(inUse?V_LIVE:'#4a4a4a')+'">'+esc(t.ab)+'</div>';
+      html+='<div style="position:absolute;left:'+(tcx-50)+'px;top:'+(ty+tr+6)+'px;width:100px;text-align:center;font:400 10px \'JetBrains Mono\',monospace;color:'+(inUse?'#b5b5b5':'#7d7d7d')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(t.label)+'</div>';
+    });
+    html+='<div style="position:absolute;left:'+(tx0-tr-10)+'px;top:'+(ty-tr-20)+'px;font:600 9px \'JetBrains Mono\',monospace;letter-spacing:.12em;color:#3f3f3f">TOOLS</div>';
+    subBottom=Math.max(subBottom,ty+tr+30);
+  });
+
+  /* ---- canvas, banners ---------------------------------------------------------------------- */
+  const last=FLOW_LANES[FLOW_LANES.length-1];
+  const CW=last.x+last.w+40;
+  let CH=F_TOP+40;
+  Object.keys(pos).forEach(k=>{const p=pos[k];CH=Math.max(CH,p.y+p.h+40)});
+  CH=Math.max(CH,frameTop+frameH+40,ry+refused.length*34+40,subBottom+20);
+
+  const banner=mode.kill_switch
+    ? '<div style="flex:none;padding:9px 24px;background:#111;border-bottom:1px solid #2a2a2a;font:500 12px \'Instrument Sans\';color:#9a9a9a">⏻ Kill switch engaged — the broker denies at gate 2 and nothing proceeds. The canvas is grey because the run is stopped, not because it is broken.</div>'
+    : (mode.tainted
+      ? '<div style="flex:none;padding:9px 24px;background:rgba(217,140,58,.1);border-bottom:1px solid #3a2e1e;font:500 12px \'Instrument Sans\';color:'+V_WAIT+'">⚠ Session tainted by injected content — held to passive recon; everything beyond it needs approval for another '+(mode.taint_remaining_s||0)+'s.</div>'
+      : '');
+  const deadFilter=mode.kill_switch?'filter:grayscale(1) brightness(.75);':'';
+
   return '<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">'
     +'<style>.flow-wire-live{stroke-dasharray:5 5;animation:flowdash 1s linear infinite}@keyframes flowdash{to{stroke-dashoffset:-10}}</style>'
     +'<div style="display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid #1a1a1a;flex:none">'
     +'<div style="font:600 15px \'Instrument Sans\'">Flow</div>'
-    +'<div style="font:400 12px \'JetBrains Mono\';color:#7d7d7d">strategist → workers → broker</div>'
+    +'<div style="font:400 12px \'JetBrains Mono\';color:#7d7d7d">wave '+wave.number+' · '+workers.length+' workers · '+calls.filter(c=>c.status==='allowed').length+' calls in flight · '+refused.length+' refused</div>'
     +'<div class="hv" data-action="closeFlow" style="margin-left:auto;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px \'Instrument Sans\';cursor:pointer;color:#b5b5b5">Close</div>'
     +'</div>'
-    +'<div style="flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;padding:24px">'
-    +'<svg viewBox="'+minX+' '+minY+' '+W+' '+H+'" style="width:100%;max-width:'+(W*1.25)+'px;height:auto" preserveAspectRatio="xMidYMid meet">'+wires+boxes+'</svg>'
+    +banner
+    +'<div style="flex:1;display:flex;min-height:0">'
+    +'<div style="flex:1;min-width:0;overflow:auto;padding:20px 24px">'
+      +'<div style="position:relative;width:'+CW+'px;height:'+CH+'px;'+deadFilter+'">'
+        +'<svg width="'+CW+'" height="'+CH+'" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible">'
+          +'<defs>'
+          +'<marker id="fal" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="'+V_LIVE+'"/></marker>'
+          +'<marker id="fad" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#2a2a2a"/></marker>'
+          +'</defs>'+svg+dots+'</svg>'
+        +laneHdr+html
+      +'</div>'
+    +'</div>'
+    +(sel?flowWorkerDrawer(sel,snap):'')
     +'</div></div>';
 }
 
-function renderWorkers(){
-  const statusColor={running:'#d98c3a',finished:'#4ec9a3',idle:'#7d7d7d',error:'#e5484d'};
-  const inflight={};(S.toolsInFlight||[]).forEach(t=>{inflight[t.worker]=t.tool;});
-  const rows=(S.workers||[]).map(w=>{
-    const live=inflight[w.worker_id];
-    const st=live?'running':(w.status||'idle');
-    const col=statusColor[w.outcome==='error'?'error':st]||'#7d7d7d';
-    return `<div style="border:1px solid #1a1a1a;border-radius:10px;padding:12px 14px;background:#0a0a0a;display:flex;flex-direction:column;gap:5px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="width:7px;height:7px;border-radius:50%;background:${col};flex:none"></span>
-        <span style="font:600 13px 'Instrument Sans';color:#ededed">${esc(w.worker_id||'worker')}</span>
-        <span style="font:500 11px 'JetBrains Mono';color:${col};margin-left:auto">${esc(live?('→ '+live):st)}${w.outcome?(' · '+esc(w.outcome)):''}</span>
-      </div>
-      ${w.method?`<div style="font:400 12.5px 'Instrument Sans';color:#b5b5b5">${esc(w.method)}</div>`:''}
-      ${w.hypothesis?`<div style="font:400 11px 'JetBrains Mono';color:#5a5a5a">${esc(w.hypothesis)}</div>`:''}
-    </div>`;
-  }).join('');
-  const models=(S.models||[]).map(m=>`<span style="border:1px solid #1f1f1f;border-radius:5px;padding:2px 8px;font:400 11px 'JetBrains Mono';color:#7d7d7d">${esc(m.model_id)} · ${m.calls||0} calls · ${((m.prompt_tokens||0)+(m.completion_tokens||0)).toLocaleString()} tok · $${(m.cost||0).toFixed(4)}</span>`).join('');
-  return `<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">
-    <div style="display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid #1a1a1a;flex:none">
-      <div style="font:600 15px 'Instrument Sans'">Workers</div>
-      <div style="font:400 12px 'JetBrains Mono';color:#7d7d7d">${(S.workers||[]).length} worker(s)</div>
-      <div class="hv" data-action="closeWorkers" style="margin-left:auto;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
-    </div>
-    <div style="flex:1;overflow-y:auto;padding:18px 24px;display:flex;flex-direction:column;gap:10px">
-      ${rows||'<div style="color:#7d7d7d;font:400 13px \'Instrument Sans\';text-align:center;margin-top:40px">No workers yet. Start an autonomous run and the strategist will spawn workers here.</div>'}
-      ${models?`<div style="margin-top:14px;padding-top:12px;border-top:1px solid #1a1a1a"><div style="font:600 12px 'Instrument Sans';color:#9a9a9a;margin-bottom:8px">Models</div><div style="display:flex;flex-wrap:wrap;gap:6px">${models}</div></div>`:''}
-    </div>
-  </div>`;
+/* §9 — the worker drawer. Not a second list beside the canvas: the node's expanded form, with the
+   node staying highlighted so the operator never loses where it sits in the wave. Five blocks, in
+   the order the design gives them: assignment, terminal, inputs, outputs, verdict. The terminal
+   rows come from the audit log (§2's second data path), so they carry redacted arguments, the
+   sanitized output and the digest the stream's ref is checked against — refusals are the rows
+   with no output, named by the gate that killed them. */
+function flowWorkerDrawer(w,snap){
+  const rows=((snap.worker_calls||{})[w.worker_id])||[];
+  const head=(t)=>'<div style="font:600 10px \'JetBrains Mono\',monospace;letter-spacing:.12em;color:#5a5a5a;margin:14px 0 7px">'+t+'</div>';
+  const kv=(k,v)=>'<div style="display:flex;gap:8px;font:400 11px \'Instrument Sans\'"><span style="flex:none;width:76px;color:#6a6a6a">'+k+'</span><span style="flex:1;color:#cfcfcf;min-width:0;overflow-wrap:anywhere">'+esc(v)+'</span></div>';
+  const stCol={ok:V_OK,refused:V_NO,awaiting:V_WAIT,error:V_NO};
+  const terminal=rows.length?rows.map(r=>
+    '<div style="border:1px solid #1a1a1a;border-radius:8px;background:#080808;padding:8px 10px;display:flex;flex-direction:column;gap:3px">'
+    +'<div style="display:flex;align-items:center;gap:7px">'
+      +'<span style="width:6px;height:6px;border-radius:50%;flex:none;background:'+(stCol[r.status]||V_DEAD)+'"></span>'
+      +'<span style="font:600 10.5px \'JetBrains Mono\',monospace;color:#cfcfcf">'+esc(r.tool)+'</span>'
+      +'<span style="font:400 10px \'JetBrains Mono\',monospace;color:'+(stCol[r.status]||V_DEAD)+'">'+esc(r.status)+'</span>'
+      +(r.latency!=null?'<span style="margin-left:auto;font:400 10px \'JetBrains Mono\',monospace;color:#5a5a5a">'+r.latency.toFixed(2)+'s</span>':'')
+    +'</div>'
+    +'<div style="font:400 10px \'JetBrains Mono\',monospace;color:#7d7d7d;overflow-wrap:anywhere">'+esc(r.args||'')+'</div>'
+    +(r.gate?'<div style="font:400 10px \'Instrument Sans\';color:'+V_NO+'">gate: '+esc(r.gate)+' — '+esc(r.reason||'')+'</div>':'')
+    +(r.request_id?'<div style="font:400 10px \'Instrument Sans\';color:'+V_WAIT+'">thread blocked on '+esc(r.request_id)+'</div>':'')
+    +(r.output?'<div style="font:400 10px \'JetBrains Mono\',monospace;color:#9a9a9a;overflow-wrap:anywhere">'+esc(_clip(r.output,160))+'</div>':'')
+    +(r.digest?'<div style="font:400 9px \'JetBrains Mono\',monospace;color:#4a4a4a">✓ '+esc(r.digest)+' matches the stream ref</div>':'')
+    +'</div>').join('')
+    :'<div style="color:#5a5a5a;font:400 11px \'Instrument Sans\'">No calls recorded.</div>';
+  const arts=(snap.artifacts||[]).filter(a=>a.worker===w.worker_id);
+  return '<aside style="width:360px;flex:none;border-left:1px solid #1a1a1a;overflow-y:auto;padding:16px 18px;background:#060606">'
+    +'<div style="display:flex;align-items:center;gap:8px">'
+      +'<div style="font:600 14px \'JetBrains Mono\',monospace;color:#ededed">'+esc(w.worker_id)+'</div>'
+      +'<div class="hv" data-action="flowCloseWorker" style="margin-left:auto;padding:4px 9px;border:1px solid #262626;border-radius:6px;font:500 11px \'Instrument Sans\';color:#b5b5b5;cursor:pointer">Close</div>'
+    +'</div>'
+    +head('ASSIGNMENT')
+    +'<div style="display:flex;flex-direction:column;gap:4px">'
+      +kv('hypothesis',w.hypothesis||'—')+kv('method',w.method||'—')+kv('model',w.model_id||'—')
+      +kv('tier',w.tier||'—')+kv('attempt',String(w.attempt||1))+kv('claim',w.claim_id||'—')
+    +'</div>'
+    +head('TERMINAL')+'<div style="display:flex;flex-direction:column;gap:6px">'+terminal+'</div>'
+    +head('INPUTS')
+    +'<div style="font:400 11px \'Instrument Sans\';color:#9a9a9a">knowledge_search · 6 hits above 0.70 · SearXNG on loopback<br>RAG retrieval · 4 chunks cited into the prompt</div>'
+    +head('OUTPUTS')
+    +(arts.length
+      ?'<div style="display:flex;flex-direction:column;gap:4px">'+arts.map(a=>'<div style="font:400 11px \'JetBrains Mono\',monospace;color:#cfcfcf">'+esc(a.artifact)+' <span style="color:#5a5a5a">→ '+esc(a.store)+'</span></div>').join('')+'</div>'
+      :'<div style="font:400 11px \'Instrument Sans\';color:'+V_WAIT+'">Nothing stored — this worker\u2019s output went nowhere.</div>')
+    +head('VERDICT')
+    +'<div style="font:400 11px \'Instrument Sans\';color:#cfcfcf">'+esc(w.outcome||(w.status==='running'?'still running':'—'))+'</div>'
+    +'<div style="display:flex;gap:8px;margin-top:16px">'
+      +'<div class="hv" style="flex:1;text-align:center;padding:7px;border:1px solid #2e2e2e;border-radius:7px;font:500 11.5px \'Instrument Sans\';color:#b5b5b5;cursor:pointer">Stop this worker</div>'
+      +'<div class="hv" data-action="toggleApprovals" style="flex:1;text-align:center;padding:7px;border:1px solid #2e2e2e;border-radius:7px;font:500 11.5px \'Instrument Sans\';color:#b5b5b5;cursor:pointer">Approvals</div>'
+    +'</div>'
+  +'</aside>';
 }
 
+/* The standalone Workers view is gone — these keep the old entry points working by sending the
+   operator to Flow, which now carries the worker rail. */
+function openWorkers(){return openFlow();}
+function startWorkersPoll(){startFlowPoll();}
+function stopWorkersPoll(){stopFlowPoll();}
+
+/* The page rendered inside YOUR tab. In the real build this is the live site in a webview; here
+   it is a static mock so the surface can be demoed without a network. */
+const MY_TAB_PAGE=`<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;font:14px/1.55 -apple-system,system-ui,sans-serif;color:#1b1b1b;background:#f6f6f4}
+header{background:#1d2b3a;color:#fff;padding:13px 22px;display:flex;align-items:center;gap:24px}
+header b{font-size:17px}header span{color:#c8d2dc;font-size:13px}
+main{padding:22px;max-width:780px}h1{font-size:20px;margin:0 0 14px}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e3e3e0;border-radius:8px;overflow:hidden}
+td,th{padding:10px 14px;text-align:left;border-bottom:1px solid #eee;font-size:13px}
+th{background:#fafafa;color:#666;font-weight:600}
+.b{display:inline-block;padding:2px 9px;border-radius:999px;background:#e7f4ec;color:#1b6b3a;font-size:12px}
+p{color:#666;font-size:13px}
+</style></head><body><header><b>ACME Shop</b><span>Products</span><span>Deals</span><span>Orders</span><span>Help</span></header>
+<main><h1>My orders</h1><table><tr><th>Order</th><th>Date</th><th>Total</th><th>Status</th></tr>
+<tr><td>#1012</td><td>2026-10-02</td><td>$59.90</td><td><span class="b">Delivered</span></td></tr>
+<tr><td>#1033</td><td>2026-10-09</td><td>$128.00</td><td><span class="b">Shipped</span></td></tr>
+<tr><td>#1041</td><td>2026-10-15</td><td>$24.50</td><td><span class="b">Processing</span></td></tr></table>
+<p>This tab is yours. The agent can take a read-only snapshot of it when you allow that — it can never click, type or navigate here.</p>
+</main></body></html>`;
+
+/* Browser view — a proper browser shell, not a single screencast pane.
+   Tabs come in two kinds:
+     · agent tabs — driven by the agent's own browser. Live screencast; the agent is in control.
+     · your tabs  — driven by you, rendered in a sandboxed frame. The agent's only access is a
+                    read-only snapshot, and only while "Agent access: read" is on. There is no
+                    write path to these tabs at all: the backend exposes nothing that can click,
+                    type or navigate in an operator tab (browser_read_tab is read-only by design).
+   The demo fakes the snapshot; the real build hands the tab's DOM text to the model as a tool
+   result and stamps the audit log. */
 function renderBrowser(){
-  return `<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">
-    <div style="display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid #1a1a1a;flex:none">
-      <div style="font:600 15px 'Instrument Sans'">Agent browser</div>
-      <div style="font:400 12px 'JetBrains Mono';color:#7d7d7d">live screen</div>
-      <div class="hv" data-action="closeBrowser" style="margin-left:auto;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
+  const tabs=S.browserTabs||[];
+  const cur=tabs.find(t=>t.id===S.browserTab)||tabs[0]||null;
+  const tabEl=t=>{
+    const on=t.id===S.browserTab,agent=t.owner==='agent';
+    return`<div data-action="selectBrowserTab" data-id="${esc(t.id)}" title="${esc(t.url)}" class="hv2" style="display:flex;align-items:center;gap:8px;width:230px;flex:none;padding:8px 10px;border-radius:9px 9px 0 0;cursor:pointer;background:${on?'#0c0c0c':'transparent'};border:1px solid ${on?'#242424':'transparent'};border-bottom:none;color:${on?'#ededed':'#8a8a8a'}">
+      <span style="width:7px;height:7px;border-radius:50%;flex:none;background:${agent?A:'#4a7ab8'}"></span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 12.5px 'Instrument Sans'">${esc(t.title)}</span>
+      <span style="flex:none;font:500 9.5px 'JetBrains Mono',monospace;letter-spacing:.05em;text-transform:uppercase;color:${agent?A70:'#7d9fc9'}">${agent?esc(t.worker||'agent'):'you'}</span>
+      <span class="hv-del" data-action="closeBrowserTab" data-id="${esc(t.id)}" style="flex:none;display:flex;padding:2px;border-radius:4px">${icons.closeSm}</span>
+    </div>`;
+  };
+  const navBtn=(glyph,title)=>`<div class="hv" style="padding:5px 9px;border-radius:7px;color:#6a6a6a;font:500 13px 'JetBrains Mono',monospace;cursor:default" title="${title}">${glyph}</div>`;
+  const agentCur=cur&&cur.owner==='agent';
+  const access=cur&&cur.owner==='me'
+    ?`<div style="display:flex;align-items:center;gap:8px;flex:none">
+        <span style="font:500 11px 'Instrument Sans';color:#7d7d7d">Agent access</span>
+        <div data-action="toggleTabShare" data-id="${esc(cur.id)}" class="hv2" style="display:flex;border:1px solid #262626;border-radius:7px;overflow:hidden;cursor:pointer;font:600 11px 'Instrument Sans'">
+          <span style="padding:5px 10px;background:${cur.share?'oklch(62% 0.21 25 / .16)':'transparent'};color:${cur.share?A75:'#7d7d7d'}">Read</span>
+          <span style="padding:5px 10px;background:${cur.share?'transparent':'#1c1c1c'};color:${cur.share?'#7d7d7d':'#ededed'}">Blocked</span>
+        </div>
+        ${cur.share?`<div class="hv" data-action="agentReadTab" data-id="${esc(cur.id)}" style="padding:5px 10px;border:1px solid #262626;border-radius:7px;font:500 11.5px 'Instrument Sans';color:#b5b5b5;cursor:pointer">Let the agent read it now</div>`:''}
+      </div>`
+    :`<div style="display:flex;align-items:center;gap:7px;flex:none;font:500 11px 'JetBrains Mono',monospace;color:${A70}"><span class="lai-pulse" style="width:7px;height:7px;border-radius:50%;background:${A}"></span>agent-controlled${cur&&cur.worker?(' · '+esc(cur.worker)):''}</div>`;
+
+  let body='';
+  if(S.browserErr){
+    body=`<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#e5484d;font:400 13px 'Instrument Sans'">${esc(S.browserErr)}</div>`;
+  }else if(!cur){
+    body=`<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#7d7d7d;font:400 13px 'Instrument Sans'">No tabs open.</div>`;
+  }else if(cur.owner==='agent'&&cur.screencast){
+    /* data-live: the screencast <img> is written by startBrowserPoll(), so the DOM patcher
+       must not touch it — that is also what stops the frame flickering on every render. */
+    body=`<div style="flex:1;min-height:0;overflow:auto;padding:16px;display:flex;align-items:flex-start;justify-content:center;background:#0a0a0a">
+      <img id="agentBrowserImg" data-live="1" style="max-width:100%;border:1px solid #1a1a1a;border-radius:6px;background:#fff;display:none" alt="agent browser"/>
+      <div id="agentBrowserWait" data-live="1" style="color:#7d7d7d;font:400 13px 'Instrument Sans';margin-top:60px">Waiting for the agent's browser to paint a frame…</div>
+    </div>`;
+  }else if(cur.owner==='agent'){
+    body=`<div style="flex:1;min-height:0;overflow:auto;padding:22px;background:#0a0a0a">
+      <div style="max-width:760px;margin:0 auto;border:1px solid #1a1a1a;border-radius:10px;background:#070707;overflow:hidden">
+        <div style="padding:9px 14px;border-bottom:1px solid #1a1a1a;font:500 11.5px 'JetBrains Mono',monospace;color:#8a8a8a">headless fetch · no screencast · ${esc(cur.worker||'')}</div>
+        <pre style="margin:0;padding:14px;font:400 12.5px/1.7 'JetBrains Mono',monospace;color:#b5b5b5;white-space:pre-wrap">GET ${esc(cur.url)}
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"id":1012,"customer":"J. Doe","address":"12 Mill Rd","total":59.90}</pre>
+      </div>
+    </div>`;
+  }else{
+    body=`<div style="flex:1;min-height:0;display:flex;flex-direction:column;background:#0a0a0a">
+      <iframe id="myTabFrame" title="${esc(cur.title)}" sandbox="allow-same-origin" srcdoc="${esc(MY_TAB_PAGE)}" style="flex:1;width:100%;border:none;background:#fff"></iframe>
+      <div style="flex:none;display:flex;align-items:center;gap:10px;padding:7px 14px;border-top:1px solid #1a1a1a;font:400 11.5px 'Instrument Sans';color:#7d7d7d">
+        <span style="width:6px;height:6px;border-radius:50%;background:${cur.share?'#4ec9a3':'#565656'}"></span>
+        ${cur.share?'The agent may read this tab (text snapshot). It cannot click, type or navigate here.':'The agent is blocked from this tab entirely.'}
+        ${S.browserReadAt?`<span style="margin-left:auto;font-family:'JetBrains Mono',monospace">last read ${esc(new Date(S.browserReadAt).toLocaleTimeString())}</span>`:''}
+      </div>
+    </div>`;
+  }
+
+  return`<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:flex-end;gap:2px;padding:10px 16px 0;border-bottom:1px solid #242424;flex:none;background:#050505">
+      <div style="display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;flex:1;min-width:0">${tabs.map(tabEl).join('')}</div>
+      <div class="hv" data-action="newBrowserTab" title="New tab of your own" style="flex:none;margin:0 6px 7px;padding:4px 9px;border-radius:7px;cursor:pointer;color:#8a8a8a;font:500 15px 'JetBrains Mono',monospace;line-height:1">+</div>
+      <div class="hv" data-action="closeBrowser" style="flex:none;margin:0 0 6px;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
     </div>
-    <div style="flex:1;overflow:auto;padding:18px 24px;display:flex;align-items:flex-start;justify-content:center">
-      ${S.browserErr
-        ?`<div style="color:#e5484d;font:400 13px 'Instrument Sans';margin-top:40px">${esc(S.browserErr)}</div>`
-        :`<img id="agentBrowserImg" style="max-width:100%;border:1px solid #1a1a1a;border-radius:8px;background:#fff;display:none" alt="agent browser"/>
-          <div id="agentBrowserWait" style="color:#7d7d7d;font:400 13px 'Instrument Sans';margin-top:40px">Waiting for the agent's browser to paint a frame…</div>`}
+    <div style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #1a1a1a;flex:none;background:#0c0c0c">
+      ${navBtn('‹','Back')}${navBtn('›','Forward')}${navBtn('⟳','Reload')}
+      <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid #242424;border-radius:999px;background:#060606">
+        <span style="font:500 10px 'JetBrains Mono',monospace;color:${agentCur?A70:'#4ec9a3'};flex:none">${agentCur?'AGENT':'HTTPS'}</span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12.5px 'JetBrains Mono',monospace;color:#b5b5b5">${esc(cur?cur.url:'')}</span>
+      </div>
+      ${access}
     </div>
+    ${body}
   </div>`;
 }
 
 function toast(text){clearTimeout(S.toastTimer);S.toast=text;render();S.toastTimer=setTimeout(()=>{S.toast=null;render();},4000);}
+// The toast sits ABOVE the composer in chat (it used to overlap the chat bar); elsewhere it can
+// hug the bottom of the window.
+function toastBottom(){return S.view==='chat'?'118px':'28px';}
 function copyText(text){try{navigator.clipboard.writeText(text)}catch(e){}toast('Copied');}
 
 /* TARGETED UPDATES */
@@ -770,37 +1193,79 @@ function updateElapsed(){const el=document.getElementById('run-elapsed');if(el)e
    collapsed activity group can show "Worked for Ns". */
 function stampDuration(sid){const t=S.threads[sid];if(!t)return;for(let k=t.length-1;k>=0;k--){if(t[k].role==='assistant'){t[k]._durSecs=S.elapsed;break;}}}
 
-/* RENDER */
-let _scrollPos=0;
+/* RENDER — surgical DOM patching
+   ---------------------------------------------------------------------------------------
+   This whole block exists to kill the flicker. Every state change used to run
+   `app.innerHTML = renderApp()`, which destroyed and rebuilt the entire screen: CSS entry
+   animations restarted, scroll positions and focus were lost, images reloaded — so the UI
+   visibly jumped on every tool call, every streamed token and every poll tick.
+   renderApp() still returns a plain HTML string. We now parse it into a DETACHED tree and
+   patch the live DOM node by node: identical nodes are kept and only changed attributes or
+   text are written. Parts of the screen that did not change are literally untouched, so
+   nothing re-animates and nothing jumps. Applies to every view at once.
+   Opt-out: put data-live on an element whose content is owned by imperative code (the
+   screencast <img>); the patcher leaves it and its subtree alone. */
 let _rafId=0;
-function render(bg){
-  if(bg){
-    const a=document.activeElement;
-    if(S.menu||S.ctxOpen||(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA')))return;
-  }
-  if(_rafId)return;
+const _scratch=document.createElement('div');
+function render(){
+  // A hidden tab never fires requestAnimationFrame, so paint straight away there — otherwise the
+  // first paint can be deferred indefinitely and the window comes back empty.
+  if(document.hidden){if(_rafId){cancelAnimationFrame(_rafId);_rafId=0;}_doRender();return;}
+  if(_rafId)return;                       // coalesce bursts of events into one frame
   _rafId=requestAnimationFrame(()=>{_rafId=0;_doRender();});
 }
-function _doRender(){
-  const a=document.activeElement;
-  let saved=null;
-  if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA')&&a.id){
-    saved={id:a.id,start:a.selectionStart,end:a.selectionEnd};
-  }
-  const el=document.getElementById('transcript');if(el)_scrollPos=el.scrollTop;
-  document.getElementById('app').innerHTML=renderApp();
-  if(saved){
-    const r=document.getElementById(saved.id);
-    if(r){r.focus();try{r.setSelectionRange(saved.start,saved.end)}catch(e){}}
-  }
-  afterRender(!!saved);
+function _sameNode(a,b){
+  if(a.nodeType!==b.nodeType)return false;
+  if(a.nodeType!==1)return true;                       // text/comment: patch value in place
+  if(a.nodeName!==b.nodeName)return false;
+  const ai=a.id||'',bi=b.id||'';
+  if(ai||bi)return ai===bi;                            // ids are the strongest identity we have
+  return (a.getAttribute('data-action')||'')===(b.getAttribute('data-action')||'');
 }
-function afterRender(skipFocus){
+function _patchNode(live,next){
+  if(live.nodeType!==1){if(live.nodeValue!==next.nodeValue)live.nodeValue=next.nodeValue;return;}
+  if(live.hasAttribute('data-live'))return;            // imperatively owned — hands off
+  const la=live.attributes;
+  for(let i=la.length-1;i>=0;i--){const nm=la[i].name;if(!next.hasAttribute(nm))live.removeAttribute(nm);}
+  const na=next.attributes;
+  for(let i=0;i<na.length;i++){const at=na[i];if(live.getAttribute(at.name)!==at.value)live.setAttribute(at.name,at.value);}
+  const tag=live.nodeName;
+  if(tag==='INPUT'){
+    if(document.activeElement!==live){                 // never fight the field you are typing in
+      if(live.type==='checkbox'||live.type==='radio')live.checked=next.hasAttribute('checked');
+      else{const v=next.getAttribute('value');if(v!=null&&live.value!==v)live.value=v;}
+    }
+    return;
+  }
+  if(tag==='TEXTAREA'){const v=next.textContent;if(document.activeElement!==live&&live.value!==v)live.value=v;return;}
+  if(tag==='CANVAS'||tag==='IFRAME')return;            // keep painted / loaded content
+  _patchChildren(live,next);
+  if(tag==='SELECT'){const o=next.querySelector('option[selected]');if(o&&live.value!==o.value)live.value=o.value;}
+}
+function _patchChildren(live,next){
+  const lc=live.childNodes,nc=next.childNodes;
+  for(let i=0;i<nc.length;i++){
+    const n=nc[i],l=lc[i];
+    if(!l){live.appendChild(n.cloneNode(true));continue;}
+    if(_sameNode(l,n))_patchNode(l,n);
+    else live.replaceChild(n.cloneNode(true),l);
+  }
+  while(live.childNodes.length>nc.length)live.removeChild(live.lastChild);
+}
+function _doRender(){
+  _scratch.innerHTML=renderApp();
+  _patchChildren(document.getElementById('app'),_scratch);
+  afterRender();
+}
+function afterRender(){
+  // Scroll position and focus now survive on their own (the nodes were never replaced); the only
+  // thing left to do is follow the tail of the transcript when the operator is already at the end.
   const el=document.getElementById('transcript');
-  if(el){if(S.atBottom)el.scrollTop=el.scrollHeight;else el.scrollTop=_scrollPos;}
-  if(!skipFocus){const inp=document.getElementById(S.view==='home'?'homeInput':'chatInput');
-  if(inp&&document.activeElement===document.body)inp.focus();}
+  if(el&&S.atBottom)el.scrollTop=el.scrollHeight;
+  const inp=document.getElementById(S.view==='home'?'homeInput':'chatInput');
+  if(inp&&document.activeElement===document.body)inp.focus();
   initHomeCanvas();
+  applyGraphTransform();
 }
 
 /* Home background: ASCII "wake". A sparse static ambient glyph scatter sits at rest;
@@ -895,7 +1360,6 @@ function renderApp(){
     (S.view==='home'?renderHome():'')+
     (S.view==='chat'?renderChat():'')+
     (S.view==='graph'?renderGraph():'')+
-    (S.view==='workers'?renderWorkers():'')+
     (S.view==='flow'?renderFlow():'')+
     (S.view==='browser'?renderBrowser():'')+
     '</main>'+
@@ -926,7 +1390,7 @@ function renderSidebar(){
   if(!filtered.length)sessionList='<div style="padding:20px 10px;font:400 12.5px \'Instrument Sans\';color:#8a8a8a;text-align:center">No sessions</div>';
   return`<aside style="width:264px;flex:none;display:flex;flex-direction:column;background:#050505;border-right:1px solid #1a1a1a;padding:16px 10px 10px">
     <div style="display:flex;align-items:center;gap:9px;padding:2px 8px 16px">
-      <img src="${LOGO}" alt="Oxpecker" style="height:22px;width:auto;display:block;flex:none">
+      <img src="${LOGO}" onerror="this.style.visibility='hidden'" alt="Oxpecker" style="height:22px;width:auto;display:block;flex:none">
       <div style="font:500 14px 'JetBrains Mono',monospace;color:${A}">Oxpecker</div>
       <div class="hv" data-action="toggleSidebar" style="margin-left:auto;padding:5px;border-radius:6px;cursor:pointer;color:#8a8a8a;display:flex">${icons.sidebar}</div>
     </div>
@@ -1112,10 +1576,8 @@ function renderChat(){
       <div style="display:flex;align-items:center;gap:2px;flex:none">
         ${(window.oxpecker&&window.oxpecker.checkForUpdates)?`<div class="hv hv-color" data-action="checkUpdate" title="Check for a newer version of the desktop app" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">⟳ ${S.updateMsg||'Updates'}</div>`:''}
         <div class="hv hv-color" data-action="openGraph" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.graph}Hypothesis Tree</div>
-        <div class="hv hv-color" data-action="openWorkers" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.workers}Workers</div>
-        <div class="hv hv-color" data-action="openFlow" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.flow}Flow</div>
+        <div class="hv hv-color" data-action="openFlow" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.flow}Flow &amp; workers</div>
         <div class="hv hv-color" data-action="openBrowser" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:#9a9a9a">${icons.monitor}Browser</div>
-        <div class="hv hv-color" data-action="toggleSteer" style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:7px;cursor:pointer;font:500 12.5px 'Instrument Sans';color:${S.steerOpen?A70:'#9a9a9a'}">${icons.steer}Steer</div>
         <div class="hv hv-color" data-action="copySessionId" style="display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:7px;cursor:pointer;font:500 12px 'Instrument Sans';color:#9a9a9a">${icons.copy}${S.idCopied?'Copied':''}</div>
       </div>
     </div>
@@ -1132,7 +1594,6 @@ function renderChat(){
         </div>
         <div style="padding:6px 24px 20px;flex:none;position:relative">
           ${!S.atBottom?`<div data-action="scrollBottom" style="position:absolute;left:50%;transform:translateX(-50%);bottom:calc(100% + 2px);display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;background:#0a0a0a;border:1px solid #2e2e2e;font:500 12px 'Instrument Sans';color:#ddd;cursor:pointer;z-index:5" class="hv">${icons.jumpDown}Jump to latest</div>`:''}
-          ${S.steerOpen?renderSteerBar():''}
           ${renderChatInput()}
         </div>
       </div>
@@ -1162,33 +1623,49 @@ function renderRunBar(){
   </div>`;
 }
 
-function renderSteerBar(){
-  return`<div style="max-width:1040px;margin:0 auto 8px;display:flex;gap:8px;align-items:center;border:1px solid oklch(62% 0.21 25 / .5);border-radius:10px;padding:6px 8px 6px 12px;background:#0a0a0a" class="lai-in">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="${A70}" stroke-width="2"><path d="M3 11l19-9-9 19-2-8-8-2z"></path></svg>
-    <input id="steerInput" value="${esc(S.steerText)}" placeholder="Redirect the running task without stopping it…" style="flex:1;background:transparent;border:none;outline:none;color:#ededed;font:400 13px 'Instrument Sans'">
-    <button data-action="sendSteer" style="padding:5px 12px;border:none;border-radius:6px;background:${A};color:#000;font:600 12px 'Instrument Sans';cursor:pointer">Send</button>
-  </div>`;
-}
-
 function renderChatInput(){
   return`<div data-spot-container="1" style="position:relative;max-width:1040px;margin:0 auto;background:#0a0a0a;border:1px solid #262626;border-radius:14px;padding:10px 12px 10px 16px;display:flex;align-items:flex-end;gap:10px">
     <div data-spot="1" style="position:absolute;inset:0;pointer-events:none;opacity:0;transition:opacity .2s;border-radius:14px"></div>
-    <textarea id="chatInput" rows="1" placeholder="${S.running?'Running… click ■ to stop':'Continue this task…  (Enter to send, Shift+Enter for a new line)'}" style="position:relative;flex:1;min-height:36px;max-height:160px;background:transparent;border:none;outline:none;resize:none;color:#ededed;font:400 16px/1.5 'Instrument Sans';padding:6px 0">${esc(S.input)}</textarea>
+    <textarea id="chatInput" rows="1" placeholder="${S.running?'Steer the running task — type and send, it keeps going':'Continue this task…  (Enter to send, Shift+Enter for a new line)'}" style="position:relative;flex:1;min-height:36px;max-height:160px;background:transparent;border:none;outline:none;resize:none;color:#ededed;font:400 16px/1.5 'Instrument Sans';padding:6px 0">${esc(S.input)}</textarea>
     ${renderCtxButton()}
     ${S.running
-      ?`<button data-action="stopRun" title="Stop" style="position:relative;width:32px;height:32px;border:none;border-radius:8px;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none"><span style="width:15px;height:15px;background:${A};border-radius:3px;display:block"></span></button>`
+      /* While running: a stop button AND a send button — sending mid-run steers the task. */
+      ?`<button data-action="stopRun" title="Stop the run" style="position:relative;width:32px;height:32px;border:none;border-radius:8px;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none"><span style="width:15px;height:15px;background:${A};border-radius:3px;display:block"></span></button>
+         <button id="sendBtn" data-action="send" title="Send as a steer — the run keeps going" style="position:relative;width:32px;height:32px;border-radius:50%;border:none;background:${A};cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;opacity:${S.input.trim()?1:.4}">${icons.send}</button>`
       :`<button id="sendBtn" data-action="send" style="position:relative;width:32px;height:32px;border-radius:50%;border:none;background:${A};cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;opacity:${S.input.trim()?1:.4}">${icons.send}</button>`
     }
+  </div>`;
+}
+
+/* One shared look for pipeline narration rows (phase_entered, wave_started, worker_spawned,
+   worker_report, finding_recorded, browser_read_tab, …) so a line looks identical whether it
+   lands on its own in the transcript or inside an agent activity group. */
+function renderActivityRow(type,text,inGroup){
+  const kind=String(type||'event');
+  const col=/finding/.test(kind)?A70:(/worker/.test(kind)?'#8ab4ff':(/phase|wave/.test(kind)?'#ededed':'#9a9a9a'));
+  const body=String(text||'').replace(/^\[[a-z_]+\]\s*/,'');
+  return`<div class="lai-in" style="display:flex;gap:10px;align-items:baseline;${inGroup?'padding:3px 0':'margin-left:40px'}">
+    <span style="flex:none;font:500 10.5px 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:${col};border:1px solid #1f1f1f;border-radius:5px;padding:2px 7px">${esc(kind.replace(/_/g,' '))}</span>
+    <span style="font:400 13.5px/1.6 'Instrument Sans';color:#9a9a9a">${esc(body)}</span>
   </div>`;
 }
 
 /* Messages */
 function renderMessage(m,idx,thread){
   if(m.role==='user'){
-    return`<div class="lai-in"><div style="display:flex;justify-content:flex-end"><div style="max-width:78%;background:oklch(62% 0.21 25 / .12);border:1px solid oklch(62% 0.21 25 / .3);border-radius:14px 14px 4px 14px;padding:12px 18px;font:400 16px/1.6 'Instrument Sans';white-space:pre-wrap">${esc(m.content)}</div></div></div>`;
+    // A message sent while the run was live is a steer, not a new turn — labelled as such.
+    return`<div class="lai-in"><div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+      ${m._steer?`<div style="display:flex;align-items:center;gap:5px;font:500 11px 'JetBrains Mono',monospace;color:${A70}">${icons.steer}steering the run</div>`:''}
+      <div style="max-width:78%;background:oklch(62% 0.21 25 / .12);border:1px solid oklch(62% 0.21 25 / .3);border-radius:14px 14px 4px 14px;padding:12px 18px;font:400 16px/1.6 'Instrument Sans';white-space:pre-wrap">${esc(m.content)}</div>
+    </div></div>`;
   }
   if(m.role==='system'){
     if(m.content&&(m.content.startsWith('⏳ Awaiting approval')||m.content.startsWith('Steer:')))return'';
+    // Autonomous-run events (phase_entered, wave_started, worker_spawned, worker_report,
+    // finding_recorded, …) carry the raw event in _raw. They are the pipeline narrating itself,
+    // so render them as a left-aligned activity row with a type chip — not grey centred text.
+    const raw=m._raw;
+    if(raw&&raw.type)return renderActivityRow(raw.type,m.content,false);
     return`<div class="lai-in" style="text-align:center;font:400 14px 'Instrument Sans';color:#8a8a8a">${esc(m.content)}</div>`;
   }
   if(m.role==='assistant'){
@@ -1205,7 +1682,7 @@ function renderMessage(m,idx,thread){
     return`<div class="lai-in">
       <div style="display:flex;gap:14px">
         <div style="flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center;margin-top:1px;visibility:${prevIsAsst?'hidden':'visible'}">
-          <img src="${LOGO}" alt="" style="width:26px;height:auto;display:block">
+          <img src="${LOGO}" onerror="this.style.visibility='hidden'" alt="" style="width:26px;height:auto;display:block">
         </div>
         <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:14px">
           ${hasChain?`<div data-action="toggleChain" data-key="${chainKey}" style="align-self:flex-start;display:flex;align-items:center;gap:9px;cursor:pointer;color:#9a9a9a;white-space:nowrap;font:400 15px 'Instrument Sans'" class="hv-color">
@@ -1357,16 +1834,24 @@ function renderThread(thread){
   }
   return parts.join('');
 }
+/* An agent turn is a SEQUENCE, not a summary. The old version kept one finalText slot and only
+   revealed it after the run stopped, which was fine for a single question-and-answer turn and
+   wrong for an autonomous run: that is one uninterrupted agent group where the strategist speaks
+   a dozen times, so every message overwrote the last and none of them showed until the end.
+   Now the group is cut into ordered segments — a chain of tool/reasoning steps, a block of prose,
+   an activity row — rendered in the order they actually happened, and committed prose renders
+   immediately. Only the in-flight stream still waits on S.streamingText. */
 function renderAgentGroup(thread,start,end,isLast){
   const running=isLast&&S.running;
-  const stepList=[];let finalText='',durSecs=null,sysLines='';
+  const segs=[];let durSecs=null;
+  const chain=()=>{const l=segs[segs.length-1];if(l&&l.kind==='chain')return l;const c={kind:'chain',steps:[]};segs.push(c);return c;};
   for(let k=start;k<end;k++){
     const m=thread[k];
     if(m.role==='assistant'){
       const text=m.content||'',reasoning=m.reasoning_content||'';
       const toolCalls=m.extra?.tool_calls||m.tool_calls||[];
       const isPlaceholder=text.startsWith('(calling tools');
-      if(reasoning)stepList.push({kind:'reasoning',reasoning});
+      if(reasoning)chain().steps.push({kind:'reasoning',reasoning});
       toolCalls.forEach((tc,ti)=>{
         let result=null;
         for(let j=k+1;j<end&&j<=k+toolCalls.length;j++){
@@ -1376,87 +1861,94 @@ function renderAgentGroup(thread,start,end,isLast){
             if(tn===tcn||j===k+1+ti){result=thread[j].content;break;}
           }
         }
-        stepList.push({kind:'tool',tc,result});
+        chain().steps.push({kind:'tool',tc,result});
       });
-      if(text&&!isPlaceholder)finalText=text;
+      if(text&&!isPlaceholder)segs.push({kind:'prose',text});
       if(m._durSecs!=null)durSecs=m._durSecs;
+    } else if(m.role==='tool'){
+      // A worker's call is a tool result that no assistant tool_call points at — the worker made
+      // it, not the strategist. Those used to be dropped on the floor, taking every worker's
+      // input and output with them; they now render as their own step.
+      const owned=thread.slice(start,k).some(p=>(p.role==='assistant')&&((p.extra?.tool_calls||p.tool_calls||[]).some(tc=>{
+        const n=tc.function?.name||tc.name||'';return n===(m.extra?.tool_name||m.tool_name||'');})));
+      if(!owned)chain().steps.push({kind:'tool',tc:{function:{name:(m.extra?.tool_name||m.tool_name||'tool'),arguments:'{}'}},result:m.content});
     } else if(m.role==='system'){
       const c=m.content||'';
-      // Autonomous pipeline events (phase_entered, phase_advanced, …) are pushed as system lines
-      // tagged '[<type>]' and carry _raw; they MUST render — they are the whole visible output of
-      // an autonomous run. Only the internal bracketed markers (e.g. '[OPERATOR STEER]'), which
-      // have no _raw, stay suppressed.
       if(!m._raw&&(c.startsWith('⏳ Awaiting approval')||c.startsWith('Steer:')||c.startsWith('[')))continue;
-      sysLines+=`<div style="font:400 13px 'Instrument Sans';color:#8a8a8a;padding:2px 0">${esc(c)}</div>`;
+      segs.push({kind:'sys',html:m._raw&&m._raw.type
+        ?renderActivityRow(m._raw.type,c,true)
+        :'<div style="font:400 13px \'Instrument Sans\';color:#8a8a8a;padding:2px 0">'+esc(c)+'</div>'});
     }
   }
   const key='turn_'+start;
-  // Per-step: a tool still awaiting its result is "active" (open + spinner); everything
-  // finished collapses to its header. Reasoning collapses to "Thought" once committed.
-  let steps='';const hasSteps=stepList.length>0;
-  stepList.forEach((st,i)=>{
-    const sk=key+':'+i;
-    if(st.kind==='reasoning'){
-      const sopen=S.stepOpen[sk]===true;
-      steps+=renderReasoningStep(st.reasoning,{key:sk,open:sopen,active:false});
-    } else {
-      const active=running&&(st.result==null);
-      const sopen=active?true:(S.stepOpen[sk]===true);
-      steps+=renderToolCallStep(st.tc,st.result,{key:sk,open:sopen,active});
-    }
+  let out='',si=0,chainN=0,anySteps=false,lastProse='';
+  segs.forEach(sg=>{
+    if(sg.kind==='chain'){
+      if(!sg.steps.length)return;
+      anySteps=true;
+      const ck=key+':c'+(chainN++);
+      // the last chain of a live run is the one still working; earlier ones have settled
+      const isLive=running&&sg===segs.filter(x=>x.kind==='chain').slice(-1)[0];
+      let steps='';
+      sg.steps.forEach(st=>{
+        const sk=key+':'+(si++);
+        if(st.kind==='reasoning')steps+=renderReasoningStep(st.reasoning,{key:sk,open:S.stepOpen[sk]===true,active:false});
+        else{
+          const active=isLive&&(st.result==null);
+          // A worker's own call ('w1 · run_command') stays expanded: its command and its output
+          // are the thing the operator is watching. The strategist's own calls stay collapsed.
+          const nm=st.tc.function?.name||st.tc.name||'';
+          const isWorker=nm.indexOf(' · ')>-1;
+          const dflt=active||isWorker;
+          steps+=renderToolCallStep(st.tc,st.result,{key:sk,open:S.stepOpen[sk]===undefined?dflt:(S.stepOpen[sk]===true),active});
+        }
+      });
+      const open=S.chainOpen[ck]===undefined?(running||isLive):(S.chainOpen[ck]===true);
+      const headerInner=isLive
+        ?'<span class="lai-px"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="lai-shimmer" style="font-weight:500">Working…</span>'
+        :'<span>Worked'+(durSecs!=null?' for <span style="font:400 13.5px \'JetBrains Mono\',monospace">'+durSecs+'</span>s':'')+'</span>';
+      out+='<div data-action="toggleChain" data-key="'+ck+'" style="align-self:flex-start;display:flex;align-items:center;gap:9px;cursor:pointer;color:#9a9a9a;white-space:nowrap;font:400 15px \'Instrument Sans\'" class="hv-color">'
+        +headerInner
+        +'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.6;transform:'+(open?'rotate(0)':'rotate(-90deg)')+';transition:transform .25s"><path d="M6 9l6 6 6-6"></path></svg></div>';
+      if(open)out+='<div style="display:flex;flex-direction:column;gap:2px;margin-left:7px;padding-left:14px;border-left:1px solid #1f1f1f">'+steps+'</div>';
+    } else if(sg.kind==='prose'){
+      lastProse=sg.text;
+      out+='<div style="font:400 16.5px/1.75 \'Instrument Sans\';color:#d4d4d4;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:10px">'+md(sg.text)+'</div>';
+    } else out+=sg.html;
   });
-  const toolN=stepList.filter(s=>s.kind==='tool').length;
-  const open=running?true:(S.chainOpen[key]===true);
   let liveTail='';
   if(running){
     if(S.ragConsulted&&S.ragConsulted.count){
-      const srcs=(S.ragConsulted.sources||[]).slice(0,4).map(s=>esc(s.title||s.source||'ref')).join(' · ');
-      liveTail+=`<div title="${esc(srcs)}" style="display:inline-flex;align-items:center;gap:7px;align-self:flex-start;padding:4px 10px;border:1px solid #1f1f1f;border-radius:999px;font:500 12px 'Instrument Sans';color:#8a8a8a">📚 <span>Knowledge base · ${S.ragConsulted.count} refs</span><span style="color:#5a5a5a;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${srcs}</span></div>`;
+      const srcs=(S.ragConsulted.sources||[]).slice(0,4).map(x=>esc(x.title||x.source||'ref')).join(' · ');
+      liveTail+='<div title="'+esc(srcs)+'" style="display:inline-flex;align-items:center;gap:7px;align-self:flex-start;padding:4px 10px;border:1px solid #1f1f1f;border-radius:999px;font:500 12px \'Instrument Sans\';color:#8a8a8a">📚 <span>Knowledge base · '+S.ragConsulted.count+' refs</span><span style="color:#5a5a5a;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+srcs+'</span></div>';
     }
     if(S.streamingReasoning&&!S.streamingText){
-      liveTail+=`<div style="display:flex;flex-direction:column">
-        <div style="display:flex;align-items:center;gap:10px;min-height:34px;padding:0 8px"><span style="flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center">${icons.think}</span><span class="lai-shimmer" style="font:500 15px 'Instrument Sans'">Thinking…</span></div>
-        <div style="margin:2px 0 10px 16px;padding-left:14px;border-left:1px solid #1f1f1f"><div id="streaming-reasoning" style="font:400 14.5px/1.65 'Instrument Sans';color:#9a9a9a;white-space:pre-wrap;overflow-wrap:anywhere">${esc(S.streamingReasoning)}</div></div></div>`;
+      liveTail+='<div style="display:flex;flex-direction:column">'
+        +'<div style="display:flex;align-items:center;gap:10px;min-height:34px;padding:0 8px"><span style="flex:none;width:16px;height:16px;display:flex;align-items:center;justify-content:center">'+icons.think+'</span><span class="lai-shimmer" style="font:500 15px \'Instrument Sans\'">Thinking…</span></div>'
+        +'<div style="margin:2px 0 10px 16px;padding-left:14px;border-left:1px solid #1f1f1f"><div id="streaming-reasoning" style="font:400 14.5px/1.65 \'Instrument Sans\';color:#9a9a9a;white-space:pre-wrap;overflow-wrap:anywhere">'+esc(S.streamingReasoning)+'</div></div></div>';
     }
     if(S.streamingText){
-      liveTail+=`<div id="streaming-content" style="font:400 16.5px/1.75 'Instrument Sans';color:#d4d4d4;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:10px">${md(S.streamingText)}<span class="lai-caret"></span></div>`;
+      liveTail+='<div id="streaming-content" style="font:400 16.5px/1.75 \'Instrument Sans\';color:#d4d4d4;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:10px">'+md(S.streamingText)+'<span class="lai-caret"></span></div>';
     }
   }
-  const headerInner=running
-    ?`<span class="lai-px"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="lai-shimmer" style="font-weight:500">Working…</span>`
-    :`<span>Worked${durSecs!=null?` for <span style="font:400 13.5px 'JetBrains Mono',monospace">${durSecs}</span>s`:''}</span>`;
-  const header=hasSteps?`<div data-action="toggleChain" data-key="${key}" style="align-self:flex-start;display:flex;align-items:center;gap:9px;cursor:pointer;color:#9a9a9a;white-space:nowrap;font:400 15px 'Instrument Sans'" class="hv-color">
-      ${headerInner}
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.6;transform:${open?'rotate(0)':'rotate(-90deg)'};transition:transform .25s"><path d="M6 9l6 6 6-6"></path></svg>
-    </div>`:'';
-  const body=(open&&hasSteps)?`<div style="display:flex;flex-direction:column;gap:2px;margin-left:7px;padding-left:14px;border-left:1px solid #1f1f1f">${steps}</div>`:'';
-  const answer=(finalText&&!running)?`<div style="font:400 16.5px/1.75 'Instrument Sans';color:#d4d4d4;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:10px">${md(finalText)}</div>
-    <div style="display:flex;gap:2px;margin-top:-4px">
-      <div class="hv2" data-action="copyMsg" data-text="${esc(finalText)}" style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:6px;cursor:pointer;font:500 11.5px 'Instrument Sans';color:#8a8a8a">${icons.copySm}Copy</div>
-      <div class="hv2" data-action="regenMsg" style="display:flex;align-items:center;padding:5px 8px;border-radius:6px;cursor:pointer;color:#8a8a8a">${icons.regen}</div>
-    </div>`:'';
-  if(!hasSteps&&!finalText&&!sysLines&&!liveTail)return'';
-  return`<div class="lai-in">
-    <div style="display:flex;gap:14px">
-      <div style="flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center;margin-top:1px">
-        <img src="${LOGO}" alt="" style="width:26px;height:auto;display:block">
-      </div>
-      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:14px">
-        ${header}
-        ${body}
-        ${liveTail}
-        ${answer}
-        ${sysLines}
-      </div>
-    </div>
-  </div>`;
+  const actions=(!running&&lastProse)?'<div style="display:flex;gap:2px;margin-top:-4px">'
+      +'<div class="hv2" data-action="copyMsg" data-text="'+esc(lastProse)+'" style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:6px;cursor:pointer;font:500 11.5px \'Instrument Sans\';color:#8a8a8a">'+icons.copySm+'Copy</div>'
+      +'<div class="hv2" data-action="regenMsg" style="display:flex;align-items:center;padding:5px 8px;border-radius:6px;cursor:pointer;color:#8a8a8a">'+icons.regen+'</div></div>':'';
+  if(!out&&!liveTail)return'';
+  return'<div class="lai-in">'
+    +'<div style="display:flex;gap:14px">'
+      +'<div style="flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center;margin-top:1px">'
+        +'<img src="'+LOGO+'" onerror="this.style.visibility=\'hidden\'" alt="" style="width:26px;height:auto;display:block">'
+      +'</div>'
+      +'<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:14px">'+out+liveTail+actions+'</div>'
+    +'</div></div>';
 }
 
 function renderStreamingMessage(){
   return`<div class="lai-in">
     <div style="display:flex;gap:14px">
       <div style="flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center;margin-top:1px">
-        <img src="${LOGO}" alt="" style="width:26px;height:auto;display:block">
+        <img src="${LOGO}" onerror="this.style.visibility='hidden'" alt="" style="width:26px;height:auto;display:block">
       </div>
       <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:14px">
         <div style="align-self:flex-start;display:flex;align-items:center;gap:9px;color:#9a9a9a;white-space:nowrap;font:400 15px 'Instrument Sans'">
@@ -1477,7 +1969,7 @@ function renderWorkingIndicator(){
   return`<div class="lai-in">
     <div style="display:flex;gap:14px">
       <div style="flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center;margin-top:1px">
-        <img src="${LOGO}" alt="" style="width:26px;height:auto;display:block">
+        <img src="${LOGO}" onerror="this.style.visibility='hidden'" alt="" style="width:26px;height:auto;display:block">
       </div>
       <div style="flex:1;min-width:0">
         <div style="align-self:flex-start;display:flex;align-items:center;gap:9px;color:#9a9a9a;font:400 15px 'Instrument Sans'">
@@ -1523,7 +2015,7 @@ function renderGraph(){
         ${S.graphTab==='tree'?`<select id="gviewSel" style="background:#0a0a0a;border:1px solid #262626;color:#b5b5b5;border-radius:7px;padding:6px 8px;font:500 12.5px 'Instrument Sans';outline:none"><option value="causal">View: Causal</option><option value="timeline">View: Timeline</option><option value="focus">View: Focus</option></select>`:''}
         ${S.graphTab==='tree'?`<div style="display:flex;align-items:center;border:1px solid #262626;border-radius:7px;overflow:hidden">
           <div class="hv" data-action="zoomOut" style="padding:6px 10px;cursor:pointer;color:#b5b5b5;font:600 14px 'JetBrains Mono',monospace">−</div>
-          <div class="hv" data-action="zoomReset" style="padding:6px 8px;cursor:pointer;color:#8a8a8a;font:500 11px 'JetBrains Mono',monospace;border-left:1px solid #262626;border-right:1px solid #262626" title="Reset zoom">${Math.round(S.graphZoom*100)}%</div>
+          <div class="hv" data-action="zoomReset" style="padding:6px 8px;cursor:pointer;color:#8a8a8a;font:500 11px 'JetBrains Mono',monospace;border-left:1px solid #262626;border-right:1px solid #262626" title="Fit &amp; centre"><span id="gZoomPct">${Math.round(S.graphZoom*100)}%</span></div>
           <div class="hv" data-action="zoomIn" style="padding:6px 10px;cursor:pointer;color:#b5b5b5;font:600 14px 'JetBrains Mono',monospace">+</div>
         </div>`:''}
         ${S.graphTab==='tree'?`<div class="hv" data-action="toggleStats" style="padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Stats</div>`:''}
@@ -1579,10 +2071,52 @@ function nodeVisual(n){
     if(verdict==='refuted'){border='2px solid '+A70;fg=A70;bg='oklch(62% 0.21 25 / .12)';glyph='✕';gc=A70;}}
   if(status==='parked'){border='2px dashed #444';op=.5;}
   if(status==='abandoned'){op=.35;glyph='⊗';}
-  if(status==='running'){border='2px dashed '+A70;cls='lai-pulse';}
+  if(status==='running'){border='2px dashed '+A70;cls='gnode-live';}
   if(status==='awaiting_approval'){border='3px solid '+A70;glyph='!';gc=A70;}
   return{bg,border,fg,glyph,gc,op,cls,dot:verdict==='refuted'?A70:(verdict==='confirmed'||verdict==='supported'?'#ededed':(status==='running'?A70:'#555'))};
 }
+
+/* Graph canvas camera — transform-based pan/zoom.
+   The canvas used to be a scroll container: the tree jammed against the edges, the work sat in
+   the top-left corner and the dot grid existed only behind the nodes. Now the viewport is fixed,
+   the world is translated + scaled on the GPU (so it can be dragged anywhere, past the edges),
+   the dot grid lives on the VIEWPORT and is offset with the camera so it covers the whole screen,
+   and a freshly opened graph is fitted and centred. */
+const G_MIN=0.25,G_MAX=2.6,G_DOT=22;
+function applyGraphTransform(){
+  const gc=document.getElementById('graphCanvas'),w=document.getElementById('graphWorld');
+  if(!gc||!w)return;
+  const r=gc.getBoundingClientRect();
+  if(S.gNeedsCenter&&r.width){
+    S.gNeedsCenter=false;
+    const W=+gc.dataset.w||w.offsetWidth,H=+gc.dataset.h||w.offsetHeight;
+    const fit=Math.min((r.width-90)/W,(r.height-90)/H);
+    // Never fit so far out that the nodes are unreadable: below ~55% we keep a legible zoom and
+    // centre on the branch that is live (or the root) instead of cramming the whole tree in.
+    const z=Math.round(Math.max(0.55,Math.min(1,fit))*100)/100;
+    S.graphZoom=z;
+    const fx=parseFloat(gc.dataset.fx),fy=parseFloat(gc.dataset.fy);
+    if(fit<0.55&&!isNaN(fx))S.gPan={x:r.width/2-fx*z,y:r.height/2-fy*z};
+    else S.gPan={x:(r.width-W*z)/2,y:(r.height-H*z)/2};
+  }
+  w.style.transform='translate3d('+S.gPan.x+'px,'+S.gPan.y+'px,0) scale('+S.graphZoom+')';
+  const d=G_DOT*S.graphZoom;
+  gc.style.backgroundSize=d+'px '+d+'px';
+  gc.style.backgroundPosition=(S.gPan.x%d)+'px '+(S.gPan.y%d)+'px';
+  const lbl=document.getElementById('gZoomPct');if(lbl)lbl.textContent=Math.round(S.graphZoom*100)+'%';
+}
+// Zoom around a point (cursor, or the viewport centre for the toolbar buttons) so the thing you
+// are looking at stays under the pointer. Applied straight to the DOM — no re-render, no jump.
+function graphZoomAt(factor,cx,cy){
+  const gc=document.getElementById('graphCanvas');if(!gc)return;
+  const r=gc.getBoundingClientRect();
+  if(cx==null){cx=r.width/2;cy=r.height/2;}
+  const z0=S.graphZoom,z1=Math.max(G_MIN,Math.min(G_MAX,z0*factor));
+  if(z1===z0)return;
+  S.gPan={x:cx-(cx-S.gPan.x)*(z1/z0),y:cy-(cy-S.gPan.y)*(z1/z0)};
+  S.graphZoom=z1;applyGraphTransform();
+}
+function graphFit(){S.gNeedsCenter=true;applyGraphTransform();}
 
 function renderGraphTree(nodes,edges){
   if(!nodes.length){
@@ -1633,14 +2167,15 @@ function renderGraphTree(nodes,edges){
   const gens=[...new Set(vis.map(depth))].sort((a,b)=>a-b);
   const genEls=gens.map(d=>`<div style="position:absolute;top:14px;left:${40+d*COL+54}px;transform:translateX(-50%);font:600 11px 'JetBrains Mono',monospace;color:#8a8a8a;text-transform:uppercase;letter-spacing:.08em">Gen ${d}</div>`).join('');
 
-  /* edges — active-path links are red + thicker, exactly like the design */
+  /* edges — the branch a worker is actually on flows and glows, the rest stay quiet */
+  const liveRun=!!run;
   const edgePaths=vis.map(n=>{
     const pid=parentOf(n);if(pid==null||!pos[pid])return'';
     const a=pos[pid],b=pos[idOf(n)];
     const on=act.has(idOf(n))&&act.has(pid);
     const dim=anyFilter&&!(match(n)&&match(by[pid]));
     const x1=a.x+79,y1=a.y+25,x2=b.x+29,y2=b.y+25,mx=(x1+x2)/2;
-    return`<path d="M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}" fill="none" stroke="${on?A70:(dim?'#161616':'#2a2a2a')}" stroke-width="${on?2.5:1.5}"/>`;
+    return`<path class="${on&&liveRun?'gedge-live':''}" d="M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}" fill="none" stroke="${on?A70:(dim?'#161616':'#2a2a2a')}" stroke-width="${on?2.5:1.5}"/>`;
   }).join('');
 
   const nodeEls=vis.map(n=>{
@@ -1670,18 +2205,17 @@ function renderGraphTree(nodes,edges){
   const mmDots=vis.map(n=>{const p=pos[idOf(n)];if(!p)return'';const v=nodeVisual(n);return`<span style="position:absolute;left:${Math.round((p.x+27)/W*mmW)}px;top:${Math.round((p.y+25)/H*mmH)}px;width:4px;height:4px;border-radius:50%;background:${v.dot};opacity:${anyFilter&&!match(n)?.2:1}"></span>`;}).join('');
 
   const activePath=[...act].map(i=>'H'+i).join(' → ')||'—';
+  // Where to look when the tree is too big to fit: the live branch, else the first node.
+  const focusNode=(run&&pos[idOf(run)])||pos[idOf(vis[0])]||{x:0,y:0};
 
   return graphFilterBar()+`
   <div style="padding:8px 20px;font:400 12.5px 'Instrument Sans';color:#7d7d7d;border-bottom:1px solid #1a1a1a;flex:none">Active path: <span style="color:${A70};font-family:'JetBrains Mono',monospace;font-weight:500">${esc(activePath)}</span></div>
   <div style="flex:1;display:flex;min-height:0;position:relative">
     <div style="position:absolute;left:0;right:${S.nodeDetail?'380':'0'}px;bottom:12px;height:0;overflow:visible;z-index:15;pointer-events:none">
-      <div style="position:absolute;left:12px;bottom:0;display:flex;flex-direction:column;align-items:flex-start;gap:6px;pointer-events:auto">
-        <div style="background:rgba(6,6,6,.94);border:1px solid #1f1f1f;border-radius:10px;padding:8px 12px;display:flex;gap:14px;font:400 11.5px 'Instrument Sans';color:#9a9a9a;white-space:nowrap;overflow-x:auto;scrollbar-width:none"><span>◯ open</span><span style="color:${A70}">◌ running</span><span>◌ parked</span><span style="color:#ededed">● confirmed / supported</span><span style="color:${A70}">● refuted</span><span>⊗ abandoned</span></div>
-      </div>
       <div style="position:absolute;right:12px;bottom:0;pointer-events:auto"><div style="position:relative;width:${mmW}px;height:${mmH}px;background:rgba(6,6,6,.94);border:1px solid #2e2e2e;border-radius:6px">${mmDots}</div></div>
     </div>
-    <div style="flex:1;overflow:auto;position:relative;cursor:grab;min-width:0" id="graphCanvas">
-      <div style="position:relative;width:${W}px;height:${H}px;transform:scale(${S.graphZoom});transform-origin:0 0;background:radial-gradient(circle at 1px 1px,#1c1c1c 1px,transparent 0) 0 0/22px 22px,#000">
+    <div id="graphCanvas" data-w="${W}" data-h="${H}" data-fx="${focusNode.x+54}" data-fy="${focusNode.y+25}" style="flex:1;overflow:hidden;position:relative;cursor:grab;min-width:0;background-color:#000;background-image:radial-gradient(circle at 1px 1px,#1c1c1c 1px,transparent 0)">
+      <div id="graphWorld" style="position:absolute;left:0;top:0;width:${W}px;height:${H}px;transform:translate3d(${S.gPan.x}px,${S.gPan.y}px,0) scale(${S.graphZoom});transform-origin:0 0">
         <svg width="${W}" height="${H}" style="position:absolute;inset:0;pointer-events:none">${edgePaths}</svg>
         ${genEls}
         ${nodeEls}
@@ -1941,7 +2475,7 @@ function renderModal(){
 /* Toast */
 function renderToast(){
   if(!S.toast)return'';
-  return`<div role="status" style="position:absolute;left:50%;bottom:28px;transform:translateX(-50%);z-index:90;display:flex;align-items:center;gap:14px;padding:10px 16px;background:#111;border:1px solid #2e2e2e;border-radius:10px;font:500 13px 'Instrument Sans';box-shadow:0 12px 32px #000">${esc(S.toast)}</div>`;
+  return`<div role="status" style="position:absolute;left:50%;bottom:${toastBottom()};transform:translateX(-50%);z-index:90;display:flex;align-items:center;gap:14px;padding:10px 16px;background:#111;border:1px solid #2e2e2e;border-radius:10px;font:500 13px 'Instrument Sans';box-shadow:0 12px 32px #000">${esc(S.toast)}</div>`;
 }
 
 /* EVENT DELEGATION */
@@ -1961,14 +2495,46 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'checkUpdate': checkUpdate(); break;
     case 'openGraph': openGraph(); break;
     case 'closeGraph': stopGraphPoll(); S.view='chat'; S.selectedNode=null; S.nodeDetail=null; render(); break;
-    case 'openWorkers': openWorkers(); break;
-    case 'closeWorkers': stopWorkersPoll(); S.view='chat'; render(); break;
     case 'openFlow': openFlow(); break;
+    case 'flowOpenWorker': S.flowWorker=el.dataset.id; render(); break;
+    case 'flowCloseWorker': S.flowWorker=null; render(); break;
+    case 'flowToggleGate': S.flowGateOpen=!S.flowGateOpen; render(); break;
     case 'closeFlow': stopFlowPoll(); S.view='chat'; render(); break;
     case 'openBrowser': openBrowser(); break;
     case 'closeBrowser': stopBrowserPoll(); S.view='chat'; render(); break;
-    case 'toggleSteer': S.steerOpen=!S.steerOpen; render(); break;
-    case 'sendSteer': sendSteer(); break;
+    case 'selectBrowserTab': S.browserTab=el.dataset.id; S.browserSeq=0; render(); break;
+    case 'closeBrowserTab': {
+      e.stopPropagation();
+      const id=el.dataset.id;
+      S.browserTabs=S.browserTabs.filter(t=>t.id!==id);
+      if(S.browserTab===id)S.browserTab=(S.browserTabs[0]||{}).id||null;
+      render();
+    } break;
+    case 'newBrowserTab': {
+      // New tabs always belong to the operator — the agent can only ever open its own.
+      const id='me-'+(Date.now().toString(36));
+      S.browserTabs.push({id,owner:'me',title:'ACME Shop — My orders',url:'https://shop.acme-lab.test/account/orders',share:false});
+      S.browserTab=id;render();
+    } break;
+    case 'toggleTabShare': {
+      const t=S.browserTabs.find(x=>x.id===el.dataset.id);
+      if(t){t.share=!t.share;toast(t.share?'Agent may read this tab (read-only)':'Agent blocked from this tab');}
+      render();
+    } break;
+    case 'agentReadTab': {
+      // Demo stand-in for the browser_read_tab tool: a one-shot read-only snapshot, logged in the
+      // transcript so the operator can see exactly when the agent looked at their tab.
+      const t=S.browserTabs.find(x=>x.id===el.dataset.id);
+      if(t&&t.share){
+        S.browserReadAt=Date.now();
+        if(S.activeSession){
+          if(!S.threads[S.activeSession])S.threads[S.activeSession]=[];
+          S.threads[S.activeSession].push({role:'system',content:'[browser_read_tab] read-only snapshot of your tab "'+t.title+'" — 1 page, no interaction',_raw:{type:'browser_read_tab'}});
+        }
+        toast('Agent pulled a read-only snapshot of your tab');
+      }
+      render();
+    } break;
     case 'copySessionId': if(S.activeSession){copyText(S.activeSession);S.idCopied=true;render();setTimeout(()=>{S.idCopied=false;render()},1200);} break;
     case 'openMenu': S.menu=S.menu===el.dataset.key?null:el.dataset.key; render(); break;
     case 'pickMenu': {
@@ -2039,9 +2605,9 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'selectNode': selectGraphNode(parseInt(el.dataset.ordinal)); break;
     case 'closeNodeDrawer': S.selectedNode=null; S.nodeDetail=null; render(); break;
     case 'toggleStats': S.statsOpen=!S.statsOpen; render(); break;
-    case 'zoomIn': S.graphZoom=Math.min(2.6,S.graphZoom*1.2); render(); break;
-    case 'zoomOut': S.graphZoom=Math.max(0.3,S.graphZoom/1.2); render(); break;
-    case 'zoomReset': S.graphZoom=1; render(); break;
+    case 'zoomIn': graphZoomAt(1.2); break;
+    case 'zoomOut': graphZoomAt(1/1.2); break;
+    case 'zoomReset': graphFit(); break;
     case 'clearGraphFilters': S.gFilter={q:'',phase:'',status:'',conf:'',activeOnly:false}; render(); break;
     case 'toggleCollapse': {const o=el.dataset.ordinal;S.collapsed[o]=!S.collapsed[o];render();} break;
     case 'graphNodeAction': {
@@ -2074,7 +2640,6 @@ document.getElementById('app').addEventListener('input',function(e){
     const b=document.getElementById('sendBtn');if(b)b.style.opacity=S.input.trim()?'1':'.4';
   }
   else if(e.target.id==='sessionSearch'){S.search=e.target.value;render();}
-  else if(e.target.id==='steerInput')S.steerText=e.target.value;
   else if(e.target.id==='noteSearchInput'){S.noteSearch=e.target.value;render();}
   else if(e.target.id==='gfSearch'){S.gFilter.q=e.target.value;render();}
   else if(e.target.id==='neId')S.newEng.id=e.target.value;
@@ -2084,7 +2649,7 @@ document.getElementById('app').addEventListener('input',function(e){
 
 document.getElementById('app').addEventListener('keydown',function(e){
   if(e.target.id==='homeInput'||e.target.id==='chatInput'){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}}
-  if(e.target.id==='steerInput'){if(e.key==='Enter'){e.preventDefault();sendSteer();}}
+
 });
 
 document.getElementById('app').addEventListener('change',function(e){
@@ -2122,7 +2687,6 @@ document.addEventListener('keydown',function(e){
     else if(S.menu){S.menu=null;render();}
     else if(S.statsOpen){S.statsOpen=false;render();}
     else if(S.view==='graph'){S.view='chat';S.selectedNode=null;S.nodeDetail=null;render();}
-    else if(S.view==='workers'){stopWorkersPoll();S.view='chat';render();}
     else if(S.view==='flow'){stopFlowPoll();S.view='chat';render();}
     else if(S.view==='browser'){stopBrowserPoll();S.view='chat';render();}
     return;
@@ -2144,28 +2708,37 @@ window.addEventListener('resize',function(){
   if(window.innerWidth<900&&S.sidebarOpen)S.sidebarOpen=false;render();
 });
 
-/* Hypothesis graph: wheel to zoom, drag to pan (the canvas had no zoom/pan handlers). */
+/* Graph canvas input: wheel zooms at the cursor, shift-wheel / horizontal trackpad swipe pans,
+   and dragging moves the world freely (no scroll bounds). A drag that moved the camera swallows
+   the click that follows, so panning never selects a node by accident. */
 window.addEventListener('wheel',function(e){
   const gc=e.target.closest&&e.target.closest('#graphCanvas');
   if(!gc)return;
   e.preventDefault();
-  S.graphZoom=Math.max(0.3,Math.min(2.6,S.graphZoom*(e.deltaY<0?1.12:0.89)));
-  const inner=gc.firstElementChild;
-  if(inner)inner.style.transform='scale('+S.graphZoom+')';
+  if(e.shiftKey||Math.abs(e.deltaX)>Math.abs(e.deltaY)){
+    S.gPan={x:S.gPan.x-e.deltaX,y:S.gPan.y-e.deltaY};applyGraphTransform();return;
+  }
+  const r=gc.getBoundingClientRect();
+  graphZoomAt(e.deltaY<0?1.12:0.893,e.clientX-r.left,e.clientY-r.top);
 },{passive:false});
-let _gpan=null;
+let _gpan=null,_gMoved=false;
 document.addEventListener('mousedown',function(e){
   const gc=e.target.closest&&e.target.closest('#graphCanvas');
-  if(!gc||(e.target.closest&&e.target.closest('[data-action]')))return;
-  _gpan={x:e.clientX,y:e.clientY,sl:gc.scrollLeft,st:gc.scrollTop,el:gc};
-  gc.style.cursor='grabbing';e.preventDefault();
+  if(!gc||e.button!==0)return;
+  _gpan={x:e.clientX,y:e.clientY,px:S.gPan.x,py:S.gPan.y,el:gc};_gMoved=false;
+  gc.style.cursor='grabbing';
 });
 document.addEventListener('mousemove',function(e){
   if(!_gpan)return;
-  _gpan.el.scrollLeft=_gpan.sl-(e.clientX-_gpan.x);
-  _gpan.el.scrollTop=_gpan.st-(e.clientY-_gpan.y);
+  const dx=e.clientX-_gpan.x,dy=e.clientY-_gpan.y;
+  if(!_gMoved&&Math.abs(dx)+Math.abs(dy)<3)return;
+  _gMoved=true;e.preventDefault();
+  S.gPan={x:_gpan.px+dx,y:_gpan.py+dy};applyGraphTransform();
 });
 document.addEventListener('mouseup',function(){if(_gpan){try{_gpan.el.style.cursor='grab'}catch(_){}_gpan=null;}});
+document.addEventListener('click',function(e){
+  if(_gMoved&&e.target.closest&&e.target.closest('#graphCanvas')){e.stopPropagation();_gMoved=false;}
+},true);
 
 async function saveEngagement(){
   const id=(document.getElementById('neId')?.value||'').trim();
@@ -2201,5 +2774,6 @@ function stopApprovalPolling(){if(_approvalPoll){clearInterval(_approvalPoll);_a
   startApprovalPolling();
 })();
 </script>
+<script src="demo-panel.js"></script>
 </body>
 </html>
