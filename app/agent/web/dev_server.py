@@ -3165,27 +3165,21 @@ def classic_index():
                         headers={"Cache-Control": "no-store"})
 
 
-# ── The new operator client (CLIENT_UI_DESIGN.md) ──
-# The React client in app/client is the product (§2) and is what / now redirects to; the classic
-# single-file UI stays reachable at /classic. It is served here, same-origin, so its relative API
-# calls and ?key= auth reach this very server with no CORS. The bundle is built (not committed —
-# dist/ is gitignored), so a server that has not run the build serves a helpful 503 rather than a
-# blank page. Not under /api/, so the key middleware does not gate the shell — exactly like / — and
-# the client authenticates its own /api/ calls.
-CLIENT_DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
-
-
+# ── The retired React operator client ──
+# The React client that once lived in app/client is gone: the classic single-file UI at / is the
+# whole product. /app* stays as a redirect so a bookmark, an older desktop build still opening
+# /app/, a tear-off window, or any lingering link lands on the UI that exists rather than 404ing.
 @app.get("/app")
 @app.get("/app/")
 @app.get("/app/{path:path}")
 def retired_client(path: str = ""):
-    """The React operator client is retired: the classic UI at / is the whole product now.
+    """The React operator client is retired and deleted: the classic UI at / is the whole product.
 
     /app* used to serve that client. It redirects to / instead, so a bookmark, an older desktop
     build still opening /app/, a tear-off window, or any lingering link lands on the classic UI
     rather than stranding the operator in a UI that no longer exists — the "I got stuck in there and
     can't get out" the operator hit. Every path under /app (including its old asset URLs) redirects,
-    so nothing of the SPA can load. CLIENT_DIST stays defined (a patch target elsewhere) but unused.
+    so nothing of the removed SPA can load.
     """
     return RedirectResponse("/")
 
@@ -3783,11 +3777,11 @@ def technique_kb_forget(ordinal: int):
 
 # ── Findings ──
 # ── Engagement event stream (CLIENT_UI_DESIGN.md §4) ──
-# The new operator client (app/client) draws every surface from one ordered, persistent,
-# engagement-wide event stream — not the per-session SSE above. The log itself (EngagementEventLog,
-# the sequence allocation, the project() fold) lives in agent/engagement/; these two endpoints are
-# the read surface, ported here so the client can run against the server the operator actually
-# launches (dev_server), which already serves this engagement's graph/notebook/findings.
+# The classic UI's Flow and snapshot surfaces draw from one ordered, persistent, engagement-wide
+# event stream — not the per-session SSE above. The log itself (EngagementEventLog, the sequence
+# allocation, the project() fold) lives in agent/engagement/; these two endpoints are the read
+# surface, served from the server the operator actually launches (dev_server), which already
+# serves this engagement's graph/notebook/findings.
 def _check_api_version(request: Request) -> None:
     """§4.3: a client declares its API version; a server that cannot serve that MAJOR version says
     so (409) rather than half-working. Absent (an old client, a curl, a test) is allowed, so this
@@ -4281,38 +4275,6 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Startup
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _ensure_client_built(*, runner=None) -> bool:
-    """Build the operator-client bundle (app/client) if it is missing and npm is available, so one
-    launch command gives a working UI with no manual build step. Returns whether a build ran.
-
-    Best-effort and never fatal: no package.json, no npm, or a failed build all just leave /app/
-    serving its 'how to build' page. `runner` is injectable so the decision logic is testable
-    without invoking npm."""
-    import shutil
-    import subprocess
-
-    run = runner or (lambda *a, **k: subprocess.run(*a, **k))
-    if CLIENT_DIST.is_dir():
-        return False  # already built
-    client_dir = CLIENT_DIST.parent
-    if not (client_dir / "package.json").exists():
-        return False  # no client source here (a minimal checkout)
-    if shutil.which("npm") is None:
-        log.warning("operator client is not built and npm was not found — /app/ will show the "
-                    "build instructions; install Node, or build it yourself, to use the new UI")
-        return False
-    try:
-        if not (client_dir / "node_modules").is_dir():
-            log.info("installing operator-client dependencies (one time)...")
-            run(["npm", "install"], cwd=str(client_dir), check=True)
-        log.info("building the operator client (one time)...")
-        run(["npm", "run", "build"], cwd=str(client_dir), check=True)
-        log.info("operator client built at %s", CLIENT_DIST)
-        return True
-    except Exception as e:  # noqa: BLE001 — a build failure must not stop the server starting
-        log.warning("operator-client build failed (%s); /app/ will show the build instructions", e)
-        return False
-
 
 def _is_loopback(host: str) -> bool:
     """Whether binding `host` keeps the server off the network.
@@ -4528,15 +4490,10 @@ def main():
             rag_count = _rag.index_directory(RAG_CORPUS_DIR)
         log.info("RAG: %d documents indexed (TF-IDF)", rag_count)
 
-    # Build the operator client once, here, so a single launch command yields a working UI at
-    # /app/ with no separate build step — the "easy to open" path. A server without npm just serves
-    # the build instructions instead (never fatal).
-    _ensure_client_built()
-
     # Start server
     import uvicorn
     log.info("Starting Oxpecker dev server on http://%s:%d", args.host, args.port)
-    log.info("Open the operator client at http://%s:%d/app/", args.host, args.port)
+    log.info("Open the UI at http://%s:%d/", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

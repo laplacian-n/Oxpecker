@@ -12,12 +12,17 @@ that compiles, deploys, and goes silently unrendered. So the vocabulary is asser
 equality, in both directions:
 
   * pushed but unhandled -> the operator is not being told something the server is reporting;
-  * handled but never pushed -> a dead branch the next reader has to rule out by hand, which is
-    exactly what static/index.html's `autonomous_error` case is (only agent/web/server.py, the
-    scaffold nothing launches, pushes it).
+  * handled but never pushed -> a dead branch the next reader has to rule out by hand.
+
+The UI is the classic single-file app now (static/index.html); its handler is the switch inside
+handleServerEvent(). The React operator client that used to hold this list (client/src/
+conversation.ts) was deleted when it was retired, so the handled set is read from the switch.
 
 Deliberately read from dev_server.py alone. server.py is the dead scaffold -- taking its pushes
-into account would require the client to carry branches no deployment can ever reach.
+into account would require the UI to carry branches no deployment can ever reach. The one handled
+event dev_server does not push, `autonomous_error`, is exactly such a server.py-only event; the UI
+keeps it as cheap defensive insurance, so it is excluded below by name rather than letting it read
+as a mismatch.
 """
 from __future__ import annotations
 
@@ -27,7 +32,12 @@ from pathlib import Path
 
 APP = Path(__file__).resolve().parents[2]
 DEV_SERVER = APP / "agent" / "web" / "dev_server.py"
-CONVERSATION_TS = APP / "client" / "src" / "conversation.ts"
+INDEX_HTML = APP / "agent" / "web" / "static" / "index.html"
+
+# Handled by the UI but only ever pushed by agent/web/server.py (the scaffold nothing launches),
+# so it never arrives from dev_server. Kept in the UI as a defensive toast; not a dead branch to
+# remove, and not a dev_server push to add.
+SERVER_PY_ONLY = {"autonomous_error"}
 
 
 def _pushed_event_types() -> set[str]:
@@ -55,10 +65,16 @@ def _pushed_event_types() -> set[str]:
 
 
 def _handled_event_types() -> set[str]:
-    text = CONVERSATION_TS.read_text(encoding="utf-8")
-    m = re.search(r"HANDLED_EVENTS:\s*readonly string\[\]\s*=\s*\[(.*?)\]", text, re.DOTALL)
-    assert m, "client/src/conversation.ts lost its HANDLED_EVENTS list"
-    return set(re.findall(r'"([a-z_]+)"', m.group(1)))
+    """Every event the classic UI's SSE handler has a `case` for.
+
+    Scoped to the handleServerEvent() switch so the many `case '…':` labels in the UI's own action
+    dispatcher (openSession, openFlow, …) are not mistaken for server events. The SERVER_PY_ONLY
+    events are dropped: they are handled defensively but only server.py ever pushes them.
+    """
+    text = INDEX_HTML.read_text(encoding="utf-8")
+    m = re.search(r"function handleServerEvent\(evt\)\{(.*?)\n\}\n", text, re.DOTALL)
+    assert m, "static/index.html lost its handleServerEvent switch"
+    return set(re.findall(r"case '([a-z_]+)':", m.group(1))) - SERVER_PY_ONLY
 
 
 class TestSessionEventVocabulary(unittest.TestCase):
@@ -77,7 +93,7 @@ class TestSessionEventVocabulary(unittest.TestCase):
         )
         self.assertGreaterEqual(
             len(handled), 15,
-            f"only parsed {len(handled)} handled event types out of conversation.ts "
+            f"only parsed {len(handled)} handled event types out of static/index.html "
             f"({sorted(handled)}); the regex has probably stopped matching the source",
         )
 
@@ -85,11 +101,10 @@ class TestSessionEventVocabulary(unittest.TestCase):
         pushed, handled = _pushed_event_types(), _handled_event_types()
         self.assertEqual(
             pushed, handled,
-            "dev_server.py and client/src/conversation.ts disagree about the session event "
-            "vocabulary.\n"
+            "dev_server.py and static/index.html disagree about the session event vocabulary.\n"
             f"  pushed by the server, not handled by the chat UI: {sorted(pushed - handled) or 'none'}\n"
             "    -> the operator is not being shown something the server is reporting. Add a "
-            "case to reduceConversation and a test for it.\n"
+            "case to handleServerEvent (and render it), plus a test for it.\n"
             f"  handled by the chat UI, never pushed: {sorted(handled - pushed) or 'none'}\n"
             "    -> a dead branch. Remove it, or say in a comment which code path emits it "
             "(agent/web/server.py does not count -- nothing launches it).",

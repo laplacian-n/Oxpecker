@@ -10,8 +10,8 @@
 
   This is a thin client. It does not run the agent or hold data; it remembers the server URL and
   key across launches (localStorage on this file:// page, stable every launch) and hands them to
-  the server's own web client by navigating to <server>/app/?key=<key> — which adopts the key and
-  scrubs it from the address (session.ts). No IPC, no node integration, no secrets written to disk.
+  the server's own web UI by navigating to <server>/?key=<key> — the classic single-file UI, which
+  adopts the key and scrubs it from the address. No IPC, no node integration, no secrets on disk.
 -->
 <style>
   :root { --bg:#0a0a0a; --panel:#141414; --panel-2:#1c1c1c; --border:#262626; --text:#ededed; --muted:#8a8a8a; --accent:oklch(62% 0.21 25); --link:#8ab4ff; }
