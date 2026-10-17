@@ -1299,13 +1299,17 @@ function initHomeCanvas(){
   function resize(){
     dpr=Math.min(window.devicePixelRatio||1,2);
     const r=cv.getBoundingClientRect(),width=r.width,height=r.height;
-    cv.width=Math.max(1,Math.round(width*dpr));cv.height=Math.max(1,Math.round(height*dpr));
+    const bw=Math.max(1,Math.round(width*dpr)),bh=Math.max(1,Math.round(height*dpr));
+    // Nothing changed — don't rebuild the grid (which would reseed the ambient scatter and wipe
+    // the live heat). This also makes a spurious ResizeObserver tick free.
+    if(bw===cv.width&&bh===cv.height&&cols)return;
+    cv.width=bw;cv.height=bh;
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.font=(cellSize*0.85)+'px '+mono;ctx.textAlign='center';ctx.textBaseline='middle';
     cols=Math.max(1,Math.ceil(width/cellSize));rows=Math.max(1,Math.ceil(height/cellSize));
     const n=cols*rows;heat=new Float32Array(n);rate=new Float32Array(n).fill(1.4);ambient=new Float32Array(n);
     const rand=mulberry32(0xa53f9c1^(cols*71+rows));
-    for(let i=0;i<n;i++){if(rand()<0.085)ambient[i]=0.22+rand()*0.30;}
+    for(let i=0;i<n;i++){if(rand()<0.05)ambient[i]=0.16+rand()*0.22;}
   }
   function draw(){
     const r=cv.getBoundingClientRect();
@@ -1315,7 +1319,7 @@ function initHomeCanvas(){
       if(lum<=0.03)continue;
       const ch=WAKE_RAMP[Math.min(WAKE_RAMP.length-1,Math.floor(lum*(WAKE_RAMP.length-1)))];
       if(ch===' ')continue;
-      ctx.globalAlpha=Math.min(1,0.42+lum*0.58);
+      ctx.globalAlpha=Math.min(1,0.3+lum*0.7);
       ctx.fillText(ch,gx*cellSize+cellSize/2,gy*cellSize+cellSize/2);
     }
     ctx.globalAlpha=1;
@@ -1350,11 +1354,18 @@ function initHomeCanvas(){
   }
   resize();
   let rt=null;
-  function onResize(){if(rt)clearTimeout(rt);rt=setTimeout(function(){rt=null;resize();if(reduced)draw();},150);}
+  function onResize(){if(rt)clearTimeout(rt);rt=setTimeout(function(){rt=null;resize();if(reduced)draw();},120);}
   window.addEventListener('resize',onResize);
+  // The canvas is position:absolute inset:0 and sizes to its parent, which settles AFTER init (the
+  // hero lays out, web fonts load and reflow, the sidebar toggles) without firing a window resize.
+  // Watching only `window` meant the first resize() locked in a tiny backing store (the canvas's
+  // 300x150 default before layout), which CSS then stretched to the final size — a few huge, blurry
+  // glyphs. Observe the element's own box so resize() re-runs the moment it actually changes.
+  let ro=null;
+  if(window.ResizeObserver){ro=new ResizeObserver(onResize);try{ro.observe(cv);}catch(e){}}
   if(reduced){draw();}
   else{window.addEventListener('pointermove',onMove);raf=requestAnimationFrame(loop);}
-  _homeCleanup=function(){cancelAnimationFrame(raf);if(rt)clearTimeout(rt);window.removeEventListener('resize',onResize);window.removeEventListener('pointermove',onMove);};
+  _homeCleanup=function(){cancelAnimationFrame(raf);if(rt)clearTimeout(rt);if(ro)ro.disconnect();window.removeEventListener('resize',onResize);window.removeEventListener('pointermove',onMove);};
 }
 function scrollToBottom(){S.atBottom=true;requestAnimationFrame(()=>{const el=document.getElementById('transcript');if(el)el.scrollTop=el.scrollHeight;});}
 function softScroll(){if(S.atBottom)scrollToBottom();}
@@ -1428,7 +1439,7 @@ function renderHome(){
   const modeLabel={assistant:'Assistant',guided:'Guided',autonomous:'Autonomous',consult:'Autonomous'}[S.mode]||'Assistant';
   return`<div style="flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;overflow:hidden">
     <canvas id="homeCanvas" style="position:absolute;inset:0;width:100%;height:100%;color:${A};pointer-events:none"></canvas>
-    <div style="position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,0,0,.66) 0%,rgba(0,0,0,.34) 45%,transparent 80%);pointer-events:none"></div>
+    <div style="position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,0,0,.78) 0%,rgba(0,0,0,.42) 45%,transparent 80%);pointer-events:none"></div>
     <div style="position:relative;width:100%;max-width:720px;display:flex;flex-direction:column;align-items:center">
       <h1 style="font:500 34px/1.2 'Instrument Sans';letter-spacing:-.02em;margin:0 0 14px;text-align:center;align-self:stretch;white-space:nowrap">Ready when you are.</h1>
       <div style="font:400 14px/1.5 'Instrument Sans';color:#7d7d7d;margin-bottom:28px;text-align:center;align-self:stretch">Describe a target and scope, or switch to Autonomous to let the pipeline run itself.</div>
