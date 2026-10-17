@@ -1,7 +1,8 @@
-"""The front door is the classic single-file UI at /, and the React operator client at /app/ is
-retired: every path under /app redirects to /. These pin both halves — that / serves the classic UI
-(built or not, since it has no build step), and that nothing under /app can strand an operator in a
-UI that no longer exists — so the retirement cannot silently regress into serving the old client.
+"""The front door is the classic single-file UI at /, and the React operator client that once
+lived at /app/ is retired AND deleted: every path under /app redirects to /. These pin both
+halves — that / serves the classic UI (one committed HTML document, no build step), and that
+nothing under /app can strand an operator in a UI that no longer exists — so the retirement cannot
+silently regress into trying to serve a client that is not there any more.
 
 Run directly: `python3 -m unittest agent.web.test_client_serving`.
 """
@@ -29,127 +30,41 @@ class ClientServingTest(unittest.TestCase):
         self.client = TestClient(dev_server.app)
         self.addCleanup(self.client.close)
 
-    def _build_fake_dist(self) -> Path:
-        dist = self.tmp / "dist"
-        (dist / "assets").mkdir(parents=True)
-        (dist / "index.html").write_text("<!doctype html><title>Oxpecker</title><div id=root></div>")
-        (dist / "assets" / "index-abc.js").write_text("console.log('client')")
-        return dist
-
     def test_root_serves_the_classic_ui(self):
-        """/ is the classic single-file UI's door again — it is the default the operator wanted.
-
-        Served directly (not a redirect): the classic UI is one self-contained HTML document with
-        inline assets, so there is nothing to resolve under a trailing-slash path the way the React
-        bundle's ./assets/... needs. The React client stays at /app/ for the views that link to it.
-        """
+        """/ is the classic single-file UI's door — the whole product, served directly (not a
+        redirect). It is one self-contained HTML document read from disk per request, so it is the
+        same front door on every machine; there is no bundle to build."""
         resp = self.client.get("/", follow_redirects=False)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("<!doctype html>", resp.text.lower())
+        self.assertIn("<title>Oxpecker</title>", resp.text)
         self.assertEqual(resp.headers.get("cache-control"), "no-store")
 
-    def test_root_serves_the_classic_ui_whether_or_not_the_react_client_is_built(self):
-        """/ does not depend on the React bundle at all now — it is the classic UI either way.
-
-        The classic UI has no build step (it is committed HTML), so a machine that has never run
-        `npm run build` serves exactly the same front door as one that has. Only /app/ depends on
-        the bundle, and it is the one place that handles the unbuilt case.
-        """
-        with patch.object(dev_server, "CLIENT_DIST", self._build_fake_dist()):
-            built = self.client.get("/", follow_redirects=False)
-        with patch.object(dev_server, "CLIENT_DIST", self.tmp / "does-not-exist"):
-            unbuilt = self.client.get("/", follow_redirects=False)
-        self.assertEqual(built.status_code, 200)
-        self.assertEqual(unbuilt.status_code, 200)
-        self.assertIn("<!doctype html>", unbuilt.text.lower())
-
-    def test_the_classic_ui_is_retired_to_classic_and_still_served(self):
-        # Retired, not deleted: the unbuilt-client page below links to it, so it has to be there
-        # for that link to mean anything, and it is still the only UI with features the operator
-        # client has only just grown.
+    def test_classic_alias_also_serves_it(self):
+        # /classic is kept as an alias of /, read from disk per request (a cached copy reads as
+        # "nothing changed" after the server's UI is updated).
         resp = self.client.get("/classic")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("text/html", resp.headers["content-type"])
         self.assertIn("<title>Oxpecker</title>", resp.text)
-        # A living dashboard read from disk per request: a cached copy reads as "nothing changed"
-        # after the server's UI is updated.
         self.assertEqual(resp.headers.get("cache-control"), "no-store")
 
     def test_app_root_redirects_to_the_classic_ui(self):
-        """/app/ no longer serves the React client; it sends the operator to the classic UI at /.
-
-        This is the un-trap: a desktop build still opening /app/, or a bookmark, lands on the UI
-        that exists rather than one that was removed.
-        """
+        """/app/ does not serve anything of its own any more; it sends the operator to / . This is
+        the un-trap: a desktop build still opening /app/, or a bookmark, lands on the UI that
+        exists rather than one that was removed."""
         for p in ("/app", "/app/"):
             resp = self.client.get(p, follow_redirects=False)
             self.assertIn(resp.status_code, (307, 308), p)
             self.assertEqual(resp.headers["location"], "/", p)
 
     def test_every_path_under_app_redirects_including_old_asset_urls(self):
-        """Not just the root: a deep route or an old ./assets/ URL redirects too, so none of the
-        retired SPA can load (a half-loaded shell that then 404s its own assets is its own trap)."""
+        """Not just the root: a deep route or an old ./assets/ URL redirects too, so nothing of the
+        removed SPA can load (a half-loaded shell that then 404s its own assets is its own trap)."""
         for p in ("/app/some/deep/route", "/app/assets/index-abc.js", "/app/flow"):
             resp = self.client.get(p, follow_redirects=False)
             self.assertIn(resp.status_code, (307, 308), p)
             self.assertEqual(resp.headers["location"], "/", p)
-
-    def test_the_redirect_does_not_depend_on_a_built_client(self):
-        """The old client serving branched on whether dist existed; the retirement does not look at
-        it at all, so a machine that once built the bundle and one that never did behave the same."""
-        with patch.object(dev_server, "CLIENT_DIST", self.tmp / "does-not-exist"):
-            resp = self.client.get("/app/", follow_redirects=False)
-        self.assertIn(resp.status_code, (307, 308))
-        self.assertEqual(resp.headers["location"], "/")
-
-
-class EnsureClientBuiltTest(unittest.TestCase):
-    """_ensure_client_built gives one-command launch a working UI: it builds the bundle when it is
-    missing and npm is present, and is never fatal otherwise."""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="ensure-build-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        (self.tmp / "client").mkdir()
-        (self.tmp / "client" / "package.json").write_text("{}")
-        self.dist = self.tmp / "client" / "dist"
-
-    def _patch_dist(self):
-        return patch.object(dev_server, "CLIENT_DIST", self.dist)
-
-    def test_builds_when_missing_and_npm_present(self):
-        calls = []
-
-        def runner(args, **kw):
-            calls.append(args)
-            if args[:2] == ["npm", "install"]:
-                (self.tmp / "client" / "node_modules").mkdir(exist_ok=True)
-
-        with self._patch_dist(), patch("shutil.which", return_value="/usr/bin/npm"):
-            ran = dev_server._ensure_client_built(runner=runner)
-        self.assertTrue(ran)
-        self.assertIn(["npm", "install"], calls)
-        self.assertIn(["npm", "run", "build"], calls)
-
-    def test_skips_when_already_built(self):
-        self.dist.mkdir(parents=True)
-        called = []
-        with self._patch_dist():
-            ran = dev_server._ensure_client_built(runner=lambda *a, **k: called.append(a))
-        self.assertFalse(ran)
-        self.assertEqual(called, [])
-
-    def test_no_npm_is_not_fatal(self):
-        with self._patch_dist(), patch("shutil.which", return_value=None):
-            ran = dev_server._ensure_client_built(runner=lambda *a, **k: self.fail("must not run"))
-        self.assertFalse(ran)
-
-    def test_a_build_failure_is_swallowed(self):
-        def boom(*a, **k):
-            raise RuntimeError("npm exploded")
-        with self._patch_dist(), patch("shutil.which", return_value="/usr/bin/npm"):
-            ran = dev_server._ensure_client_built(runner=boom)
-        self.assertFalse(ran)  # logged, not raised
 
 
 if __name__ == "__main__":

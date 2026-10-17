@@ -13,9 +13,9 @@ and the owning module keeps reading its own. Mutating a shared object through th
 reaches the owner (same object); REBINDING does not. Tests that patch see their value and the
 server under test does not.
 
-This suite patches ten dev_server attributes:
+This suite patches nine dev_server attributes:
 
-    _persist  DATA_DIR  CLIENT_DIST  STATE_FILE  _run_tool  _brokers
+    _persist  DATA_DIR  STATE_FILE  _run_tool  _brokers
     _audit_for  _dispatch_via_broker  _live_browser_for  _agent_live_browser
 
 DATA_DIR and _persist together are what keep the tests out of the real state directory. Move the
@@ -40,7 +40,7 @@ from unittest.mock import patch
 
 WEB = Path(__file__).resolve().parent
 PATCHED_ATTRS = (
-    "_persist", "DATA_DIR", "CLIENT_DIST", "STATE_FILE", "_run_tool", "_brokers",
+    "_persist", "DATA_DIR", "STATE_FILE", "_run_tool", "_brokers",
     "_audit_for", "_dispatch_via_broker", "_live_browser_for", "_agent_live_browser",
 )
 
@@ -90,7 +90,7 @@ class ReexportPatchHazardTest(unittest.TestCase):
 
 
 class PatchTargetsStillLiveInDevServerTest(unittest.TestCase):
-    """The ten names above must stay where the tests patch them.
+    """The nine names above must stay where the tests patch them.
 
     Asserted against the module rather than against a list in a comment: if a later split moves
     one behind a re-export, this fails and names it, instead of the suite quietly starting to
