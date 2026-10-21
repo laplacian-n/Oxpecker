@@ -4145,6 +4145,32 @@ def _prepare_engagement_for_pipeline(eng: Engagement) -> None:
         log.info("Could not set model/tier on %r roe.json: %s", eng.engagement_id, e)
 
 
+# The wave-engine structural events (agent/pipeline/wave.py) the autonomous run mirrors into the
+# session chat as activity rows. Structure only — the per-experiment events and anything carrying
+# payload stay with the Flow view; the chat gets the spawn/finish narration the operator asked for.
+_FORWARD_PIPELINE_KINDS = {"wave_started", "worker_spawned", "worker_finished", "wave_ended"}
+
+
+def _pipeline_event_detail(kind: str, payload: dict) -> str:
+    """A one-line, human-readable description of a wave/worker event for the chat activity row.
+    Structure only — never the worker's tool output, which stays off the fan-out stream (§4.2)."""
+    if kind == "wave_started":
+        n = len(payload.get("experiments") or [])
+        return f"wave {payload.get('wave', '?')} · {n} worker{'s' if n != 1 else ''}"
+    if kind == "worker_spawned":
+        method = (payload.get("method") or "").strip()
+        return f"{payload.get('worker_id', '?')} → {method}" if method else str(payload.get("worker_id", "?"))
+    if kind == "worker_finished":
+        outcome = payload.get("outcome") or "done"
+        detail = (payload.get("detail") or "").strip()
+        head = f"{payload.get('worker_id', '?')} · {outcome}"
+        return f"{head} — {detail}" if detail else head
+    if kind == "wave_ended":
+        n = payload.get("workers", "?")
+        return f"wave {payload.get('wave', '?')} complete · {n} worker{'s' if n != 1 else ''}"
+    return (payload.get("detail") or "").strip()
+
+
 @app.post("/api/sessions/{session_id}/pipeline/start")
 def start_pipeline(session_id: str, req: AutonomousStartRequest):
     """Run the real autonomous pipeline (agent/pipeline/autonomous_driver.py) for this session's
@@ -4173,7 +4199,22 @@ def start_pipeline(session_id: str, req: AutonomousStartRequest):
     def on_event(ev: dict) -> None:
         s.push({"type": "autonomous_event", "event": ev})
 
+    # The driver narrates phases to the chat, but the parallel wave/worker activity is emitted to
+    # the engagement event log (wave.py), which only the Flow view reads — so the chat went silent
+    # mid-run while five workers were busy ("why won't it work"). Mirror the wave's structural
+    # events into this session's chat as activity rows, so the chat shows the workers being spawned
+    # and reporting back, the way the operator asked for. Payloads carry only structure (§4.2), so
+    # this adds no raw tool output to the fan-out stream.
+    from ..engagement import emit as _event_emit
+
+    def _mirror_engagement_event(eng_id: str, kind: str, payload: dict, seq: int) -> None:
+        if eng_id != s.engagement_id or kind not in _FORWARD_PIPELINE_KINDS:
+            return
+        s.push({"type": "autonomous_event",
+                "event": {"type": kind, "detail": _pipeline_event_detail(kind, payload)}})
+
     def run() -> None:
+        _event_emit.subscribe(_mirror_engagement_event)
         try:
             from ..pipeline.autonomous_driver import AutonomousDriver
 
@@ -4193,6 +4234,7 @@ def start_pipeline(session_id: str, req: AutonomousStartRequest):
         except Exception as e:  # noqa: BLE001 — surface, never crash the server thread silently
             s.push({"type": "task_error", "error": f"{type(e).__name__}: {e}"})
         finally:
+            _event_emit.unsubscribe(_mirror_engagement_event)
             with s.lock:
                 s.running = False
                 s.autonomous_active = False

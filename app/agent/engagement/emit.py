@@ -43,6 +43,31 @@ def current_worker() -> str | None:
     return getattr(_worker_ctx, "worker_id", None)
 
 
+# In-process listeners run after each successful append, so a surface in THIS process (the web
+# runtime, during an autonomous run) can mirror live wave/worker events into a session chat without
+# polling the log. Out-of-process consumers still read the persisted log; this is additive and only
+# ever a best-effort notification — like the append itself, a listener that raises is swallowed so
+# it can never break the producer it is observing.
+_listeners_lock = threading.Lock()
+_listeners: list = []
+
+
+def subscribe(callback) -> object:
+    """Register callback(engagement_id, kind, payload, seq) to run after each successful emit.
+    Returns the callback so the caller can unsubscribe it. In-process only."""
+    with _listeners_lock:
+        _listeners.append(callback)
+    return callback
+
+
+def unsubscribe(callback) -> None:
+    with _listeners_lock:
+        try:
+            _listeners.remove(callback)
+        except ValueError:
+            pass
+
+
 def emit(engagement_id: str, kind: str, payload: dict | None = None) -> int | None:
     """Append one event; return its sequence number, or None if the append could not be made.
     Never raises into the caller — a producer's real work must not fail because its telemetry did.
@@ -56,10 +81,20 @@ def emit(engagement_id: str, kind: str, payload: dict | None = None) -> int | No
     if not engagement_id:
         return None
     try:
-        return EngagementEventLog(config.ENGAGEMENTS_ROOT / engagement_id).append(kind, payload or {})
+        seq = EngagementEventLog(config.ENGAGEMENTS_ROOT / engagement_id).append(kind, payload or {})
     except Exception:  # noqa: BLE001 - telemetry must never break its producer
         log.warning("failed to emit %r event for engagement %r", kind, engagement_id, exc_info=True)
         return None
+    if seq is not None and _listeners:
+        with _listeners_lock:
+            listeners = list(_listeners)
+        for cb in listeners:
+            try:
+                cb(engagement_id, kind, payload or {}, seq)
+            except Exception:  # noqa: BLE001 - a listener must never break its producer either
+                log.warning("emit listener failed for %r event on %r", kind, engagement_id,
+                            exc_info=True)
+    return seq
 
 
 def engagement_id_from_dir(engagement_dir: Path | str) -> str:
