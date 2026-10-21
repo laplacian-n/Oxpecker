@@ -65,7 +65,13 @@ const A75 = 'oklch(75% 0.17 25)';
 // the default). Set when the UI is bundled and loaded from file:// (the desktop offline build),
 // so /api and /static resolve to the configured server. Defined here, before LOGO uses it.
 const SERVER_BASE=(function(){try{return localStorage.getItem('serverBase')||''}catch(e){return ''}})();
-const LOGO = SERVER_BASE ? SERVER_BASE + '/static/oxpecker-logo.png' : 'oxpecker-logo.png';
+// The logo lives in the server's static dir, served at /static/. When the UI is served over http
+// (same-origin, the normal case, SERVER_BASE empty) that is an absolute /static/ path; a remote
+// server prefixes SERVER_BASE. Only the bundled offline build loads the page from file://, where
+// oxpecker-logo.png sits next to index.html, so there it is a bare relative name.
+const LOGO = (location.protocol === 'file:')
+  ? 'oxpecker-logo.png'
+  : (SERVER_BASE || '') + '/static/oxpecker-logo.png';
 
 function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
@@ -1293,7 +1299,11 @@ function initHomeCanvas(){
   function resize(){
     dpr=Math.min(window.devicePixelRatio||1,2);
     const r=cv.getBoundingClientRect(),width=r.width,height=r.height;
-    cv.width=Math.max(1,Math.round(width*dpr));cv.height=Math.max(1,Math.round(height*dpr));
+    const bw=Math.max(1,Math.round(width*dpr)),bh=Math.max(1,Math.round(height*dpr));
+    // Nothing changed — don't rebuild the grid (which would reseed the ambient scatter and wipe
+    // the live heat). This also makes a spurious ResizeObserver tick free.
+    if(bw===cv.width&&bh===cv.height&&cols)return;
+    cv.width=bw;cv.height=bh;
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.font=(cellSize*0.85)+'px '+mono;ctx.textAlign='center';ctx.textBaseline='middle';
     cols=Math.max(1,Math.ceil(width/cellSize));rows=Math.max(1,Math.ceil(height/cellSize));
@@ -1344,11 +1354,18 @@ function initHomeCanvas(){
   }
   resize();
   let rt=null;
-  function onResize(){if(rt)clearTimeout(rt);rt=setTimeout(function(){rt=null;resize();if(reduced)draw();},150);}
+  function onResize(){if(rt)clearTimeout(rt);rt=setTimeout(function(){rt=null;resize();if(reduced)draw();},120);}
   window.addEventListener('resize',onResize);
+  // The canvas is position:absolute inset:0 and sizes to its parent, which settles AFTER init (the
+  // hero lays out, web fonts load and reflow, the sidebar toggles) without firing a window resize.
+  // Watching only `window` meant the first resize() locked in a tiny backing store (the canvas's
+  // 300x150 default before layout), which CSS then stretched to the final size — a few huge, blurry
+  // glyphs. Observe the element's own box so resize() re-runs the moment it actually changes.
+  let ro=null;
+  if(window.ResizeObserver){ro=new ResizeObserver(onResize);try{ro.observe(cv);}catch(e){}}
   if(reduced){draw();}
   else{window.addEventListener('pointermove',onMove);raf=requestAnimationFrame(loop);}
-  _homeCleanup=function(){cancelAnimationFrame(raf);if(rt)clearTimeout(rt);window.removeEventListener('resize',onResize);window.removeEventListener('pointermove',onMove);};
+  _homeCleanup=function(){cancelAnimationFrame(raf);if(rt)clearTimeout(rt);if(ro)ro.disconnect();window.removeEventListener('resize',onResize);window.removeEventListener('pointermove',onMove);};
 }
 function scrollToBottom(){S.atBottom=true;requestAnimationFrame(()=>{const el=document.getElementById('transcript');if(el)el.scrollTop=el.scrollHeight;});}
 function softScroll(){if(S.atBottom)scrollToBottom();}
