@@ -1,14 +1,14 @@
 {
   "mcpServers": {
     "oxpecker-dev": {
-      "command": "py",
+      "command": ".venv/bin/python",
       "args": ["-m", "agent.dev_mcp_server"],
       "env": { "PYTHONUTF8": "1" }
     },
     "oxpecker": {
-      "command": "py",
+      "command": ".venv/bin/python",
       "args": ["-m", "agent.oxpecker_control_mcp"],
-      "env": { "PYTHONUTF8": "1" }
+      "env": { "PYTHONUTF8": "1", "OXPECKER_URL": "http://127.0.0.1:7777" }
     }
   }
 }
