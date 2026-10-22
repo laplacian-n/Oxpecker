@@ -119,6 +119,13 @@ def _q(engagement_id: str) -> str:
     return urllib.parse.quote(engagement_id, safe="")
 
 
+# The web UI's default grant (dev_server.DEFAULT_ACTION_CLASSES; test_action_classes pins the two
+# in step). An engagement needs at least one class or the autonomous pipeline refuses to run, so a
+# create that names none gets these, exactly as the UI's New-engagement form does.
+_DEFAULT_ACTION_CLASSES = ["passive_recon", "active_web_request", "active_scan_light",
+                           "browser_recon", "knowledge_search"]
+
+
 # ── Health / sessions ────────────────────────────────────────────────────────
 @server.tool(name="oxpecker_health",
              description="Check the live Oxpecker backend: model/provider, RAG doc count, active sessions.")
@@ -388,9 +395,8 @@ def oxpecker_create_engagement(engagement_id: str, allow_targets: list[str], den
                                authorized_by: str = "mcp") -> dict:
     body = {"engagement_id": engagement_id, "allow_targets": allow_targets,
             "deny_targets": deny_targets or [], "description": description or (allow_targets[0] if allow_targets else ""),
+            "allowed_action_classes": allowed_action_classes or list(_DEFAULT_ACTION_CLASSES),
             "authorized_by": authorized_by}
-    if allowed_action_classes:
-        body["allowed_action_classes"] = allowed_action_classes
     return _post("/api/engagements", body)
 
 
