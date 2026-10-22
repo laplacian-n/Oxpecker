@@ -253,19 +253,9 @@ const S = {
   eventSource: null,
   workers: [], models: [], toolsInFlight: [],
   browserSeq: 0, browserErr: null,
-  /* Browser surface — real tab strip with two kinds of tabs:
-       owner:'agent' → a page the agent's own headless browser drives (live screencast)
-       owner:'me'    → a page YOU drive. The agent may READ it (DOM/text snapshot) when
-                       share:true, but it can never click, type or navigate in it.
-     In the real build an agent read is the browser_read_tab tool hitting the operator tab's
-     snapshot endpoint; nothing in the write path is exposed for owner:'me' tabs. */
-  browserTabs:[
-    {id:'ag-w1',owner:'agent',worker:'w1',title:'shop.acme-lab.test — Sign in',url:'https://shop.acme-lab.test/login',screencast:true},
-    {id:'ag-w2',owner:'agent',worker:'w2',title:'api.acme-lab.test — /api/orders/1012',url:'https://api.acme-lab.test/api/orders/1012',screencast:false},
-    {id:'me-1',owner:'me',title:'ACME Shop — My orders',url:'https://shop.acme-lab.test/account/orders',share:true},
-  ],
-  browserTab:'ag-w1',
-  browserReadAt:null,   // when the agent last pulled a snapshot of one of your tabs
+  // The Browser surface shows the agent's own live headless browser for this engagement, streamed
+  // as JPEG frames from /browser/frame. There is no operator-tab or tab-sharing machinery — that
+  // was demo scaffolding; the real build has one agent browser per engagement.
   flowSnap: null,
   chainOpen: {},
   stepOpen: {},
@@ -655,7 +645,6 @@ async function openFlow(){S.view='flow';try{S.flowSnap=await api.engagementSnaps
 function _flowSig(s){s=s||{};return ((s.workers||[]).map(w=>w.worker_id+':'+(w.status||'')).join('|'))+'#'+((s.tool_calls_in_flight||[]).map(t=>t.worker+':'+t.tool).join(','))+'#'+((s.artifacts||[]).length)+'#'+((s.model_roster||[]).map(m=>(m.cost||0).toFixed(4)).join(','));}
 function startFlowPoll(){stopFlowPoll();_flowPoll=setInterval(async()=>{if(S.view!=='flow'){stopFlowPoll();return;}try{const s=await api.engagementSnapshot(S.engagementId);if(_flowSig(s)!==_flowSig(S.flowSnap)){S.flowSnap=s;render();}}catch(e){}},1800);}
 function stopFlowPoll(){if(_flowPoll){clearInterval(_flowPoll);_flowPoll=null;}}
-function _flowPrice(m){const t=(m.prompt_tokens||0)+(m.completion_tokens||0);if(!(t>0))return null;return Math.round((m.cost/(t/1e6))*1e4)/1e4;}
 /* ---------------------------------------------------------------------------------------------
    The Flow surface (FLOW_SURFACE_DESIGN.md)
    ---------------------------------------------------------------------------------------------
@@ -1071,107 +1060,27 @@ function openWorkers(){return openFlow();}
 function startWorkersPoll(){startFlowPoll();}
 function stopWorkersPoll(){stopFlowPoll();}
 
-/* The page rendered inside YOUR tab. In the real build this is the live site in a webview; here
-   it is a static mock so the surface can be demoed without a network. */
-const MY_TAB_PAGE=`<!doctype html><html><head><meta charset="utf-8"><style>
-body{margin:0;font:14px/1.55 -apple-system,system-ui,sans-serif;color:#1b1b1b;background:#f6f6f4}
-header{background:#1d2b3a;color:#fff;padding:13px 22px;display:flex;align-items:center;gap:24px}
-header b{font-size:17px}header span{color:#c8d2dc;font-size:13px}
-main{padding:22px;max-width:780px}h1{font-size:20px;margin:0 0 14px}
-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e3e3e0;border-radius:8px;overflow:hidden}
-td,th{padding:10px 14px;text-align:left;border-bottom:1px solid #eee;font-size:13px}
-th{background:#fafafa;color:#666;font-weight:600}
-.b{display:inline-block;padding:2px 9px;border-radius:999px;background:#e7f4ec;color:#1b6b3a;font-size:12px}
-p{color:#666;font-size:13px}
-</style></head><body><header><b>ACME Shop</b><span>Products</span><span>Deals</span><span>Orders</span><span>Help</span></header>
-<main><h1>My orders</h1><table><tr><th>Order</th><th>Date</th><th>Total</th><th>Status</th></tr>
-<tr><td>#1012</td><td>2026-10-02</td><td>$59.90</td><td><span class="b">Delivered</span></td></tr>
-<tr><td>#1033</td><td>2026-10-09</td><td>$128.00</td><td><span class="b">Shipped</span></td></tr>
-<tr><td>#1041</td><td>2026-10-15</td><td>$24.50</td><td><span class="b">Processing</span></td></tr></table>
-<p>This tab is yours. The agent can take a read-only snapshot of it when you allow that — it can never click, type or navigate here.</p>
-</main></body></html>`;
-
-/* Browser view — a proper browser shell, not a single screencast pane.
-   Tabs come in two kinds:
-     · agent tabs — driven by the agent's own browser. Live screencast; the agent is in control.
-     · your tabs  — driven by you, rendered in a sandboxed frame. The agent's only access is a
-                    read-only snapshot, and only while "Agent access: read" is on. There is no
-                    write path to these tabs at all: the backend exposes nothing that can click,
-                    type or navigate in an operator tab (browser_read_tab is read-only by design).
-   The demo fakes the snapshot; the real build hands the tab's DOM text to the model as a tool
-   result and stamps the audit log. */
 function renderBrowser(){
-  const tabs=S.browserTabs||[];
-  const cur=tabs.find(t=>t.id===S.browserTab)||tabs[0]||null;
-  const tabEl=t=>{
-    const on=t.id===S.browserTab,agent=t.owner==='agent';
-    return`<div data-action="selectBrowserTab" data-id="${esc(t.id)}" title="${esc(t.url)}" class="hv2" style="display:flex;align-items:center;gap:8px;width:230px;flex:none;padding:8px 10px;border-radius:9px 9px 0 0;cursor:pointer;background:${on?'#0c0c0c':'transparent'};border:1px solid ${on?'#242424':'transparent'};border-bottom:none;color:${on?'#ededed':'#8a8a8a'}">
-      <span style="width:7px;height:7px;border-radius:50%;flex:none;background:${agent?A:'#4a7ab8'}"></span>
-      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 12.5px 'Instrument Sans'">${esc(t.title)}</span>
-      <span style="flex:none;font:500 9.5px 'JetBrains Mono',monospace;letter-spacing:.05em;text-transform:uppercase;color:${agent?A70:'#7d9fc9'}">${agent?esc(t.worker||'agent'):'you'}</span>
-      <span class="hv-del" data-action="closeBrowserTab" data-id="${esc(t.id)}" style="flex:none;display:flex;padding:2px;border-radius:4px">${icons.closeSm}</span>
-    </div>`;
-  };
-  const navBtn=(glyph,title)=>`<div class="hv" style="padding:5px 9px;border-radius:7px;color:#6a6a6a;font:500 13px 'JetBrains Mono',monospace;cursor:default" title="${title}">${glyph}</div>`;
-  const agentCur=cur&&cur.owner==='agent';
-  const access=cur&&cur.owner==='me'
-    ?`<div style="display:flex;align-items:center;gap:8px;flex:none">
-        <span style="font:500 11px 'Instrument Sans';color:#7d7d7d">Agent access</span>
-        <div data-action="toggleTabShare" data-id="${esc(cur.id)}" class="hv2" style="display:flex;border:1px solid #262626;border-radius:7px;overflow:hidden;cursor:pointer;font:600 11px 'Instrument Sans'">
-          <span style="padding:5px 10px;background:${cur.share?'oklch(62% 0.21 25 / .16)':'transparent'};color:${cur.share?A75:'#7d7d7d'}">Read</span>
-          <span style="padding:5px 10px;background:${cur.share?'transparent':'#1c1c1c'};color:${cur.share?'#7d7d7d':'#ededed'}">Blocked</span>
-        </div>
-        ${cur.share?`<div class="hv" data-action="agentReadTab" data-id="${esc(cur.id)}" style="padding:5px 10px;border:1px solid #262626;border-radius:7px;font:500 11.5px 'Instrument Sans';color:#b5b5b5;cursor:pointer">Let the agent read it now</div>`:''}
-      </div>`
-    :`<div style="display:flex;align-items:center;gap:7px;flex:none;font:500 11px 'JetBrains Mono',monospace;color:${A70}"><span class="lai-pulse" style="width:7px;height:7px;border-radius:50%;background:${A}"></span>agent-controlled${cur&&cur.worker?(' · '+esc(cur.worker)):''}</div>`;
-
-  let body='';
+  // One surface: the agent's own live headless browser for this engagement, streamed as JPEG
+  // frames by startBrowserPoll() into #agentBrowserImg. No tabs, no operator-controlled pages —
+  // that was demo scaffolding; there is one agent browser per engagement and this shows it.
+  let body;
   if(S.browserErr){
-    body=`<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#e5484d;font:400 13px 'Instrument Sans'">${esc(S.browserErr)}</div>`;
-  }else if(!cur){
-    body=`<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#7d7d7d;font:400 13px 'Instrument Sans'">No tabs open.</div>`;
-  }else if(cur.owner==='agent'&&cur.screencast){
-    /* data-live: the screencast <img> is written by startBrowserPoll(), so the DOM patcher
-       must not touch it — that is also what stops the frame flickering on every render. */
+    body=`<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#e5484d;font:400 13px 'Instrument Sans';text-align:center;padding:0 24px">${esc(S.browserErr)}</div>`;
+  }else{
+    /* data-live: the screencast <img> is written imperatively by startBrowserPoll(), so the DOM
+       patcher must leave it alone — that is also what stops the frame flickering on every render.
+       It stays hidden until the first frame lands; until then the wait line explains the blank. */
     body=`<div style="flex:1;min-height:0;overflow:auto;padding:16px;display:flex;align-items:flex-start;justify-content:center;background:#0a0a0a">
       <img id="agentBrowserImg" data-live="1" style="max-width:100%;border:1px solid #1a1a1a;border-radius:6px;background:#fff;display:none" alt="agent browser"/>
-      <div id="agentBrowserWait" data-live="1" style="color:#7d7d7d;font:400 13px 'Instrument Sans';margin-top:60px">Waiting for the agent's browser to paint a frame…</div>
-    </div>`;
-  }else if(cur.owner==='agent'){
-    body=`<div style="flex:1;min-height:0;overflow:auto;padding:22px;background:#0a0a0a">
-      <div style="max-width:760px;margin:0 auto;border:1px solid #1a1a1a;border-radius:10px;background:#070707;overflow:hidden">
-        <div style="padding:9px 14px;border-bottom:1px solid #1a1a1a;font:500 11.5px 'JetBrains Mono',monospace;color:#8a8a8a">headless fetch · no screencast · ${esc(cur.worker||'')}</div>
-        <pre style="margin:0;padding:14px;font:400 12.5px/1.7 'JetBrains Mono',monospace;color:#b5b5b5;white-space:pre-wrap">GET ${esc(cur.url)}
-HTTP/1.1 200 OK
-content-type: application/json
-
-{"id":1012,"customer":"J. Doe","address":"12 Mill Rd","total":59.90}</pre>
-      </div>
-    </div>`;
-  }else{
-    body=`<div style="flex:1;min-height:0;display:flex;flex-direction:column;background:#0a0a0a">
-      <iframe id="myTabFrame" title="${esc(cur.title)}" sandbox="allow-same-origin" srcdoc="${esc(MY_TAB_PAGE)}" style="flex:1;width:100%;border:none;background:#fff"></iframe>
-      <div style="flex:none;display:flex;align-items:center;gap:10px;padding:7px 14px;border-top:1px solid #1a1a1a;font:400 11.5px 'Instrument Sans';color:#7d7d7d">
-        <span style="width:6px;height:6px;border-radius:50%;background:${cur.share?'#4ec9a3':'#565656'}"></span>
-        ${cur.share?'The agent may read this tab (text snapshot). It cannot click, type or navigate here.':'The agent is blocked from this tab entirely.'}
-        ${S.browserReadAt?`<span style="margin-left:auto;font-family:'JetBrains Mono',monospace">last read ${esc(new Date(S.browserReadAt).toLocaleTimeString())}</span>`:''}
-      </div>
+      <div id="agentBrowserWait" data-live="1" style="color:#7d7d7d;font:400 13px 'Instrument Sans';margin-top:60px;text-align:center">Waiting for the agent's browser to paint a frame…<br><span style="color:#5a5a5a;font-size:12px">It appears here when a worker drives the live browser.</span></div>
     </div>`;
   }
-
   return`<div style="position:absolute;inset:0;z-index:40;background:#000;display:flex;flex-direction:column">
-    <div style="display:flex;align-items:flex-end;gap:2px;padding:10px 16px 0;border-bottom:1px solid #242424;flex:none;background:#050505">
-      <div style="display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;flex:1;min-width:0">${tabs.map(tabEl).join('')}</div>
-      <div class="hv" data-action="newBrowserTab" title="New tab of your own" style="flex:none;margin:0 6px 7px;padding:4px 9px;border-radius:7px;cursor:pointer;color:#8a8a8a;font:500 15px 'JetBrains Mono',monospace;line-height:1">+</div>
-      <div class="hv" data-action="closeBrowser" style="flex:none;margin:0 0 6px;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #1a1a1a;flex:none;background:#0c0c0c">
-      ${navBtn('‹','Back')}${navBtn('›','Forward')}${navBtn('⟳','Reload')}
-      <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid #242424;border-radius:999px;background:#060606">
-        <span style="font:500 10px 'JetBrains Mono',monospace;color:${agentCur?A70:'#4ec9a3'};flex:none">${agentCur?'AGENT':'HTTPS'}</span>
-        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12.5px 'JetBrains Mono',monospace;color:#b5b5b5">${esc(cur?cur.url:'')}</span>
-      </div>
-      ${access}
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #1a1a1a;flex:none;background:#050505">
+      <span style="display:flex;align-items:center;gap:7px;font:500 11px 'JetBrains Mono',monospace;color:${A70}"><span class="lai-pulse" style="width:7px;height:7px;border-radius:50%;background:${A}"></span>agent browser · ${esc(S.engagementId)}</span>
+      <span style="flex:1"></span>
+      <div class="hv" data-action="closeBrowser" style="flex:none;padding:6px 11px;border:1px solid #262626;border-radius:7px;font:500 12.5px 'Instrument Sans';cursor:pointer;color:#b5b5b5">Close</div>
     </div>
     ${body}
   </div>`;
@@ -2145,9 +2054,12 @@ function renderGraphTree(nodes,edges){
   const parentOf=n=>n.parent_ordinal;
   const depth=n=>{let d=0,c=n,g=0;while(c&&parentOf(c)!=null&&by[parentOf(c)]&&g++<64){d++;c=by[parentOf(c)];}return d;};
 
-  /* active path: from the running node up to its root */
-  const run=nodes.find(n=>(n.status||'')==='running');
-  const act=new Set();{let c=run,g=0;while(c&&g++<64){act.add(idOf(c));c=(parentOf(c)!=null)?by[parentOf(c)]:null;}}
+  /* active paths: EVERY branch a worker is currently on (running, or blocked awaiting approval),
+     each traced from its node up to the root — so all of them flow and glow in parallel, not just
+     the first. A high-tier wave runs several workers at once; one glowing branch hid the rest. */
+  const isLiveNode=n=>{const s=n.status||'';return s==='running'||s==='awaiting_approval';};
+  const runs=nodes.filter(isLiveNode);
+  const act=new Set();runs.forEach(run=>{let c=run,g=0;while(c&&g++<64){act.add(idOf(c));c=(parentOf(c)!=null)?by[parentOf(c)]:null;}});
 
   /* collapse → hidden descendants */
   const collapsed=S.collapsed||{};
@@ -2184,8 +2096,8 @@ function renderGraphTree(nodes,edges){
   const gens=[...new Set(vis.map(depth))].sort((a,b)=>a-b);
   const genEls=gens.map(d=>`<div style="position:absolute;top:14px;left:${40+d*COL+54}px;transform:translateX(-50%);font:600 11px 'JetBrains Mono',monospace;color:#8a8a8a;text-transform:uppercase;letter-spacing:.08em">Gen ${d}</div>`).join('');
 
-  /* edges — the branch a worker is actually on flows and glows, the rest stay quiet */
-  const liveRun=!!run;
+  /* edges — every branch a worker is actually on flows and glows, the rest stay quiet */
+  const liveRun=runs.length>0;
   const edgePaths=vis.map(n=>{
     const pid=parentOf(n);if(pid==null||!pos[pid])return'';
     const a=pos[pid],b=pos[idOf(n)];
@@ -2208,7 +2120,7 @@ function renderGraphTree(nodes,edges){
     const kc=kidsOf(id).length;
     const ring=sel?'0 0 0 3px rgba(255,255,255,.22)':'none';
     return`<div data-action="selectNode" data-ordinal="${id}" style="position:absolute;left:${p.x}px;top:${p.y}px;width:108px;cursor:pointer;opacity:${op};display:flex;flex-direction:column;align-items:center;gap:5px;user-select:none" title="${esc(n.title||n.claim||'')}">
-      <div class="${v.cls}" style="width:50px;height:50px;border-radius:50%;background:${v.bg};border:${v.border};display:flex;align-items:center;justify-content:center;font:600 15px 'JetBrains Mono',monospace;color:${v.fg};position:relative;box-shadow:${ring}">${id}
+      <div class="${v.cls}${isLiveNode(n)?' gnode-live':''}" style="width:50px;height:50px;border-radius:50%;background:${v.bg};border:${v.border};display:flex;align-items:center;justify-content:center;font:600 15px 'JetBrains Mono',monospace;color:${v.fg};position:relative;box-shadow:${ring}">${id}
         ${v.glyph?`<span style="position:absolute;bottom:-3px;right:-3px;min-width:16px;height:16px;padding:0 2px;border-radius:8px;background:#000;display:flex;align-items:center;justify-content:center;font:700 11px 'Instrument Sans';color:${v.gc}">${v.glyph}</span>`:''}
         ${kc>0?`<span data-action="toggleCollapse" data-ordinal="${id}" style="position:absolute;top:-4px;right:-10px;background:#111;border:1px solid #2e2e2e;border-radius:8px;padding:1px 6px;font:600 11px 'JetBrains Mono',monospace;color:#9a9a9a;cursor:pointer">${collapsed[id]?'+'+kc:'−'}</span>`:''}
       </div>
@@ -2519,39 +2431,6 @@ document.getElementById('app').addEventListener('click',function(e){
     case 'closeFlow': stopFlowPoll(); S.view='chat'; render(); break;
     case 'openBrowser': openBrowser(); break;
     case 'closeBrowser': stopBrowserPoll(); S.view='chat'; render(); break;
-    case 'selectBrowserTab': S.browserTab=el.dataset.id; S.browserSeq=0; render(); break;
-    case 'closeBrowserTab': {
-      e.stopPropagation();
-      const id=el.dataset.id;
-      S.browserTabs=S.browserTabs.filter(t=>t.id!==id);
-      if(S.browserTab===id)S.browserTab=(S.browserTabs[0]||{}).id||null;
-      render();
-    } break;
-    case 'newBrowserTab': {
-      // New tabs always belong to the operator — the agent can only ever open its own.
-      const id='me-'+(Date.now().toString(36));
-      S.browserTabs.push({id,owner:'me',title:'ACME Shop — My orders',url:'https://shop.acme-lab.test/account/orders',share:false});
-      S.browserTab=id;render();
-    } break;
-    case 'toggleTabShare': {
-      const t=S.browserTabs.find(x=>x.id===el.dataset.id);
-      if(t){t.share=!t.share;toast(t.share?'Agent may read this tab (read-only)':'Agent blocked from this tab');}
-      render();
-    } break;
-    case 'agentReadTab': {
-      // Demo stand-in for the browser_read_tab tool: a one-shot read-only snapshot, logged in the
-      // transcript so the operator can see exactly when the agent looked at their tab.
-      const t=S.browserTabs.find(x=>x.id===el.dataset.id);
-      if(t&&t.share){
-        S.browserReadAt=Date.now();
-        if(S.activeSession){
-          if(!S.threads[S.activeSession])S.threads[S.activeSession]=[];
-          S.threads[S.activeSession].push({role:'system',content:'[browser_read_tab] read-only snapshot of your tab "'+t.title+'" — 1 page, no interaction',_raw:{type:'browser_read_tab'}});
-        }
-        toast('Agent pulled a read-only snapshot of your tab');
-      }
-      render();
-    } break;
     case 'copySessionId': if(S.activeSession){copyText(S.activeSession);S.idCopied=true;render();setTimeout(()=>{S.idCopied=false;render()},1200);} break;
     case 'openMenu': S.menu=S.menu===el.dataset.key?null:el.dataset.key; render(); break;
     case 'pickMenu': {
