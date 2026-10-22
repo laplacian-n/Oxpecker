@@ -288,10 +288,12 @@ class TestActivityRows(TestFrontendBase):
                                                           "detail": "w1 → service scan on 10.0.0.1"}})
         self._emit({"type": "autonomous_event", "event": {"type": "finding_recorded",
                                                           "detail": "F-001 · SQL injection (critical)"}})
-        self._transcript_contains("w1 → service scan on 10.0.0.1")
+        # Wait for the LAST row emitted (render() is rAF-debounced, so the finding row lands a frame
+        # after the worker row; waiting on the worker row and reading immediately raced it).
+        self._transcript_contains("F-001")
         tx = self.page.text_content("#transcript")
         self.assertIn("worker spawned", tx.lower())   # the type chip, underscores -> spaces
-        self.assertIn("F-001", tx)
+        self.assertIn("w1 → service scan on 10.0.0.1", tx)
         self._emit({"type": "autonomous_done", "result": {"status": "completed", "reason": "3 findings"}})
         self._transcript_contains("Autonomous run finished — completed")
         self.assertNoJsErrors()
