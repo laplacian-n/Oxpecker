@@ -52,12 +52,53 @@ class PipelineEventDetailTest(unittest.TestCase):
             dev_server._pipeline_event_detail("wave_ended", {"wave": 2, "workers": 5}),
             "wave 2 complete · 5 workers")
 
-    def test_the_mirrored_kinds_are_the_wave_structural_events(self):
-        # Exactly the structural wave/worker events wave.py emits that the chat should narrate; the
-        # per-experiment and payload-bearing events are deliberately left to the Flow view.
+    def test_the_mirrored_kinds_cover_the_wave_and_the_tool_calls(self):
+        # The structural wave/worker events plus each worker's tool calls, so the chat narrates both
+        # the dispatch and what every worker actually does. The experiment_started/ended events and
+        # anything carrying raw output are deliberately left to the Flow view / audit log.
         self.assertEqual(
             dev_server._FORWARD_PIPELINE_KINDS,
-            {"wave_started", "worker_spawned", "worker_finished", "wave_ended"})
+            {"wave_started", "worker_spawned", "worker_finished", "wave_ended",
+             "tool_call_started", "tool_call_finished"})
+
+
+class ToolCallNarrationTest(unittest.TestCase):
+    def test_a_wave_worker_keeps_its_id_the_strategist_is_named(self):
+        self.assertEqual(dev_server._worker_label("w0"), "w0")
+        self.assertEqual(dev_server._worker_label("w12"), "w12")
+        # A session uuid on the strategist/assistant path is named, not printed raw.
+        self.assertEqual(dev_server._worker_label("fe06f33d-6f2"), "strategist")
+        self.assertEqual(dev_server._worker_label(""), "strategist")
+
+    def test_tool_call_started_shows_the_preview(self):
+        d = dev_server._pipeline_event_detail(
+            "tool_call_started",
+            {"worker": "w1", "tool": "http_request", "preview": "GET https://laplacian.site/login"})
+        self.assertEqual(d, "w1 → GET https://laplacian.site/login")
+
+    def test_tool_call_started_falls_back_to_the_tool_name(self):
+        d = dev_server._pipeline_event_detail(
+            "tool_call_started", {"worker": "w2", "tool": "run_command", "preview": ""})
+        self.assertEqual(d, "w2 → run_command")
+
+    def test_tool_call_finished_marks_success_and_latency(self):
+        self.assertEqual(
+            dev_server._pipeline_event_detail(
+                "tool_call_finished", {"worker": "w1", "tool": "http_request", "ok": True, "latency_ms": 320}),
+            "w1 · http_request ✓ 320ms")
+
+    def test_tool_call_finished_marks_failure(self):
+        self.assertEqual(
+            dev_server._pipeline_event_detail(
+                "tool_call_finished", {"worker": "w3", "tool": "run_command", "ok": False, "latency_ms": 12}),
+            "w3 · run_command ✗ 12ms")
+
+    def test_tool_call_finished_when_the_dispatch_raised(self):
+        # ok is None → neither tick nor cross, just a neutral marker.
+        self.assertEqual(
+            dev_server._pipeline_event_detail(
+                "tool_call_finished", {"worker": "w0", "tool": "http_request", "ok": None}),
+            "w0 · http_request ·")
 
 
 if __name__ == "__main__":
