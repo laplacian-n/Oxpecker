@@ -3972,6 +3972,87 @@ def browser_frame(engagement_id: str, since: int = 0):
     )
 
 
+def _flow_shape(fold: dict) -> dict:
+    """Derive the keys the Flow surface draws from the §4.2 fold.
+
+    The Flow diagram's data shape was ported from the design mock, which named the current wave
+    `wave`, the hypotheses in play `hypotheses`, and the in-flight calls `calls_in_pipeline`; the
+    real fold names them `waves`/`graph_nodes`/`tool_calls_in_flight`, so the diagram drew empty.
+    This is an ADDITIVE adapter — the raw fold keys are left untouched and these are added beside
+    them — so every existing snapshot consumer and test is unaffected, and the diagram fills in from
+    the real stream. Only data the stream actually carries is mapped: the broker gate stations,
+    execution tier, egress channel and the judge pipeline are the §13 gaps and stay absent until
+    those events are emitted, so the diagram degrades to what is true rather than inventing it."""
+    waves = fold.get("waves") or []
+    workers = fold.get("workers") or []
+    inflight = fold.get("tool_calls_in_flight") or []
+    arts = fold.get("artifacts") or []
+
+    running = next((w for w in waves if w.get("status") == "running"), None)
+    by_hyp = {w.get("hypothesis"): w for w in workers}
+    arts_by_worker: dict = {}
+    for a in arts:
+        arts_by_worker[a.get("worker")] = arts_by_worker.get(a.get("worker"), 0) + 1
+    inflight_by_worker: dict = {}
+    for c in inflight:
+        inflight_by_worker.setdefault(c.get("worker"), c)
+        inflight_by_worker[("count", c.get("worker"))] = inflight_by_worker.get(("count", c.get("worker")), 0) + 1
+
+    def _hyp_state(worker: dict | None) -> str:
+        if not worker:
+            return "open"
+        if worker.get("status") == "finished":
+            o = worker.get("outcome")
+            return o if o in ("supported", "refuted") else "refuted" if o == "timeout" else "open"
+        return "claimed"
+
+    out: dict = {}
+
+    if running is not None:
+        exps = running.get("experiments") or []
+        out["wave"] = {
+            "number": running.get("wave"),
+            "dispatched": [{"hypothesis_id": x.get("hypothesis_id"), "method": x.get("method"),
+                            "claimed_by": (by_hyp.get(x.get("hypothesis_id")) or {}).get("worker_id")}
+                           for x in exps],
+        }
+        seen: set = set()
+        hyps = []
+        for x in exps:
+            hid = x.get("hypothesis_id")
+            if hid in seen:
+                continue
+            seen.add(hid)
+            hyps.append({"id": hid, "title": x.get("method") or "",
+                         "state": _hyp_state(by_hyp.get(hid))})
+        if hyps:
+            out["hypotheses"] = hyps
+
+    finished = [{"wave": w.get("wave"), "workers": len(w.get("experiments") or []), "summary": ""}
+                for w in waves if w.get("status") == "ended"]
+    if finished:
+        out["finished_waves"] = finished
+
+    # in-flight calls, as pipeline tokens. The stream says a call is authorised and running (it is
+    # emitted post-broker), so it sits at the exec station; gate/channel need the §13 events.
+    out["calls_in_pipeline"] = [{"call_id": c.get("call_id"), "worker": c.get("worker"),
+                                 "tool": c.get("tool"), "station": "exec", "status": "allowed"}
+                                for c in inflight]
+
+    # enrich the workers the diagram draws, keeping every raw field
+    out["workers"] = [{**w,
+                       "hypothesis_title": w.get("method"),
+                       "artifacts": arts_by_worker.get(w.get("worker_id"), 0),
+                       "calls": inflight_by_worker.get(("count", w.get("worker_id")), 0),
+                       "refusals": 0,
+                       "tool_in_flight": ({"tool": inflight_by_worker[w.get("worker_id")].get("tool")}
+                                          if w.get("worker_id") in inflight_by_worker else None)}
+                      for w in workers]
+
+    out["mode"] = {"tainted": False, "kill_switch": False}
+    return out
+
+
 @app.get("/api/engagements/{engagement_id}/snapshot")
 def engagement_snapshot(engagement_id: str, request: Request, at: int | None = None) -> dict:
     """The §4.2 read-model projection as of sequence `at` (default latest), so a new window does
@@ -3982,8 +4063,10 @@ def engagement_snapshot(engagement_id: str, request: Request, at: int | None = N
     tier = _tiers.engagement_tier(engagement_id)
     log_obj = _engagement_event_log(engagement_id)
     if log_obj is None:
-        return {**_project_events([], at_seq=0, latest_seq=0), "tier": tier}
-    return {**log_obj.snapshot(at_seq=at), "tier": tier}
+        empty = _project_events([], at_seq=0, latest_seq=0)
+        return {**empty, **_flow_shape(empty), "tier": tier}
+    fold = log_obj.snapshot(at_seq=at)
+    return {**fold, **_flow_shape(fold), "tier": tier}
 
 
 async def _engagement_sse(engagement_id: str, after: int, is_disconnected, *, poll: float = 0.1):
