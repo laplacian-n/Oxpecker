@@ -4246,6 +4246,15 @@ def _worker_label(worker: str) -> str:
     return w if re.fullmatch(r"w\d+", w) else "strategist"
 
 
+def _extract_recon_urls(message: str | None) -> list[str]:
+    """The http(s) URLs an operator named in their run message, each stripped of trailing sentence
+    punctuation (a "...:3000." must not keep the period, or the port no longer parses). These carry
+    the port the autonomous RECON seeder needs for a service on a non-standard port, which the
+    host-only engagement scope cannot express."""
+    return [u.rstrip(".,;:!?)]}'\"")
+            for u in re.findall(r"https?://[^\s'\"<>）)]+", message or "")]
+
+
 def _pipeline_event_detail(kind: str, payload: dict) -> str:
     """A one-line, human-readable description of a mirrored event for the chat activity row.
     Structure + a bounded preview only — never a tool's raw output (§4.2)."""
@@ -4326,10 +4335,14 @@ def start_pipeline(session_id: str, req: AutonomousStartRequest):
         try:
             from ..pipeline.autonomous_driver import AutonomousDriver
 
+            # The operator's message often names the target with its port (e.g. a lab app on
+            # http://127.0.0.1:3000). Scope is host-only, so pass these URLs through so the RECON
+            # seeder recons the real surface instead of the bare host at :80/:443.
+            recon_urls = _extract_recon_urls(req.user_message)
             driver = AutonomousDriver(
                 engagement_id=s.engagement_id, profile_name=req.profile, mode=req.mode,
                 session_id=s.session_id, device_id="web-ui", on_event=on_event,
-                stop_event=stop_event, tier=req.tier,
+                stop_event=stop_event, tier=req.tier, recon_urls=recon_urls,
             )
             s.autonomous_driver = driver
             result = driver.run()

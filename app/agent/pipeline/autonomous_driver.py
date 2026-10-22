@@ -93,6 +93,7 @@ class AutonomousDriver:
         consult_timeout_s: float = CONSULT_TIMEOUT_S,
         stop_event: threading.Event | None = None,
         tier: str | None = None,
+        recon_urls: list[str] | None = None,
     ):
         # Checked once per loop iteration (same cadence as the wall-clock/hard-blocker checks) —
         # an explicit "stop this run" request from a caller driving it in a background thread
@@ -124,6 +125,11 @@ class AutonomousDriver:
         self.broker = Broker(engagement_dir=self.engagement_dir, confirm_fn=_deny_all)
         self._pending_operator_note: str | None = None
         self._graph_store_cache = None  # lazily opened only for a graph-tier phase
+        # Explicit target URLs the operator launched against (from the run's message). Scope is
+        # host-only, so a service on a non-standard port (e.g. a lab app on :3000) is reachable but
+        # the deterministic RECON seeder, which recons the bare scope host at :80/:443, would miss
+        # it. These carry the port, so the seeder recons the real surface. See phase_runner.
+        self.recon_urls = list(recon_urls or [])
 
     def _emit(self, event_type: str, **fields) -> None:
         self.on_event({
