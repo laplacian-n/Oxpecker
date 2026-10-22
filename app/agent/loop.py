@@ -88,6 +88,38 @@ LOCAL_BOOKKEEPING_TOOLS = {
 INJECTION_SCAN_EXEMPT_TOOLS = {"security_reference_search"}
 
 
+def _tool_call_preview(tool_name: str, args: dict) -> str:
+    """A short, human-readable one-liner naming what a tool call is about to do — the target of an
+    http_request, the command, the search query, the hypothesis title — for the §4.2
+    tool_call_started event, so a surface can narrate "w1 → GET https://…" without the raw
+    arguments. Bounded and derived from a single known field per tool; it never dumps the whole
+    argument blob (that stays in the audit log), so it carries no more than the method/target the
+    operator needs to follow along. Truncated hard."""
+    a = args if isinstance(args, dict) else {}
+
+    def _clip(s: str, n: int = 80) -> str:
+        s = " ".join(str(s).split())
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    if tool_name in ("http_request", "http_recon", "http_recon_insecure"):
+        method = str(a.get("method") or "GET").upper()
+        return _clip(f"{method} {a.get('url', '')}".strip())
+    if tool_name == "run_command":
+        return _clip(a.get("command") or "")
+    if tool_name in ("knowledge_search", "security_reference_search"):
+        q = a.get("query") or ""
+        return _clip(f'"{q}"' if q else "")
+    if tool_name == "knowledge_fetch":
+        return _clip(a.get("url") or "")
+    if tool_name in ("read_file", "write_file"):
+        return _clip(a.get("path") or "")
+    if tool_name in ("record_hypothesis", "record_finding", "update_hypothesis_status"):
+        return _clip(a.get("title") or a.get("hypothesis_id") or "")
+    if tool_name.startswith("browser_"):
+        return _clip(a.get("url") or a.get("selector") or a.get("text") or "")
+    return ""
+
+
 def _graph_tool_names():
     # Imported lazily so the hypothesis_graph package (and its sqlite schema init) is only touched
     # by sessions that actually enable the graph — keeps import cost off the default path.
@@ -749,17 +781,24 @@ class AgentLoop:
         _arg_digest = hashlib.sha1(call_key[1].encode()).hexdigest()[:12]
         event_emit.emit(self.engagement_id, "tool_call_started", {
             "call_id": _call_id, "worker": _worker, "tool": tool_name,
-            "argument_digest": _arg_digest,
+            "argument_digest": _arg_digest, "preview": _tool_call_preview(tool_name, args),
         })
+        _ok = None
         try:
             if parse_error:
                 raw_result = {"ok": False, "error": f"malformed tool_call arguments: {parse_error}"}
                 scope_decision = "rejected_malformed"
             else:
                 raw_result, scope_decision, confirmed_by = self._dispatch(tool_name, args, message_id=message_id)
+            _ok = bool(raw_result.get("ok", True)) if isinstance(raw_result, dict) else True
         finally:
-            # Finished even on a raised dispatch, so a call never stays "in flight" forever.
-            event_emit.emit(self.engagement_id, "tool_call_finished", {"call_id": _call_id})
+            # Finished even on a raised dispatch, so a call never stays "in flight" forever. Carries
+            # the worker/tool/outcome so the event is self-describing for the chat rail, not just a
+            # bare call_id to correlate. `ok` is None when the dispatch itself raised.
+            event_emit.emit(self.engagement_id, "tool_call_finished", {
+                "call_id": _call_id, "worker": _worker, "tool": tool_name, "ok": _ok,
+                "latency_ms": round((time.monotonic() - exec_start) * 1000),
+            })
         exec_ms = (time.monotonic() - exec_start) * 1000
 
         raw_text = json.dumps(raw_result)

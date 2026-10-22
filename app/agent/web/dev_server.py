@@ -4145,15 +4145,27 @@ def _prepare_engagement_for_pipeline(eng: Engagement) -> None:
         log.info("Could not set model/tier on %r roe.json: %s", eng.engagement_id, e)
 
 
-# The wave-engine structural events (agent/pipeline/wave.py) the autonomous run mirrors into the
-# session chat as activity rows. Structure only — the per-experiment events and anything carrying
-# payload stay with the Flow view; the chat gets the spawn/finish narration the operator asked for.
-_FORWARD_PIPELINE_KINDS = {"wave_started", "worker_spawned", "worker_finished", "wave_ended"}
+# The engagement-stream events (agent/pipeline/wave.py + the AgentLoop's per-call events) the
+# autonomous run mirrors into the session chat as activity rows, so the chat narrates the wave
+# dispatch AND each worker's tool calls in real time. Structure + a bounded preview only — never a
+# tool's raw output, which stays off the fan-out stream (§4.2); the full per-call I/O lives in the
+# Flow view's worker drawer / the audit log.
+_FORWARD_PIPELINE_KINDS = {
+    "wave_started", "worker_spawned", "worker_finished", "wave_ended",
+    "tool_call_started", "tool_call_finished",
+}
+
+
+def _worker_label(worker: str) -> str:
+    """A wave worker is 'w0'..'wN'; anything else (a session id on the strategist/assistant path)
+    is the strategist driving the run, so name it as such rather than printing a raw uuid."""
+    w = str(worker or "")
+    return w if re.fullmatch(r"w\d+", w) else "strategist"
 
 
 def _pipeline_event_detail(kind: str, payload: dict) -> str:
-    """A one-line, human-readable description of a wave/worker event for the chat activity row.
-    Structure only — never the worker's tool output, which stays off the fan-out stream (§4.2)."""
+    """A one-line, human-readable description of a mirrored event for the chat activity row.
+    Structure + a bounded preview only — never a tool's raw output (§4.2)."""
     if kind == "wave_started":
         n = len(payload.get("experiments") or [])
         return f"wave {payload.get('wave', '?')} · {n} worker{'s' if n != 1 else ''}"
@@ -4168,6 +4180,19 @@ def _pipeline_event_detail(kind: str, payload: dict) -> str:
     if kind == "wave_ended":
         n = payload.get("workers", "?")
         return f"wave {payload.get('wave', '?')} complete · {n} worker{'s' if n != 1 else ''}"
+    if kind == "tool_call_started":
+        who = _worker_label(payload.get("worker"))
+        preview = (payload.get("preview") or "").strip()
+        tool = payload.get("tool") or "tool"
+        return f"{who} → {preview}" if preview else f"{who} → {tool}"
+    if kind == "tool_call_finished":
+        who = _worker_label(payload.get("worker"))
+        tool = payload.get("tool") or "tool"
+        ok = payload.get("ok")
+        mark = "✓" if ok else ("✗" if ok is False else "·")
+        latency = payload.get("latency_ms")
+        tail = f" {latency}ms" if isinstance(latency, (int, float)) else ""
+        return f"{who} · {tool} {mark}{tail}"
     return (payload.get("detail") or "").strip()
 
 
