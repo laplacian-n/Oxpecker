@@ -22,7 +22,11 @@ import unittest
 # tool does not break the test while losing the whole registry does.
 MCP_SERVERS = {
     "agent.mcp_tools_server": 3,
-    "agent.oxpecker_control_mcp": 9,
+    # The complete control surface: observe (snapshot, approvals, consults, graph, browser frame)
+    # AND act (chat, steer, launch/stop, approve, answer a consult, park a hypothesis, review a
+    # finding, create an engagement, drive the browser). A floor, so adding a tool is fine; losing
+    # half the surface is not.
+    "agent.oxpecker_control_mcp": 28,
     "agent.dev_mcp_server": 25,
     "agent.security_mcp_server": 8,
 }
