@@ -2135,7 +2135,7 @@ function renderGraphTree(nodes,edges){
 
   const activePath=[...act].map(i=>'H'+i).join(' → ')||'—';
   // Where to look when the tree is too big to fit: the live branch, else the first node.
-  const focusNode=(run&&pos[idOf(run)])||pos[idOf(vis[0])]||{x:0,y:0};
+  const focusNode=(runs[0]&&pos[idOf(runs[0])])||pos[idOf(vis[0])]||{x:0,y:0};
 
   return graphFilterBar()+`
   <div style="padding:8px 20px;font:400 12.5px 'Instrument Sans';color:#7d7d7d;border-bottom:1px solid #1a1a1a;flex:none">Active path: <span style="color:${A70};font-family:'JetBrains Mono',monospace;font-weight:500">${esc(activePath)}</span></div>
