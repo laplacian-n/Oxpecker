@@ -38,7 +38,8 @@ _SYSTEM = (
     "an access-control/IDOR candidate, a form or query parameter is an injection candidate, an "
     "auth token is a candidate for forgery or weak validation. Do NOT pad the list with generic "
     "checks that do not fit this target, and do not repeat hypotheses already listed. Prefer a few "
-    "distinct, high-value ideas. Reply with ONLY a JSON array, no prose:\n"
+    "distinct, high-value ideas. Keep each claim to ONE short sentence — long claims overflow the "
+    "reply and are lost. Reply with ONLY a JSON array, no prose:\n"
     '[{"title": "<short>", "claim": "<the falsifiable claim>", "surface": "<what it targets>", '
     '"impact": <1-5>}].\n'
     "Return an empty array [] if the surface warrants nothing beyond what is already listed."
@@ -147,8 +148,50 @@ class HypothesisProposer:
                     return v
             if obj.get("title") and obj.get("claim"):  # a single hypothesis returned as an object
                 return [obj]
+        # 3. Salvage from a TRUNCATED array: a verbose reasoning model can overflow its token budget
+        # mid-array (no closing ]), so neither 1 nor 2 parses. Recover every complete {...} object it
+        # did finish and drop the partial tail — better four proposals than none.
+        salvaged = [o for o in self._balanced_objects(content)
+                    if isinstance(o, dict) and o.get("title") and o.get("claim")]
+        if salvaged:
+            return salvaged
         log.info("proposer reply had no usable hypotheses; raw reply (truncated): %r", content[:300])
         return []
+
+    @staticmethod
+    def _balanced_objects(text: str) -> list:
+        """Every top-level {...} block in `text` that is itself valid JSON, scanning brace depth and
+        honouring strings/escapes so a brace inside a string value is not miscounted. Used to rescue
+        hypotheses from a reply whose surrounding array never closed."""
+        out: list = []
+        depth = 0
+        start = -1
+        in_str = False
+        esc = False
+        for i, ch in enumerate(text):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        out.append(json.loads(text[start:i + 1]))
+                    except json.JSONDecodeError:
+                        pass
+                    start = -1
+        return out
 
     def _parse(self, content: str, existing_titles: list[str]) -> list[dict]:
         items = self._extract_items(content)

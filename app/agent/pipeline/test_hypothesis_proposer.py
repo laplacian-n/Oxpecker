@@ -111,6 +111,24 @@ class RobustParseTest(unittest.TestCase):
         self.assertEqual([h["title"] for h in out], ["Found on retry"])
         self.assertEqual(prov.calls, 2)  # it actually retried
 
+    def test_salvages_complete_objects_from_a_truncated_array(self):
+        # The live failure: a verbose reasoning model overflows its budget mid-array (no closing ]).
+        # The complete objects before the cut must still be recovered, the partial tail dropped.
+        reply = (
+            '[\n'
+            '  {"title": "Path traversal in favicon", "claim": "favicon endpoint allows ../ file read", "impact": 4},\n'
+            '  {"title": "SSRF via webcal import", "claim": "webcal import fetches an attacker URL"},\n'
+            '  {"title": "Truncated one", "claim": "this object got cut o'
+        )
+        out = HypothesisProposer(_FakeProvider(reply)).propose("nc", [])
+        self.assertEqual([h["title"] for h in out], ["Path traversal in favicon", "SSRF via webcal import"])
+        self.assertEqual(out[0]["origin_type"], "ai_inference")
+
+    def test_a_brace_inside_a_string_does_not_break_salvage(self):
+        reply = '[{"title": "Weird {brace} title", "claim": "payload is }{ literally"}'  # unclosed array
+        out = HypothesisProposer(_FakeProvider(reply)).propose("nc", [])
+        self.assertEqual([h["title"] for h in out], ["Weird {brace} title"])
+
     def test_no_retry_when_the_first_reply_is_good(self):
         prov = _FakeProvider(json.dumps([{"title": "A", "claim": "c"}]))
         HypothesisProposer(prov).propose("t", [])
