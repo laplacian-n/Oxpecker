@@ -53,6 +53,17 @@ KEY_FILENAME = "openrouter_api_key.txt"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
+class ProviderQuotaError(RuntimeError):
+    """The provider refused the call for an out-of-credits (402) or rate-limit (429) reason — a
+    transient, operator-actionable condition (top up / wait), NOT a bug in the run. Raised as its
+    own type so the autonomous driver can PAUSE the run with an actionable message and leave its
+    state resumable, instead of logging it as a crash like any other exception. Carries the HTTP
+    status so the caller can tell 'out of credits' from 'slow down'."""
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 class MissingAPIKeyError(RuntimeError):
     """Raised at construction, with where to put the key — not at the first turn.
 
@@ -256,7 +267,7 @@ class OpenRouterProvider:
                 with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     return _normalise(json.loads(resp.read()))
             except urllib.error.HTTPError as e:
-                raise RuntimeError(_http_error_text(e)) from e
+                _raise_http_error(e)
         return self._stream_response(req)
 
     def _stream_response(self, req):
@@ -272,7 +283,7 @@ class OpenRouterProvider:
         try:
             resp = urllib.request.urlopen(req, timeout=self._timeout)
         except urllib.error.HTTPError as e:
-            raise RuntimeError(_http_error_text(e)) from e
+            _raise_http_error(e)
         try:
             buffer = b""
             while True:
@@ -322,6 +333,16 @@ def _normalise(obj: dict) -> dict:
                 if isinstance(value, str) and value:
                     part["reasoning_content"] = value
     return obj
+
+
+def _raise_http_error(e: urllib.error.HTTPError):
+    """Map an OpenRouter HTTPError to our exception types: a 402 (out of credits) or 429 (rate
+    limit) becomes a ProviderQuotaError the driver can pause on; anything else stays a RuntimeError
+    (a real failure to surface). Always raises."""
+    text = _http_error_text(e)
+    if e.code in (402, 429):
+        raise ProviderQuotaError(text, e.code) from e
+    raise RuntimeError(text) from e
 
 
 def _http_error_text(e: urllib.error.HTTPError) -> str:

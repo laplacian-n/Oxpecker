@@ -40,6 +40,7 @@ from ..engagement.emit import emit as emit_event
 from ..engagement.locks import engagement_lock
 from ..engagement.store import PHASES, EngagementStore
 from ..findings.model import FindingsStore
+from ..llm.openrouter import ProviderQuotaError
 from ..loop import AgentLoop
 from .executor import TASKS_REQUIRING_MODEL
 from .orchestrator import PipelineOrchestrator
@@ -437,6 +438,22 @@ class AutonomousDriver:
         with engagement_lock(self.engagement_id):
             try:
                 return self._run_inner()
+            except ProviderQuotaError as e:
+                # Out of credits / rate-limited — not a bug, an operator-actionable pause. Surface
+                # it as a distinct, non-alarming terminal event (NOT "run crashed") and leave the
+                # graph/phase state exactly where it is: topping up and starting the run again
+                # resumes from here. The run is over for now, but nothing is broken.
+                try:
+                    phase = self.store.get_phase()["current_phase"]
+                except Exception:  # noqa: BLE001
+                    phase = ""
+                reason = ("out of provider credits" if e.status == 402 else "provider rate limit")
+                log.warning("autonomous run paused in phase %s: %s", phase, e)
+                self._emit("run_paused", reason=reason, status=e.status, phase=phase,
+                           detail=f"Run paused in {phase or '?'}: {reason}. "
+                                  f"Resolve it (top up / wait) and start the run again to resume "
+                                  f"— the graph and findings so far are kept.")
+                return AutonomousRunResult("paused", f"{reason}: {e}", [], phase)
             except Exception as e:  # noqa: BLE001 — a crashing phase must surface, never vanish
                 # Without this the exception unwinds out of the background run thread and the run
                 # simply goes silent after the last phase event — "entered ANALYSIS" then nothing.
