@@ -96,3 +96,45 @@ class WaveWorkerAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HypothesisContextTest(unittest.TestCase):
+    """The worker is handed what its hypothesis says, so it does not graph_read_branch just to
+    discover its own assignment (the biggest source of per-worker context re-reading)."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from agent.hypothesis_graph.store import HypothesisGraphStore
+        self.tmp = Path(tempfile.mkdtemp(prefix="wave-ctx-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.eid = "eng-ctx"
+        (self.tmp / self.eid).mkdir()
+        p = patch("agent.pipeline.wave_worker.config.ENGAGEMENTS_ROOT", self.tmp)
+        p.start(); self.addCleanup(p.stop)
+        store = HypothesisGraphStore(self.tmp / self.eid)
+        self.hid = store.create_hypothesis(
+            title="IDOR on track-order", claim="track-order/{id} returns other users' orders",
+            phase_created="ANALYSIS", rationale="an id-bearing endpoint", origin_type="ai_inference",
+            impact=4, confidence_band="medium", confidence_reason="x", surface="/rest/track-order/{id}")
+
+    def test_context_names_the_surface_title_and_claim(self):
+        from agent.pipeline.wave_worker import _hypothesis_context
+        ctx = _hypothesis_context(self.eid, self.hid)
+        self.assertIn("/rest/track-order/{id}", ctx)
+        self.assertIn("IDOR on track-order", ctx)
+        self.assertIn("returns other users' orders", ctx)
+
+    def test_worker_task_is_prefixed_with_the_hypothesis_context(self):
+        record: dict = {}
+        worker = make_agent_loop_worker(self.eid, loop_factory=_factory_for(TaskResult("ok", "done"), record))
+        worker(self.hid, "error-based", threading.Event(), deadline=0.0)
+        task = record["brief"]
+        self.assertIn("IDOR on track-order", task)      # the context is there
+        self.assertIn("Test exactly one hypothesis", task)  # and the original brief still follows
+
+    def test_an_unknown_hypothesis_leaves_the_brief_unchanged(self):
+        from agent.pipeline.wave_worker import _hypothesis_context
+        self.assertEqual(_hypothesis_context(self.eid, "h_does_not_exist"), "")

@@ -394,6 +394,23 @@ class AutonomousDriver:
         refuted = sum(1 for r in results if r.get("verdict") == "refuted")
         self._emit("finding_gate_done", verified=len(results), refuted=refuted)
 
+    def _verify_findings_so_far(self) -> None:
+        """Promote + verify whatever the run has established up to now. Both steps are idempotent,
+        so this runs not only at the VALIDATION->REPORT boundary but also when the run EXITS early
+        (operator stop, wall-clock) — the common case in practice: an operator starts a run, lets it
+        confirm real weaknesses, and stops it to save budget before it reaches REPORT. Without this
+        those findings sat `confirmed_by: model`, never independently verified, purely because the
+        run was stopped a phase too soon. Only runs with the graph/gate step (high tier) do anything
+        here; a flat run has no gate, and an engagement with no verifier is handled inside the gate."""
+        try:
+            phase = self.store.get_phase()["current_phase"]
+        except Exception:  # noqa: BLE001
+            return
+        if not tiers.uses_graph(phase, self.tier):
+            return
+        self._promote_findings()
+        self._run_finding_gate()
+
     def _advance_graph_phase(self, phase: str, reason_prefix: str) -> bool:
         """Advance a graph-mode phase explicitly: its orchestrator check_transition deliberately
         defers (a graph phase has no flat task list to read), so when the runner reports the wave
@@ -463,6 +480,10 @@ class AutonomousDriver:
 
         while True:
             if self.stop_event.is_set():
+                # Verify what the run established before handing control back — a run stopped
+                # mid-ANALYSIS still gets its confirmed findings promoted and independently checked,
+                # instead of being left model-confirmed just because the operator stopped early.
+                self._verify_findings_so_far()
                 self._emit("stopped_by_operator", reason="explicit stop request")
                 return AutonomousRunResult(
                     "stopped_by_operator", "explicit stop request", phases_completed,
@@ -471,6 +492,7 @@ class AutonomousDriver:
 
             if time.monotonic() - start > self.max_wall_clock_s:
                 reason = f"exceeded max_wall_clock_s ({self.max_wall_clock_s}s)"
+                self._verify_findings_so_far()
                 self._emit("blocked", reason=reason)
                 return AutonomousRunResult(
                     "wall_clock_exceeded", reason, phases_completed,
