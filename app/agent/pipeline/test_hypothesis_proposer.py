@@ -17,13 +17,22 @@ from .hypothesis_proposer import HypothesisProposer
 class _FakeProvider:
     """Returns a fixed reply; records the digest it was asked, so a test can assert the surface and
     the 'do not repeat' titles reached the model."""
-    def __init__(self, reply: str):
-        self.reply = reply
-        self.last_user = None
+    def __init__(self, reply, *more_replies):
+        # One reply, or a sequence consumed across calls (so a test can make the first reply junk
+        # and the retry valid). The last reply repeats once the sequence is exhausted.
+        self.replies = [reply, *more_replies]
+        self.calls = 0
+        self.user_messages = []
 
     def chat(self, messages, **kwargs):
-        self.last_user = messages[-1]["content"]
-        return {"choices": [{"message": {"content": self.reply}}]}
+        self.user_messages.append(messages[-1]["content"])
+        r = self.replies[min(self.calls, len(self.replies) - 1)]
+        self.calls += 1
+        return {"choices": [{"message": {"content": r}}]}
+
+    @property
+    def last_user(self):
+        return self.user_messages[-1] if self.user_messages else None
 
 
 class ParseTest(unittest.TestCase):
@@ -70,8 +79,47 @@ class ParseTest(unittest.TestCase):
         prov = _FakeProvider("[]")
         HypothesisProposer(prov).propose("juice.shop", ["/login form"],
                                          existing_titles=["Missing CSP header"])
-        self.assertIn("/login form", prov.last_user)
-        self.assertIn("Missing CSP header", prov.last_user)
+        first = prov.user_messages[0]  # the digest, before any retry reprompt
+        self.assertIn("/login form", first)
+        self.assertIn("Missing CSP header", first)
+
+
+class RobustParseTest(unittest.TestCase):
+    """A reasoning model (DeepSeek V4 live) does not always return a bare array — it wraps it in an
+    object, a code fence, or prose, or spends its whole budget thinking and returns nothing the
+    first time. These are the shapes that made the proposer come back empty against Nextcloud."""
+
+    def test_array_inside_a_code_fence(self):
+        reply = 'Here are the hypotheses:\n```json\n[{"title":"A","claim":"c"}]\n```'
+        out = HypothesisProposer(_FakeProvider(reply)).propose("t", [])
+        self.assertEqual([h["title"] for h in out], ["A"])
+
+    def test_object_wrapping_the_array(self):
+        reply = '{"hypotheses": [{"title":"SSRF","claim":"url param is fetched server-side"}]}'
+        out = HypothesisProposer(_FakeProvider(reply)).propose("t", [])
+        self.assertEqual([h["title"] for h in out], ["SSRF"])
+
+    def test_a_single_hypothesis_object(self):
+        reply = '{"title":"Lonely","claim":"just one idea","impact":4}'
+        out = HypothesisProposer(_FakeProvider(reply)).propose("t", [])
+        self.assertEqual([h["title"] for h in out], ["Lonely"])
+
+    def test_empty_first_reply_then_a_good_retry(self):
+        # The live failure mode: first pass returns empty content; the terse retry yields the array.
+        prov = _FakeProvider("", json.dumps([{"title": "Found on retry", "claim": "c"}]))
+        out = HypothesisProposer(prov).propose("t", [])
+        self.assertEqual([h["title"] for h in out], ["Found on retry"])
+        self.assertEqual(prov.calls, 2)  # it actually retried
+
+    def test_no_retry_when_the_first_reply_is_good(self):
+        prov = _FakeProvider(json.dumps([{"title": "A", "claim": "c"}]))
+        HypothesisProposer(prov).propose("t", [])
+        self.assertEqual(prov.calls, 1)  # a usable first reply is not second-guessed
+
+    def test_still_empty_after_retry_is_fine(self):
+        prov = _FakeProvider("no json", "still no json")
+        self.assertEqual(HypothesisProposer(prov).propose("t", []), [])
+        self.assertEqual(prov.calls, 2)
 
 
 class ConstructsInTheGraphTest(unittest.TestCase):

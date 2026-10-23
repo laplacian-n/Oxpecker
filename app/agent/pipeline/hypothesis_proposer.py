@@ -44,6 +44,17 @@ _SYSTEM = (
     "Return an empty array [] if the surface warrants nothing beyond what is already listed."
 )
 
+# A terse second ask used only when the first reply did not yield a usable array. A reasoning model
+# (DeepSeek V4, o1, R1) sometimes spends its whole budget thinking and returns empty or prose
+# `content`; a short, format-only reprompt with no room for prose usually produces the array. One
+# retry, so a stubborn model costs at most two calls per root, never a loop.
+_RETRY = (
+    "Reply with ONLY the JSON array, nothing before or after it, no reasoning, no code fence:\n"
+    '[{"title": "<short>", "claim": "<falsifiable claim>", "surface": "<what it targets>", '
+    '"impact": <1-5>}]\n'
+    "If you genuinely have no hypothesis to add, reply exactly []."
+)
+
 # impact 1..5 -> the graph's confidence band for a *proposed* (not yet tested) hypothesis. A
 # proposal is a lead, not evidence, so even a high-impact idea is recorded at a modest band; the
 # worker that tests it sets the real verdict/confidence.
@@ -83,28 +94,64 @@ class HypothesisProposer:
         model's chosen hypotheses, deduped against `existing_titles` and capped at max_hypotheses.
         [] when the model proposes nothing usable — a valid outcome, not an error (the deterministic
         seeder has already guaranteed a testable graph)."""
+        messages = [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": self._digest(target, observations, techniques or [],
+                                                     existing_titles or [])},
+        ]
+        content = self._ask(messages)
+        out = self._parse(content, existing_titles or [])
+        if out:
+            return out
+        # The first reply produced nothing usable. Before giving up (proposing nothing IS valid),
+        # try once more with a format-only reprompt — a reasoning model often returns empty/prose
+        # content on the first pass and the terse retry then yields the array.
+        messages += [{"role": "assistant", "content": content or "(no content)"},
+                     {"role": "user", "content": _RETRY}]
+        return self._parse(self._ask(messages), existing_titles or [])
+
+    def _ask(self, messages: list[dict]) -> str:
         resp = self.provider.chat(
-            [{"role": "system", "content": _SYSTEM},
-             {"role": "user", "content": self._digest(target, observations, techniques or [],
-                                                       existing_titles or [])}],
-            # Headroom for a reasoning model to think before the short JSON answer (same reason as
-            # Strategist.decide's 4000) — the array itself is tiny.
-            max_tokens=4000,
+            messages,
+            # Generous headroom: a reasoning model spends output tokens thinking before the short
+            # JSON answer, and the proposer's task (invent plausible attacks) draws longer chains
+            # than the strategist's (pick from a list). Too small and the reply comes back
+            # finish_reason=length with empty content — the "proposed nothing" we saw live.
+            max_tokens=8000,
             temperature=0.2,
         )
-        content = resp["choices"][0]["message"].get("content") or ""
-        return self._parse(content, existing_titles or [])
+        return resp["choices"][0]["message"].get("content") or ""
+
+    def _extract_items(self, content: str) -> list:
+        """Pull the list of hypothesis objects out of a model reply, tolerating the shapes a
+        reasoning model actually emits: a bare array, an array inside a ```json fence``` or prose,
+        an object that wraps the array under some key ({"hypotheses": [...]}), or a single
+        hypothesis object. Returns [] (and logs a truncated raw reply) when nothing usable is found."""
+        # 1. The outermost [...] anywhere in the text — covers a bare array and one in a fence/prose.
+        match = re.search(r"\[.*\]", content, re.DOTALL)
+        if match:
+            try:
+                items = json.loads(match.group(0))
+                if isinstance(items, list):
+                    return items
+            except json.JSONDecodeError:
+                pass
+        # 2. The whole reply as JSON: a wrapper object with a list value, or a single hypothesis.
+        try:
+            obj = json.loads(content.strip().strip("`").strip())
+        except (json.JSONDecodeError, AttributeError):
+            obj = None
+        if isinstance(obj, dict):
+            for v in obj.values():
+                if isinstance(v, list) and all(isinstance(x, dict) for x in v) and v:
+                    return v
+            if obj.get("title") and obj.get("claim"):  # a single hypothesis returned as an object
+                return [obj]
+        log.info("proposer reply had no usable hypotheses; raw reply (truncated): %r", content[:300])
+        return []
 
     def _parse(self, content: str, existing_titles: list[str]) -> list[dict]:
-        match = re.search(r"\[.*\]", content, re.DOTALL)
-        if not match:
-            log.info("proposer reply had no JSON array; proposing nothing")
-            return []
-        try:
-            items = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            log.info("proposer reply was not valid JSON; proposing nothing")
-            return []
+        items = self._extract_items(content)
         seen = {t.strip().lower() for t in existing_titles}
         out: list[dict] = []
         for item in items if isinstance(items, list) else []:
