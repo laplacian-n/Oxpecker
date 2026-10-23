@@ -32,11 +32,15 @@ SCHEMA = {
     "function": {
         "name": "http_recon",
         "description": (
-            "Passively collect HTTP metadata (status, headers, redirect chain, a capped body "
-            "excerpt) from a single in-scope URL. Read-only — issues GET requests only, does "
-            "not attempt exploitation. Every redirect hop is independently scope-checked "
-            "before being followed. verify_cert defaults to True; setting it False requires "
-            "both an RoE action-class allowance and human approval, it is not a normal option."
+            "Passively MAP a surface: collect HTTP metadata (status, headers, redirect chain, a "
+            "capped body excerpt) from a single in-scope URL by following redirects. Read-only "
+            "reconnaissance — NOT for exploitation. Do NOT put an injection/SQLi/XSS payload in "
+            "the URL here: that is active testing, it belongs in http_request (which sends one "
+            "request, does not chase redirects, and is gated as active_web_request). Use http_recon "
+            "to discover endpoints and read a page; use http_request to test them. Every redirect "
+            "hop is independently scope-checked before being followed. verify_cert defaults to "
+            "True; setting it False requires both an RoE action-class allowance and human approval, "
+            "it is not a normal option."
         ),
         "parameters": {
             "type": "object",
