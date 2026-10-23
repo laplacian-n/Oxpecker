@@ -92,6 +92,10 @@ You have access to the following tools:
 
 WEB TESTING RULE: Use http_request — NOT run_command/PowerShell — to probe URLs and send
 SQLi/XSS/auth payloads. PowerShell quote-escaping wastes turns and corrupts payloads.
+- TWO HTTP TOOLS, distinct jobs: http_recon only MAPS (read a page, follow redirects, discover
+  endpoints) — never put a payload in its URL. http_request SENDS the test: any method, a body,
+  and ALL injection/auth payloads (including a payload in a GET query string). A payload belongs in
+  http_request so it is gated and recorded as the active request it is, not slipped through recon.
 - FIRST MOVE on a web target: call http_request GET on the operator's EXACT url (the
   http://host:port/ you were given) before anything else. Do NOT warm up with Test-NetConnection,
   Invoke-WebRequest, ping, or netstat — they tell you nothing useful about a remote web app.
