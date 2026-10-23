@@ -209,12 +209,20 @@ class GraphPhaseRunner:
         if not entry or "*" in entry:
             return 0
         try:
+            from urllib.parse import urlparse
+
             from ..broker.policy import load_policy
             from ..security_tools import http_recon
 
             policy = load_policy(self.d.engagement_dir)
             recon = None
-            for url in (f"https://{entry}/", f"http://{entry}/"):
+            # Try the operator's own target URLs for this host FIRST (they carry the port a service
+            # on a non-standard port — e.g. a lab app on :3000 — actually listens on; scope is
+            # host-only, so the bare-host fallbacks below hit :80/:443 and would miss it), then the
+            # bare host on the default schemes.
+            host_urls = [u for u in getattr(self.d, "recon_urls", [])
+                         if (urlparse(u).hostname or "") == entry]
+            for url in host_urls + [f"https://{entry}/", f"http://{entry}/"]:
                 try:
                     recon = http_recon.run(url, policy)
                 except Exception:  # noqa: BLE001 — scope/DNS/TLS failure: try the next scheme
