@@ -4203,6 +4203,20 @@ def _autonomous_model() -> str | None:
     return None
 
 
+def _default_verifier_for(model: str) -> dict | None:
+    """The default finding-gate verifier option for a run on `model`: the first configured
+    candidate whose family differs from the proposer's, as a roe.json `verifier` dict. None when
+    no candidate is a different family (so the caller leaves findings model-confirmed rather than
+    configuring a same-family verifier the gate would refuse anyway, §2.3)."""
+    from ..pipeline.verifier import model_family
+
+    proposer_family = model_family(model)
+    for cand in _config.AUTONOMOUS_VERIFIER_CANDIDATES:
+        if model_family(cand) != proposer_family:
+            return {"provider": "openrouter", "model": cand}
+    return None
+
+
 def _prepare_engagement_for_pipeline(eng: Engagement) -> None:
     """Make sure the engine files exist for `eng` and name the model + tier the autonomous run
     needs: the OpenRouter model when dev_server is on it (so the agent runs GPU-free), and the
@@ -4222,6 +4236,16 @@ def _prepare_engagement_for_pipeline(eng: Engagement) -> None:
         if not roe.get("tier"):
             roe["tier"] = "high"  # the full autonomous agent is the high-tier wave engine
             changed = True
+        # Give the finding gate a verifier of a different family from the run model (§2.3), so a
+        # high-tier run's findings are independently checked instead of landing merely
+        # model-confirmed. Only when the operator set none explicitly, and only for an OpenRouter
+        # run (the candidates are OpenRouter ids); a same-family candidate is skipped so the
+        # independence invariant holds by construction.
+        if model and not roe.get("verifier"):
+            verifier = _default_verifier_for(model)
+            if verifier:
+                roe["verifier"] = verifier
+                changed = True
         if changed:
             roe_path.write_text(json.dumps(roe, indent=2))
     except (OSError, ValueError) as e:
