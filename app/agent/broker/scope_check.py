@@ -9,6 +9,7 @@ later for the real connection since the TTL can be set to 0).
 """
 from __future__ import annotations
 
+import fnmatch
 import ipaddress
 import socket
 from dataclasses import dataclass
@@ -22,6 +23,49 @@ class ValidationResult:
     validated_ip: str | None
     reason: str
     policy_rule: str
+
+
+def _normalize_path(path: str) -> str:
+    """The path to scope-check: the path component only (query/fragment dropped — scope is about
+    which resource is touched, not its arguments), always leading-slashed and lower-cased for a
+    case-insensitive match. An empty path is the site root `/`."""
+    p = (path or "/").split("?", 1)[0].split("#", 1)[0].strip()
+    if not p.startswith("/"):
+        p = "/" + p
+    return p.rstrip("/").lower() or "/"
+
+
+def _path_matches(path: str, pattern: str) -> bool:
+    """Does `path` match a path-scope `pattern`? A pattern with a glob metacharacter is matched
+    with fnmatch (`/api/*`, `/admin*`); a plain pattern matches the path exactly or as a path
+    *prefix* on a segment boundary (`/api` covers `/api` and `/api/users`, but not `/apidocs`)."""
+    path = _normalize_path(path)
+    pat = _normalize_path(pattern)
+    if any(c in pattern for c in "*?["):
+        # fnmatch on the original (non-rstripped) pattern so a trailing-slash glob still works.
+        return fnmatch.fnmatch(path, _normalize_path(pattern)) or fnmatch.fnmatch(path + "/", pattern.lower())
+    return path == pat or path.startswith(pat + "/")
+
+
+def validate_path(path: str, policy: Policy) -> ValidationResult:
+    """Is `path` in scope for an already host-validated request? Deny patterns win (like the host
+    deny list); then, if `allow_paths` is non-empty, the path must match one or it is out of scope.
+    An empty `allow_paths` allows every path — host-only scope, the default. `validated_ip` is None
+    here: this is a path decision layered on top of validate_target, which supplies the IP."""
+    norm = _normalize_path(path)
+    for pat in getattr(policy, "deny_paths", ()) or ():
+        if _path_matches(norm, pat):
+            return ValidationResult(False, None, f"path {norm!r} is excluded by {pat!r}",
+                                    f"path_scope.deny:{pat}")
+    allow = getattr(policy, "allow_paths", ()) or ()
+    if not allow:
+        return ValidationResult(True, None, "no path restriction", "path_scope.allow:*")
+    for pat in allow:
+        if _path_matches(norm, pat):
+            return ValidationResult(True, None, f"path {norm!r} matches {pat!r}",
+                                    f"path_scope.allow:{pat}")
+    return ValidationResult(False, None, f"path {norm!r} is not within the in-scope paths",
+                            "path_scope.allow")
 
 
 def _matches_any(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, networks) -> str | None:

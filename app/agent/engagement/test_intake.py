@@ -125,3 +125,24 @@ class TestCreateEngagement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPathScopeWritten(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="intake-pathscope-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_path_scope_round_trips_to_the_loaded_policy(self):
+        intake = EngagementIntake(**_base_kwargs(
+            path_scope_allow=["/api/*"], path_scope_deny=["/api/admin"]))
+        create_engagement(intake, self.tmp)
+        loaded = load_policy(self.tmp / "test-eng-1")
+        self.assertEqual(loaded.allow_paths, ("/api/*",))
+        self.assertEqual(loaded.deny_paths, ("/api/admin",))
+
+    def test_no_path_scope_leaves_roe_host_only(self):
+        import json
+        create_engagement(EngagementIntake(**_base_kwargs()), self.tmp)
+        roe = json.loads((self.tmp / "test-eng-1" / "roe.json").read_text())
+        self.assertNotIn("path_scope", roe)  # absent, not an empty object
+        self.assertEqual(load_policy(self.tmp / "test-eng-1").allow_paths, ())

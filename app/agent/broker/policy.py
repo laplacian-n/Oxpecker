@@ -36,6 +36,15 @@ class Policy:
     # every existing keyword construction of Policy keeps working unchanged.
     allow_suffixes: set[str] = field(default_factory=set)
     deny_suffixes: set[str] = field(default_factory=set)
+    # Path-level scope, within the hosts scope.txt already authorises. A bug-bounty brief often
+    # says "only /api/* is in scope" or "do not touch /admin"; scope.txt (host/CIDR/suffix) cannot
+    # express that. These are URL-path patterns (glob or path-prefix — see scope_check._path_matches)
+    # read from roe.json's `path_scope` object. Empty `allow_paths` means every path on an in-scope
+    # host is allowed (the prior behaviour, unchanged); a non-empty one restricts to matches.
+    # `deny_paths` always wins, like the host deny list. Defaulted so existing Policy construction
+    # and every host-only engagement keep working untouched.
+    allow_paths: tuple[str, ...] = ()
+    deny_paths: tuple[str, ...] = ()
     # The program this engagement runs under, when there is one. None is a legal state — every
     # local lab engagement — and defaulting it to a permissive Program would make the absence
     # invisible, so the broker branches on `is None` rather than on field values.
@@ -251,6 +260,13 @@ def load_policy(engagement_dir: Path | None = None) -> Policy:
         (roe_raw + "\x00" + scope_raw + "\x00" + deny_raw).encode("utf-8")
     ).hexdigest()
 
+    # Path-level scope (roe.json `path_scope: {allow: [...], deny: [...]}`). Absent/malformed ->
+    # empty, i.e. host-only scope, the long-standing behaviour. Only str entries are kept, so a
+    # stray non-string cannot become a pattern that matches nothing (or everything).
+    path_scope = roe.get("path_scope") or {}
+    allow_paths = tuple(p for p in (path_scope.get("allow") or []) if isinstance(p, str) and p.strip())
+    deny_paths = tuple(p for p in (path_scope.get("deny") or []) if isinstance(p, str) and p.strip())
+
     return Policy(
         engagement_id=roe.get("engagement_id", "unknown"),
         allowed_action_classes=allowed_action_classes,
@@ -262,4 +278,6 @@ def load_policy(engagement_dir: Path | None = None) -> Policy:
         valid_until=valid_until_ts,
         allow_suffixes=allow_suffixes,
         deny_suffixes=deny_suffixes,
+        allow_paths=allow_paths,
+        deny_paths=deny_paths,
     )
