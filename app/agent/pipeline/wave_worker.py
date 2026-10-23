@@ -31,6 +31,34 @@ def _default_loop_factory(**kwargs):
     return AgentLoop(**kwargs)
 
 
+def _hypothesis_context(engagement_id: str, hypothesis_id: str) -> str:
+    """What the hypothesis the worker is about to test actually says — its ordinal, surface, title
+    and claim — read once from the graph in code (no model turn). The brief otherwise names the
+    hypothesis only by its opaque id (`h_bc193f55127c`), so a worker had to spend graph_read_branch
+    / graph_search turns just to discover what it was assigned; handing it the claim up front is the
+    single biggest cut to that per-worker re-reading. Best-effort: any read failure yields an empty
+    string and the brief is used unchanged, exactly as before this existed."""
+    try:
+        from ..hypothesis_graph.store import HypothesisGraphStore
+
+        h = HypothesisGraphStore(config.ENGAGEMENTS_ROOT / engagement_id).get_hypothesis(hypothesis_id)
+    except Exception:  # noqa: BLE001 — the brief must survive a missing/locked graph
+        return ""
+    ordinal = h.get("ordinal")
+    surface = (h.get("surface") or "").strip()
+    title = (h.get("title") or "").strip()
+    claim = (h.get("claim") or "").strip()
+    lines = [f"You are testing hypothesis H{ordinal}" + (f" on {surface}" if surface else "") + ":"]
+    if title:
+        lines.append(f"  Title: {title}")
+    if claim:
+        lines.append(f"  Claim to prove or refute: {claim}")
+    rationale = (h.get("rationale") or "").strip()
+    if rationale:
+        lines.append(f"  Why it was raised: {rationale}")
+    return "\n".join(lines)
+
+
 def _brief(hypothesis_id: str, method: str) -> str:
     return (
         f"Test exactly one hypothesis with exactly one method, then stop.\n"
@@ -136,7 +164,13 @@ def make_agent_loop_worker(
             kwargs["client"] = client_factory()
         loop = loop_factory(**kwargs)
         try:
-            result = loop.run_task(brief_fn(hypothesis_id, method))
+            # Hand the worker the hypothesis it is testing (title/claim/surface), read once in code,
+            # so it does not spend its first turns on graph_read_branch/graph_search just to learn
+            # what its opaque id refers to. Falls back to the bare brief when the lookup finds
+            # nothing (e.g. the recon root, or a test with an injected brief_fn and no real graph).
+            context = _hypothesis_context(engagement_id, hypothesis_id)
+            brief = brief_fn(hypothesis_id, method)
+            result = loop.run_task(f"{context}\n\n{brief}" if context else brief)
         finally:
             close = getattr(loop, "close", None)
             if callable(close):
