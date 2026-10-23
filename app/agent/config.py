@@ -160,6 +160,20 @@ KNOWLEDGE_RAG_DIR = AGENT_DIR / "knowledge_rag"
 KNOWLEDGE_RAG_INDEX_PATH = KNOWLEDGE_RAG_DIR / "index" / "vectors.npy"
 KNOWLEDGE_RAG_META_PATH = KNOWLEDGE_RAG_DIR / "index" / "meta.jsonl"
 
+# --- Autonomous-run finding verifier (§2.3 independence) ---
+# The finding gate verifies each candidate finding with a model of a DIFFERENT family from the one
+# that proposed it (a model checking its own work agrees with itself). An OpenRouter autonomous run
+# gets a verifier picked from this ordered list: the first candidate whose family differs from the
+# run model. All three are cheap, capable, and from three distinct families, so whatever family the
+# proposer is, one of these is a valid independent verifier. Overridden by an explicit roe.json
+# `verifier`. No verifier (e.g. a local-only run with no cross-family option) leaves findings
+# model-confirmed behind the human-review gate rather than crashing.
+AUTONOMOUS_VERIFIER_CANDIDATES = (
+    "openai/gpt-4o-mini",
+    "anthropic/claude-3.5-haiku",
+    "google/gemini-2.0-flash-001",
+)
+
 # --- Resource-budget manager (research doc, Phase 1 §"Resource management") ---
 RESERVED_OUTPUT_TOKENS = 2048
 SAFETY_MARGIN = 0.10
