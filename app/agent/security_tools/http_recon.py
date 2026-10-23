@@ -124,6 +124,13 @@ def _one_hop(
     if not result.allowed:
         raise PermissionError(f"{host!r} not in scope for hop {url!r}: {result.reason}")
 
+    # Path-level scope, within the in-scope host: a bug-bounty brief may put only some paths in
+    # scope or exclude others (e.g. /admin). Checked per hop, so a redirect into an out-of-scope
+    # path is refused too. No path_scope in roe.json -> allow_paths empty -> every path allowed.
+    path_result = scope_check.validate_path(parsed.path or "/", policy)
+    if not path_result.allowed:
+        raise PermissionError(f"path not in scope for hop {url!r}: {path_result.reason}")
+
     conn = _PinnedConnection(
         result.validated_ip, host, port, parsed.scheme == "https", timeout,
         verify_cert=verify_cert, ca_bundle_path=ca_bundle_path,
