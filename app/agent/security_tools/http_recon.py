@@ -137,7 +137,13 @@ def _one_hop(
     )
     try:
         conn.putrequest("GET", path, skip_host=True)
-        conn.putheader("Host", host)
+        # Include the port in Host when it is non-default for the scheme. Without it, a server on a
+        # non-standard port (a lab app on :8080, :3000) that builds a redirect from the Host header
+        # emits a Location with the port dropped (e.g. Nextcloud 302s / -> http://host/login), and
+        # the next hop then hits :80/:443 and is refused — recon of any app that redirects its root
+        # silently fails. skip_host=True above is what lets us set this explicitly.
+        default_port = 443 if parsed.scheme == "https" else 80
+        conn.putheader("Host", host if port == default_port else f"{host}:{port}")
         conn.putheader("User-Agent", "localai-phase3-http-recon/1.0")
         conn.putheader("Connection", "close")
         conn.endheaders()
