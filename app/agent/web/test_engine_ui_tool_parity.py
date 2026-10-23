@@ -45,13 +45,16 @@ def _schema_names(schemas) -> set:
 KNOWN_MISSING_FROM_UI: set[str] = set()
 
 # UI tools with no engine counterpart under the graph-on configuration, documented so the test is
-# honest about both directions. `http_request` is an engine gap (the engine has no such schema,
-# only the broker classifies it). `record_hypothesis`/`update_hypothesis_status`/`record_note` are
+# honest about both directions. `record_hypothesis`/`update_hypothesis_status`/`record_note` are
 # the in-memory lookalikes the graph tools replace — they disappear from the UI in step 2/3.
 # `browser_navigate`/`browser_click` were UI-only while only dev_server could reach the live
 # browser; the engine now drives it in-process through its own broker (loop.py `_dispatch_browser`),
 # so they are on BOTH sides and no longer belong here.
-KNOWN_UI_ONLY = {"http_request", "record_hypothesis", "update_hypothesis_status", "record_note"}
+# `http_request` used to be here as an engine gap (the UI exposed it, the engine had no such
+# schema — only the broker classified it); the engine now registers the real http_request tool
+# (agent/security_tools/http_request.py), so it is on BOTH sides and this ratchet correctly caught
+# the gap closing.
+KNOWN_UI_ONLY = {"record_hypothesis", "update_hypothesis_status", "record_note"}
 
 
 class EngineUiToolParityTest(unittest.TestCase):

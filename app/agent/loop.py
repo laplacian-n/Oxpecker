@@ -36,7 +36,7 @@ log = logging.getLogger("agent.loop")
 TOOL_SCHEMAS = [run_command.SCHEMA, read_file.SCHEMA, write_file.SCHEMA]
 # All served by the one security_mcp_server.py subprocess — routes _run_tool() there.
 SECURITY_MCP_TOOLS = {
-    "http_recon", "port_discovery",
+    "http_recon", "http_request", "port_discovery",
     "knowledge_search", "knowledge_fetch", "osint_record", "browser_fetch",
     "record_hypothesis", "update_hypothesis_status", "record_finding",
 }
@@ -65,7 +65,8 @@ def _truncate_for_context(text: str, limit: int = MAX_OBSERVATION_CONTENT_CHARS)
 # agent/security_mcp_server.py's own docstring on it), so the generic audit entry below is the
 # *only* audit record it gets — excluding it here would leave every osint_record call unaudited.
 BROKER_MEDIATED_TOOLS = {
-    "http_recon", "port_discovery", "knowledge_search", "knowledge_fetch", "browser_fetch",
+    "http_recon", "http_request", "port_discovery", "knowledge_search", "knowledge_fetch",
+    "browser_fetch",
 }
 # Local engagement-state bookkeeping — no network call, nothing for the broker to gate, routed
 # to the same subprocess as the tools above but dispatched distinctly (see _dispatch()). Found
@@ -276,7 +277,7 @@ class AgentLoop:
                 RECORD_HYPOTHESIS_SCHEMA, UPDATE_HYPOTHESIS_STATUS_SCHEMA,
             )
             from .internet.dispatcher import KNOWLEDGE_FETCH_SCHEMA, KNOWLEDGE_SEARCH_SCHEMA
-            from .security_tools import http_recon, port_discovery
+            from .security_tools import http_recon, http_request, port_discovery
 
             security_mcp_args = [
                 "--session-id", self.session_id, "--device-id", device_id,
@@ -309,7 +310,7 @@ class AgentLoop:
             from .browser.agent_tools import NAVIGATE_SCHEMA as _BROWSER_NAVIGATE_SCHEMA
 
             self.tool_schemas += [
-                http_recon.SCHEMA, port_discovery.SCHEMA,
+                http_recon.SCHEMA, http_request.SCHEMA, port_discovery.SCHEMA,
                 KNOWLEDGE_SEARCH_SCHEMA, KNOWLEDGE_FETCH_SCHEMA,
                 OSINT_RECORD_SCHEMA, BROWSER_FETCH_SCHEMA,
                 # The persistent live browser, driven in-process (see _dispatch_browser). Listing
