@@ -30,7 +30,7 @@ from .findings.model import VALID_CONFIDENCE, VALID_SEVERITIES, VALID_STATUS, Fi
 from .internet import dispatcher as internet_dispatcher
 from .internet.dispatcher import KNOWLEDGE_FETCH_SCHEMA, KNOWLEDGE_SEARCH_SCHEMA
 from .internet.osint import record_out_of_scope
-from .security_tools import http_recon, port_discovery
+from .security_tools import http_recon, http_request, port_discovery
 
 # Defined here (not in agent/browser/service.py, which imports playwright at module level) so
 # `agent/loop.py` can reference this schema to build its tools=[...] list without needing
@@ -217,6 +217,25 @@ def http_recon_tool(url: str, verify_cert: bool = True) -> dict:
     )
     resp = _broker.dispatch(
         req, executor=lambda pol, args: http_recon.run(args["url"], pol, args["verify_cert"])
+    )
+    return resp.to_dict()
+
+
+@server.tool(name="http_request", description=http_request.SCHEMA["function"]["description"])
+def http_request_tool(url: str, method: str = "GET", headers: dict | None = None,
+                      body: str | None = None, verify_cert: bool = True) -> dict:
+    req = ActionRequest(
+        tool="http_request",
+        arguments={"url": url, "method": method, "headers": headers, "body": body,
+                   "verify_cert": verify_cert},
+        session_id=_session_id,
+        device_id=_device_id,
+        engagement_id=_engagement_id,
+    )
+    resp = _broker.dispatch(
+        req, executor=lambda pol, args: http_request.run(
+            args["url"], pol, method=args.get("method", "GET"), headers=args.get("headers"),
+            body=args.get("body"), verify_cert=args.get("verify_cert", True)),
     )
     return resp.to_dict()
 
