@@ -115,10 +115,13 @@ class GraphPhaseRunner:
     """
 
     def __init__(self, driver, *, graph_store, scope_entries, model=None,
-                 wave_engine_factory=None, recon_runner=None):
+                 wave_engine_factory=None, recon_runner=None, hypothesis_proposer=None):
         self.d = driver
         self.graph = graph_store
         self.scope_entries = list(scope_entries)
+        # Injected so the model-driven proposal step is testable with a fake (a .propose() object);
+        # None means "build the real one from the engagement model when a provider is available".
+        self._hypothesis_proposer = hypothesis_proposer
         # The engagement's model (roe.json), translated to the strategist provider and the worker
         # client once, here — so a high-tier engagement on an OpenRouter model runs its wave on
         # OpenRouter (GPU untouched) and a default one runs local, without this class naming a
@@ -148,6 +151,13 @@ class GraphPhaseRunner:
         seeded = 0
         for r in open_roots:
             seeded += self._seed_root_deterministically(r)
+
+        # Then let the model reason over that surface and propose the hypotheses the mechanical
+        # rules cannot — an id-bearing endpoint as an IDOR candidate, a parameter as an injection
+        # candidate — choosing from the attack-technique cards the technique KB surfaces. One
+        # bounded call per root (hypothesis_proposer.py), not a crawl, so it cannot wedge the run.
+        for r in open_roots:
+            self._propose_model_hypotheses(r)
 
         # The model recon pass is a fallback for a target the deterministic rules could not read
         # (seeded nothing). When seeding already produced a surface, skip it: it was observed to
@@ -232,6 +242,72 @@ class GraphPhaseRunner:
         except Exception:  # noqa: BLE001 — deterministic seeding is a best-effort safety net
             return 0
         return 0
+
+    def _get_hypothesis_proposer(self):
+        """The injected proposer, or one built on the engagement's strategist provider. None when no
+        provider is available (a test/local run with no model) — the step is then skipped, leaving
+        the deterministic seed as the graph, exactly as before this step existed."""
+        if self._hypothesis_proposer is not None:
+            return self._hypothesis_proposer
+        from .engine import resolve_wave_clients
+
+        provider, _ = resolve_wave_clients(self.model)
+        if provider is None:
+            return None
+        from .hypothesis_proposer import HypothesisProposer
+
+        self._hypothesis_proposer = HypothesisProposer(provider)
+        return self._hypothesis_proposer
+
+    def _recall_techniques(self, surfaces: list[str]):
+        """Attack-technique cards the engagement's technique KB surfaces for this root's surface —
+        the catalogue (knowledge/claude_red) the proposer chooses from. Best-effort: any KB error
+        yields no cards rather than sinking the proposal."""
+        try:
+            from .. import config
+            from ..notebook.service import _owner_of
+            from ..notebook.technique_kb import TechniqueKB
+
+            kb = TechniqueKB(db_path=config.technique_kb_path_for(_owner_of(self.d.engagement_dir)))
+            query = " ".join(surfaces)[:400]
+            return kb.semantic_recall(query, surface=(surfaces[0] if surfaces else None),
+                                      limit=6, bump=False)
+        except Exception:  # noqa: BLE001 — the KB is an aid, never a dependency of enumeration
+            return []
+
+    def _propose_model_hypotheses(self, root: dict) -> int:
+        """Ask the model to propose hypotheses from the surface recon found under `root`, create the
+        ones it chose, and return how many were created. Best-effort: never raises into enumeration
+        (a proposer/model/store failure just adds nothing, leaving the deterministic seed intact)."""
+        from . import graph_coldstart as cs
+
+        try:
+            proposer = self._get_hypothesis_proposer()
+            if proposer is None:
+                return 0
+            children = [c for c in cs.open_hypotheses_excluding_roots(self.graph)
+                        if c.get("primary_parent_id") == root["hypothesis_id"]]
+            observations = [c.get("surface") or c.get("title") or "" for c in children]
+            observations = [o for o in observations if o]
+            existing_titles = [c.get("title", "") for c in children]
+            target = cs.root_scope_entry(root) or root.get("title") or ""
+            techniques = self._recall_techniques(observations or [target])
+            proposed = proposer.propose(target, observations, techniques, existing_titles)
+        except Exception:  # noqa: BLE001 — the proposal is an enhancement, not a dependency
+            log.info("model hypothesis proposal failed for root %s; keeping the deterministic seed",
+                     root.get("hypothesis_id"), exc_info=True)
+            return 0
+        created = 0
+        for kw in proposed:
+            try:
+                self.graph.create_hypothesis(primary_parent_id=root["hypothesis_id"], **kw)
+                created += 1
+            except Exception:  # noqa: BLE001 — one bad proposal must not stop the rest
+                continue
+        if created:
+            self._announce(f"The strategist proposed {created} hypothesis(es) to test from the "
+                           f"recon surface.")
+        return created
 
     def _default_recon_runner(self):
         # One wave dispatching the per-root recon experiments in parallel (the walkthrough's

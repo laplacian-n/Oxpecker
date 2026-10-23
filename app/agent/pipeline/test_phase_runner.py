@@ -103,6 +103,42 @@ class GraphReconTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertFalse(second.made_progress)
 
+    def test_recon_creates_the_model_proposed_hypotheses(self):
+        # The model-driven proposer runs after deterministic seeding and its chosen hypotheses are
+        # written to the graph under the root — the "let it think and choose" step, pinned with a
+        # fake proposer so no live model is needed.
+        class _FakeProposer:
+            def __init__(self):
+                self.called_with = None
+
+            def propose(self, target, observations, techniques=None, existing_titles=None):
+                self.called_with = (target, observations, existing_titles)
+                return [dict(
+                    title="IDOR on an id endpoint", claim="an id-bearing endpoint leaks other users",
+                    rationale="chosen from the recon surface", impact=4, confidence_band="medium",
+                    confidence_reason="model proposal", phase_created="RECON",
+                    origin_type="ai_inference", surface="/rest/track-order/{id}")]
+
+        proposer = _FakeProposer()
+        runner = GraphPhaseRunner(
+            self.drv, graph_store=self.graph, scope_entries=["a.com"],
+            recon_runner=lambda dispatch: None, hypothesis_proposer=proposer,
+        )
+        runner.produce("RECON", {})
+        titles = {h["title"] for h in self.graph.list_hypotheses()}
+        self.assertIn("IDOR on an id endpoint", titles)
+        self.assertIsNotNone(proposer.called_with)  # the proposer actually ran this phase
+        proposed = [h for h in self.graph.list_hypotheses() if h["title"] == "IDOR on an id endpoint"][0]
+        self.assertEqual(proposed["origin_type"], "ai_inference")
+
+    def test_recon_without_a_proposer_or_model_still_runs(self):
+        # No injected proposer and no model -> _get_hypothesis_proposer returns None, the step is
+        # skipped, and RECON behaves exactly as the deterministic-only path did.
+        runner = GraphPhaseRunner(self.drv, graph_store=self.graph, scope_entries=["a.com"],
+                                  recon_runner=lambda d: None)
+        result = runner.produce("RECON", {})
+        self.assertTrue(result.made_progress)
+
     def test_recon_refuses_to_run_if_roots_drift_from_scope(self):
         # Pre-seed a rogue root the scope does not authorize; produce must fail loudly (invariant 1).
         self.graph.create_hypothesis(
